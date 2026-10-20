@@ -2,7 +2,7 @@ import { writeFile, readFile, mkdir } from 'node:fs/promises'
 import { knowledgeDesignCss } from '../lib/design-tokens.js'
 import { build } from 'esbuild'
 
-const pluginId = '@lemoncat7/dsh-knowledge'
+const pluginId = 'dsh-knowledge'
 
 await build({ entryPoints: ['worklog/index.js'], outfile: 'lib/worklog-runtime.js', bundle: true,
   platform: 'node', format: 'esm', target: 'node22', packages: 'external' })

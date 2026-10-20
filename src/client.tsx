@@ -39,7 +39,7 @@ import {
   type ThemeSnapshotLike,
 } from './theme-bridge.js'
 
-const PLUGIN_ID = '@lemoncat7/dsh-knowledge'
+const PLUGIN_ID = 'dsh-knowledge'
 const STYLE_ID = `${PLUGIN_ID}/client`
 
 type SidebarActionProps = PropsRuntime<'sidebar.footer.action'>
