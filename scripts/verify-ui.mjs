@@ -1,0 +1,492 @@
+// Optional real-browser regression checks. Uses isolated SQLite/files, never a live profile.
+// KNOWLEDGE_PLAYWRIGHT_MODULE=/path/to/playwright-core/index.mjs node scripts/verify-ui.mjs
+import assert from 'node:assert/strict'
+import { createServer } from 'node:http'
+import { mkdtemp, readFile } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+import { pathToFileURL } from 'node:url'
+import { registerKnowledgeWeb } from '../lib/web.js'
+import { registerKnowledgeApi, LOCAL_MANAGEMENT_API_PREFIX } from '../lib/api.js'
+import { LocalKnowledgeProvider } from '../lib/local-provider.js'
+import { knowledgeDesignCss } from '../lib/design-tokens.js'
+
+const { chromium } = await import(process.env.KNOWLEDGE_PLAYWRIGHT_MODULE
+  ? pathToFileURL(process.env.KNOWLEDGE_PLAYWRIGHT_MODULE).href : 'playwright-core')
+const root = await mkdtemp(join(tmpdir(), 'knowledge-ui-regression-'))
+const provider = new LocalKnowledgeProvider(join(root, 'knowledge.sqlite'))
+const routes = []
+const ctx = { webServer: { register(route) { routes.push(route); return () => {} } }, get() {} }
+registerKnowledgeApi(ctx, provider, LOCAL_MANAGEMENT_API_PREFIX, {
+  authMode: 'same-origin',
+  service: { current: () => ({ publicApiEnabled: false, publicApiPrefix: '/knowledge-api/v1' }) },
+})
+registerKnowledgeWeb(ctx, '/knowledge', LOCAL_MANAGEMENT_API_PREFIX, 'same-origin')
+const server = createServer((req, res) => {
+  const route = routes.find(route => req.url.split('?')[0] === route.path || req.url.startsWith(route.path + '/'))
+  if (route) void route.handler(req, res)
+  else if (req.url.startsWith('/knowledge-control/v1/models')) {
+    res.setHeader('content-type', 'application/json')
+    res.end(JSON.stringify({ providers: [] }))
+  } else { res.statusCode = 404; res.end() }
+})
+await new Promise(resolve => server.listen(0, '127.0.0.1', resolve))
+const base = `http://127.0.0.1:${server.address().port}`
+const headers = { 'x-dsh-knowledge-client': 'management-web', 'content-type': 'text/markdown' }
+const noteResponse = await fetch(`${base}${LOCAL_MANAGEMENT_API_PREFIX}/notes/files?name=UI-regression.md`, {
+  method: 'POST', headers, body: '# 页面验证\n\n正文保留检查。\n\n## 标题定位\n\n' + '较长内容用于布局检查。\n\n'.repeat(60),
+})
+assert.equal(noteResponse.status, 201)
+const note = await noteResponse.json()
+const browser = await chromium.launch({ headless: true, args: ['--no-sandbox'] })
+try {
+  await verifyPrivateShareConfirmation(browser)
+  await verifyMaterialParity(browser, root)
+  const page = await browser.newPage({ viewport: { width: 1280, height: 850 } })
+  const errors = []
+  page.on('pageerror', error => errors.push(error.message))
+  await page.goto(`${base}/knowledge/?view=notes&noteId=${note.id}`)
+  await page.locator('.notes-document-title').waitFor({ timeout: 10000 }).catch(async error => {
+    console.error({ errors, body: (await page.locator('body').innerText()).slice(0, 4000) })
+    throw error
+  })
+  await page.locator('.ProseMirror').waitFor()
+  await verifySelectionMaterial(page)
+  // Exercise ordinary motion, not only the accessibility override.
+  await page.emulateMedia({ reducedMotion: 'no-preference' })
+  await page.evaluate(() => { window.resizeEditor = document.querySelector('.ProseMirror') })
+  const resize = page.getByRole('separator', { name: '调整主导航栏宽度' })
+  await resize.focus()
+  await page.keyboard.press('Home')
+  assert.equal(await resize.getAttribute('aria-valuenow'), '190')
+  const handleBox = await resize.boundingBox()
+  await page.mouse.move(handleBox.x + handleBox.width / 2, handleBox.y + 40)
+  await page.mouse.down()
+  await page.mouse.move(handleBox.x + handleBox.width / 2 + 72, handleBox.y + 40, { steps: 12 })
+  await page.mouse.up()
+  assert.equal(await resize.getAttribute('aria-valuenow'), '262')
+  assert.equal(await page.locator('body').evaluate(node => node.classList.contains('is-resizing-columns')), false)
+  assert.equal(await page.locator('.app-shell').evaluate(node => getComputedStyle(node).transitionProperty), 'all')
+  assert.equal(await page.locator('.app-shell').evaluate(node => getComputedStyle(node).transitionDuration), '0s')
+  assert.equal(await page.evaluate(() => window.resizeEditor === document.querySelector('.ProseMirror')), true, 'resize destroyed editor')
+  for (const [width, height, scheme] of [[1280, 850, 'light'], [320, 740, 'light'], [375, 812, 'light'], [768, 1024, 'light'], [1024, 768, 'dark'], [812, 375, 'dark']]) {
+    await page.setViewportSize({ width, height })
+    await page.emulateMedia({ colorScheme: scheme, reducedMotion: 'reduce' })
+    await page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))))
+    assert.ok(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth + 1), 'horizontal page overflow')
+    if (width === 375) assert.equal(await page.locator('.notes-editor-outline').evaluate(node => getComputedStyle(node).backgroundColor), 'rgb(244, 244, 244)', 'mobile outline must occlude the document')
+    const toolbar = page.locator('.notes-document-toolbar')
+    assert.equal(await page.locator('.notes-document-scroll').evaluate(node => getComputedStyle(node).backgroundColor),
+      scheme === 'dark' ? 'rgba(0, 0, 0, 0.08)' : 'rgba(255, 255, 255, 0.12)', 'reading tint must follow the color scheme')
+    assert.deepEqual(await page.locator('.notes-document-scroll').evaluate(node => {
+      const style = getComputedStyle(node)
+      return [style.backdropFilter, style.filter]
+    }), ['blur(24px)', 'none'], 'frost must blur the backdrop, not the document text')
+    assert.equal(await toolbar.evaluate(node => getComputedStyle(node).backgroundColor), 'rgba(0, 0, 0, 0)', 'reading tint must not reach the toolbar')
+    assert.equal(await page.locator('.notes-content.is-document').evaluate(node => getComputedStyle(node).backgroundColor), 'rgba(0, 0, 0, 0)', 'reading tint must not become a document workspace background')
+    for (const selector of ['[data-note-save-state]', '[data-note-save]', '[data-note-outline]', '.notes-document-more > summary']) {
+      const bounds = await toolbar.locator(selector).boundingBox()
+      if (bounds && bounds.x + bounds.width > width) {
+        await page.screenshot({ path: join(root, 'toolbar-overflow.png') })
+      }
+      assert.ok(bounds && bounds.x >= 0 && bounds.x + bounds.width <= width, `${width}: ${selector} clipped ${JSON.stringify(bounds)}`)
+    }
+    assert.equal(await toolbar.locator(':scope > .notes-document-actions > .button').count(), 2, 'secondary actions escaped overflow')
+    const more = toolbar.locator('.notes-document-more > summary')
+    await page.evaluate(() => { window.menuEditor = document.querySelector('.ProseMirror') })
+    await more.click()
+    const popup = toolbar.getByRole('menu')
+    assert.deepEqual(await popup.getByRole('menuitem').allTextContents(), ['查找', '页面历史', '下载', '创建分享', '复制引用', '重命名', '查看已分享'])
+    const popupBounds = await popup.boundingBox()
+    const popupMaterial = await popup.evaluate(node => {
+      const style = getComputedStyle(node)
+      return { background: style.backgroundColor, filter: style.backdropFilter }
+    })
+    assert.equal(popupMaterial.background, width <= 760
+      ? scheme === 'dark' ? 'rgb(29, 38, 40)' : 'rgb(232, 234, 236)'
+      : scheme === 'dark' ? 'rgba(29, 38, 40, 0.98)' : 'rgba(232, 234, 236, 0.98)')
+    assert.equal(popupMaterial.filter === 'none', width <= 760)
+    assert.ok(popupBounds.x >= 0 && popupBounds.x + popupBounds.width <= width + 1 && popupBounds.y + popupBounds.height <= height + 1, `${width}: menu outside viewport`)
+    assert.equal(await popup.getByRole('menuitem').first().evaluate(node => {
+      const bounds = node.getBoundingClientRect()
+      return node.contains(document.elementFromPoint(bounds.x + bounds.width / 2, bounds.y + bounds.height / 2))
+    }), true, `${width}: outline or editor covers the document menu`)
+    await page.screenshot({ path: join(root, `document-menu-${width}-${scheme}.png`) })
+    await page.keyboard.press('End')
+    assert.equal(await page.evaluate(() => document.activeElement.textContent), '查看已分享')
+    await page.keyboard.press('Escape')
+    assert.equal(await more.getAttribute('aria-expanded'), 'false')
+    assert.equal(await page.evaluate(() => window.menuEditor === document.querySelector('.ProseMirror')), true, 'menu rebuilt editor')
+    await page.screenshot({ path: join(root, `notes-${width}-${scheme}.png`) })
+  }
+  await page.setViewportSize({ width: 375, height: 812 })
+  const noteMore = page.locator('.notes-document-more > summary')
+  await noteMore.click()
+  await page.getByRole('menuitem', { name: '重命名', exact: true }).click()
+  await page.getByRole('dialog').waitFor()
+  await page.keyboard.press('Escape')
+  assert.equal(await noteMore.getAttribute('aria-expanded'), 'false')
+  await noteMore.click()
+  await page.locator('.topbar h1').click()
+  assert.equal(await noteMore.getAttribute('aria-expanded'), 'false', 'outside click did not dismiss menu')
+  await page.evaluate(() => { window.originalEditor = document.querySelector('.ProseMirror') })
+  const menu = page.locator('.topbar button[aria-expanded]')
+  await menu.click()
+  await page.locator('.app-sidebar-scrim').click({ position: { x: 350, y: 300 } })
+  assert.equal(await page.evaluate(() => window.originalEditor === document.querySelector('.ProseMirror')), true, 'navigation destroyed the editor')
+  await verifyKnowledgeActions(browser)
+  await verifyKnowledgeTreeOverflow(browser)
+  await verifyRestrainedMotion(page)
+
+  // Exercise the shared select with real form semantics and keyboard focus.
+  await page.evaluate(async () => {
+    const form = document.createElement('form')
+    form.id = 'ui-select-fixture'
+    form.innerHTML = '<label>目标库<select class="select" required name="base"><option value="">请选择</option><option value="a">Alpha</option><option value="b">Beta</option></select></label><button type="reset">重置</button><button type="button">后续操作</button>'
+    document.body.replaceChildren(form)
+    window.changes = 0
+    form.addEventListener('change', () => window.changes++)
+  })
+  const combo = page.getByRole('combobox')
+  await combo.waitFor()
+  await combo.click()
+  await page.keyboard.press('End')
+  await page.keyboard.press('Enter')
+  assert.equal(await page.locator('select').inputValue(), 'b')
+  assert.equal(await page.evaluate(() => window.changes), 1)
+  await page.evaluate(() => { document.querySelector('select').value = 'a' })
+  assert.match(await combo.textContent(), /Alpha/)
+  await combo.click()
+  await page.keyboard.press('Escape')
+  assert.equal(await combo.getAttribute('aria-expanded'), 'false')
+  await page.getByRole('button', { name: '重置', exact: true }).click()
+  assert.equal(await page.locator('select').inputValue(), '')
+  assert.equal(await page.evaluate(() => document.querySelector('form').reportValidity()), false)
+  assert.equal(await combo.getAttribute('aria-invalid'), 'true')
+  await page.evaluate(() => { document.querySelector('select').append(new Option('Gamma', 'g')) })
+  await combo.click()
+  await page.getByRole('option', { name: 'Gamma', exact: true }).click()
+  assert.equal(await page.evaluate(() => new FormData(document.querySelector('form')).get('base')), 'g')
+  await page.evaluate(() => { document.querySelector('select').disabled = true })
+  assert.equal(await combo.isDisabled(), true)
+  await page.evaluate(() => {
+    const inspector = document.createElement('footer')
+    inspector.className = 'note-inspector'
+    inspector.style.width = '570px'
+    inspector.innerHTML = '<label><span>类型</span><select class="note-meta-select"><option>偏好</option></select></label><label class="note-tags-field"><span>标签</span><input value="项目, 工作流, 资料"></label><span class="note-format-hint">Markdown · Ctrl/⌘ S 保存</span>'
+    document.body.append(inspector)
+  })
+  await page.locator('.note-inspector .knowledge-select-trigger').waitFor()
+  assert.equal(await page.locator('.note-inspector label > span').first().evaluate(node => getComputedStyle(node).whiteSpace), 'nowrap')
+  await page.evaluate(async () => {
+    const ui = await import('/knowledge/ui-primitives.js')
+    const { createDialogPresenter } = await import('/knowledge/dialogs.js')
+    const dialogs = createDialogPresenter({ ...ui, showToast() {}, friendlyError: error => error.message })
+    const body = ui.element('form', {}, ui.element('label', {}, '权限范围', ui.element('select', { class: 'select' }, ui.element('option', { value: 'read' }, '只读'))))
+    dialogs.openModal({ title: '测试对话框', body })
+    window.openNestedDialog = () => dialogs.openModal({ title: '子对话框', body: ui.element('p', {}, '子窗口') })
+    window.openDismissFixture = (dirtyForm = false) => dialogs.openModal({ title: '外部关闭测试', body: dirtyForm
+      ? ui.element('form', {}, ui.element('input', { 'aria-label': '测试修改' }))
+      : ui.element('div', {}, ...Array.from({ length: 50 }, () => ui.element('p', {}, '长内容滚动测试'))) })
+  })
+  await page.getByRole('dialog').getByRole('combobox').click()
+  await page.keyboard.press('Escape')
+  assert.equal(await page.getByRole('dialog').count(), 1, 'Escape on listbox should not close dialog')
+  await page.evaluate(() => window.openNestedDialog())
+  await page.keyboard.press('Escape')
+  assert.equal(await page.getByRole('dialog').count(), 1, 'Escape should close only the top dialog')
+  await page.keyboard.press('Escape')
+  assert.equal(await page.getByRole('dialog').count(), 0)
+  await page.evaluate(() => window.openDismissFixture())
+  const bounds = await page.getByRole('dialog').boundingBox()
+  await page.mouse.move(bounds.x + 30, bounds.y + 25); await page.mouse.down()
+  await page.mouse.move(4, 4); await page.mouse.up()
+  assert.equal(await page.getByRole('dialog').count(), 1, 'dragging outward does not dismiss a regular modal')
+  for (const [width, height] of [[1280,850],[375,812],[812,375]]) {
+    await page.setViewportSize({ width, height })
+    const close = page.getByRole('button', { name: '关闭对话框', exact: true })
+    const before = await close.boundingBox()
+    await page.locator('.dialog-body').evaluate(el => { el.scrollTop = el.scrollHeight })
+    const after = await close.boundingBox()
+    assert.ok(Math.abs(before.y - after.y) < 1, 'regular modal close stays visible while scrolling')
+    assert.ok(after.y >= 0 && after.y + after.height <= height)
+  }
+  await page.setViewportSize({ width: 1280, height: 850 })
+  await page.mouse.click(4, 4)
+  assert.equal(await page.getByRole('dialog').count(), 0, 'outside click closes a clean regular modal')
+  await page.evaluate(() => window.openDismissFixture(true))
+  await page.getByLabel('测试修改').fill('保留未保存的内容')
+  await page.mouse.click(4, 4)
+  await page.getByRole('alertdialog').getByRole('button', { name: '继续编辑', exact: true }).click()
+  assert.equal(await page.getByRole('dialog').count(), 1, 'outside click cannot discard a dirty regular form')
+  await page.getByRole('button', { name: '取消', exact: true }).click()
+  await page.getByRole('alertdialog').getByRole('button', { name: '放弃修改', exact: true }).click()
+  assert.equal(await page.getByRole('dialog').count(), 0)
+  assert.deepEqual(errors, [])
+  console.log(JSON.stringify({ result: 'passed', screenshots: root, checks: ['desktop/mobile/tablet portrait and landscape', 'light/dark material parity', 'no horizontal overflow', 'consistent document action groups', 'menu hit targets above outline', 'menu keyboard/outside dismissal/dialog action', 'menu and resize preserve editor', 'pointer and keyboard resize', 'stable hover bounds and shadows', 'static skeleton/reduced motion', 'select keyboard/reset/validation/dynamic options/form data'] }))
+} finally {
+  await browser.close()
+  await new Promise(resolve => server.close(resolve))
+  await provider.close()
+}
+
+async function verifyPrivateShareConfirmation(browser) {
+  const page = await browser.newPage({ viewport: { width: 390, height: 844 } })
+  const requests = []
+  const url = `https://notes.example.com:1443/knowledge-api/v1/shared/share_${'a'.repeat(32)}`
+  await page.route('**/notes/import-share/inspect', async route => {
+    const body = route.request().postDataJSON()
+    requests.push(body)
+    await route.fulfill({ status: body.confirmPrivateShare ? 200 : 409, contentType: 'application/json', body: JSON.stringify(body.confirmPrivateShare
+      ? { url, manifest: { share: { name: '内网笔记', kind: 'document', fileCount: 1, totalSize: 10 }, truncated: false } }
+      : { error: '分享链接解析到私有网络', code: 'PRIVATE_SHARE_CONFIRMATION_REQUIRED', origin: 'https://notes.example.com:1443' }) })
+  })
+  try {
+    await page.goto(`${base}/knowledge/?view=notes`)
+    await page.locator('.notes-content').getByRole('button', { name: '已分享', exact: true }).click()
+    await page.getByRole('button', { name: '从分享导入', exact: true }).click()
+    const input = page.locator('.share-import-form input[type="url"]')
+    await input.fill(url)
+    await page.getByRole('button', { name: '读取分享', exact: true }).click()
+    const allow = page.getByRole('button', { name: '允许本次内网分享并读取', exact: true })
+    await allow.waitFor()
+    assert.equal(requests[0].confirmPrivateShare, false)
+    assert.ok(await page.locator('.share-import-dialog').evaluate(el => el.scrollWidth <= el.clientWidth + 1))
+    await page.screenshot({ path: '/tmp/knowledge-private-share-confirmation.png', fullPage: true })
+    await allow.click()
+    await page.getByText('可以导入', { exact: true }).waitFor()
+    assert.equal(requests[1].confirmPrivateShare, true)
+    await input.fill(url + '/')
+    await page.getByRole('button', { name: '读取分享', exact: true }).click()
+    await allow.waitFor()
+    assert.equal(requests[2].confirmPrivateShare, false, 'editing the URL clears approval')
+  } finally { await page.close() }
+}
+
+async function verifyKnowledgeTreeOverflow(browser) {
+  const documents = []
+  for (const state of ['open', 'resolved', 'complete']) {
+    const title = `${state}-知识目录中的超长文件名称用于验证状态不被遮挡-${'VeryLongUnbrokenFilename'.repeat(6)}`
+    const entry = await provider.create({ group: '测试分组',  knowledgeBaseId: 'default', title, body: '隔离目录布局验证。', type: 'fact', tags: [], scope: { kind: 'global' }, confidence: 1 })
+    if (state !== 'open') await provider.finalize(entry.id, state, '测试确认')
+    documents.push({ id: entry.id, title, state })
+  }
+  const page = await browser.newPage({ reducedMotion: 'reduce' })
+  try {
+    for (const [width, height] of [[1280, 850], [1024, 768], [768, 1024], [375, 812], [812, 375], [320, 740]]) {
+      await page.setViewportSize({ width, height })
+      for (const scheme of ['light', 'dark']) {
+        await page.emulateMedia({ colorScheme: scheme })
+        await page.goto(`${base}/knowledge/?view=entries&knowledgeBaseId=default&documentId=${documents[0].id}`)
+        await page.locator('.note-tree-document').first().waitFor({ state: 'attached' })
+        await page.waitForLoadState('networkidle')
+        const toggle = page.getByRole('button', { name: /知识目录/, exact: false }).first()
+        if (await page.locator('.note-workspace').getAttribute('data-tree-open') !== 'true') await toggle.click()
+        for (const document of documents) {
+          const row = page.locator(`.note-tree-document[data-document-id="${document.id}"]`)
+          await row.evaluate(node => node.scrollIntoView({ block: 'nearest' }))
+          const label = row.locator('strong')
+          assert.equal(await label.getAttribute('title'), document.title, 'hover must expose the original full title')
+          assert.equal(await label.textContent(), document.title, 'truncate visually, never cut the stored title')
+          const measured = await page.waitForFunction(id => {
+            const node = document.querySelector(`.note-tree-document[data-document-id="${id}"]`)
+            if (!node) return false
+            const tree = node.closest('.note-tree').getBoundingClientRect(), row = node.getBoundingClientRect()
+            const label = node.querySelector('strong'), badge = node.querySelector('.badge')
+            const status = badge?.getBoundingClientRect()
+            const result = { fits: row.width > 0 && row.left >= tree.left && row.right <= tree.right + 1, truncated: label.scrollWidth > label.clientWidth, ellipsis: getComputedStyle(label).textOverflow,
+              badgeFits: !status || (status.right <= row.right && status.left >= row.left && badge.scrollWidth <= badge.clientWidth), status: badge?.textContent }
+            return result.fits && result.truncated && result.badgeFits && result.ellipsis === 'ellipsis' ? result : false
+          }, document.id, { timeout: 5000 })
+          const bounds = await measured.jsonValue()
+          await measured.dispose()
+          assert.ok(bounds.fits && bounds.truncated && bounds.badgeFits, `${width} ${scheme}: ${JSON.stringify(bounds)}`)
+          assert.equal(bounds.ellipsis, 'ellipsis')
+          assert.equal(bounds.status, { resolved: '已解决', complete: '已收集完成' }[document.state])
+        }
+        if (width === 375 || width === 1280) await page.screenshot({ path: join(root, `knowledge-tree-${width}-${scheme}.png`) })
+      }
+    }
+    console.log('Knowledge tree: long titles truncate; full title tooltip and status retained across 6 viewports and both themes.')
+  } finally { await page.close() }
+}
+
+async function verifyKnowledgeActions(browser) {
+  const targetBase = await provider.createKnowledgeBase({ name: '移动目标', description: '', defaultTags: [], extractionInstructions: '' })
+  await provider.create({ group: '测试分组',  knowledgeBaseId: 'default', title: '工具栏检查', body: '只使用隔离测试数据。', type: 'procedure', tags: [], scope: { kind: 'global' }, confidence: 1 })
+  const [document] = await provider.listDocuments('default')
+  const page = await browser.newPage({ viewport: { width: 1280, height: 850 }, reducedMotion: 'reduce' })
+  try {
+    const folderResponse = await fetch(`${base}${LOCAL_MANAGEMENT_API_PREFIX}/notes/folders`, {
+      method: 'POST', headers: { ...headers, 'content-type': 'application/json' }, body: JSON.stringify({ name: '拖拽目标' }),
+    })
+    assert.equal(folderResponse.status, 201)
+    const folder = await folderResponse.json()
+    await page.goto(`${base}/knowledge/?view=notes&noteId=${note.id}`)
+    const noteSource = page.locator(`.notes-tree-item[data-note-id="${note.id}"]`)
+    const noteTarget = page.locator(`.notes-tree-item[data-note-id="${folder.id}"]`)
+    await noteSource.waitFor()
+    const folderRegion = page.locator(`.notes-tree-node[data-note-folder="${folder.id}"]`)
+    const notesFeedback = await dragFeedback(page, noteSource, folderRegion, noteSource.locator('.notes-tree-row'), folderRegion)
+    const movedNote = page.waitForResponse(response => response.url().endsWith(`/notes/${note.id}`) && response.request().method() === 'PATCH')
+    await noteSource.dragTo(noteTarget.locator('.notes-tree-row'))
+    assert.equal((await movedNote).status(), 200, 'native notes drag must still move documents')
+    await page.goto(`${base}/knowledge/?view=entries&knowledgeBaseId=default&documentId=${document.id}`)
+    const toolbar = page.locator('.note-editor-toolbar')
+    await toolbar.locator('.notes-document-more').waitFor()
+    for (const scheme of ['dark', 'light']) {
+      await page.emulateMedia({ colorScheme: scheme })
+      assert.equal(await page.locator('.note-editor-scroll').evaluate(node => getComputedStyle(node).backgroundColor),
+        scheme === 'dark' ? 'rgba(0, 0, 0, 0.08)' : 'rgba(255, 255, 255, 0.12)')
+      assert.deepEqual(await page.locator('.note-editor-scroll').evaluate(node => {
+        const style = getComputedStyle(node)
+        return [style.backdropFilter, style.filter]
+      }), ['blur(24px)', 'none'])
+      assert.equal(await toolbar.evaluate(node => getComputedStyle(node).backgroundColor), 'rgba(0, 0, 0, 0)')
+    }
+    for (const width of [1280, 1024, 768, 375, 320]) {
+      await page.setViewportSize({ width, height: 850 })
+      const trigger = toolbar.locator('.notes-document-more > summary')
+      const bounds = await trigger.boundingBox()
+      assert.ok(bounds.x >= 0 && bounds.x + bounds.width <= width, `${width}: knowledge actions clipped`)
+      await trigger.click()
+      assert.deepEqual(await toolbar.getByRole('menuitem').allTextContents(), ['移动到…', '标记结束', '删除文档'])
+      await page.keyboard.press('Escape')
+    }
+    await page.setViewportSize({ width: 1280, height: 850 })
+    const knowledgeSource = page.locator(`.note-tree-document[data-document-id="${document.id}"]`)
+    const knowledgeTarget = page.locator(`.note-tree-group[data-base-id="${targetBase.id}"]`)
+    assert.deepEqual(await dragFeedback(page, knowledgeSource, knowledgeTarget, knowledgeSource, knowledgeTarget), notesFeedback, 'knowledge and notes must share cursor and drag feedback')
+    const moved = page.waitForResponse(response => response.url().endsWith(`/documents/${document.id}/move`) && response.request().method() === 'POST')
+    await knowledgeSource.dragTo(knowledgeTarget.locator('.note-tree-base'))
+    assert.equal((await moved).status(), 200, 'native drag must still move documents')
+  } finally { await page.close() }
+}
+
+async function dragFeedback(page, source, target, cursorNode, highlightNode) {
+  const transfer = await page.evaluateHandle(() => new DataTransfer())
+  const cursor = await cursorNode.evaluate(node => getComputedStyle(node).cursor)
+  await source.dispatchEvent('dragstart', { dataTransfer: transfer })
+  await target.dispatchEvent('dragover', { dataTransfer: transfer })
+  assert.equal(await target.getAttribute('data-drop-target'), 'true')
+  const feedback = await highlightNode.evaluate(node => {
+    const style = getComputedStyle(node, '::after')
+    const label = getComputedStyle(node, '::before')
+    return { background: style.backgroundColor, outline: style.outline, labelBackground: label.backgroundColor, labelFont: label.fontSize }
+  })
+  const opacity = await source.evaluate(node => getComputedStyle(node).opacity)
+  const effect = await transfer.evaluate(value => value.effectAllowed)
+  await source.dispatchEvent('dragend', { dataTransfer: transfer })
+  assert.equal(await target.getAttribute('data-drop-target'), 'false', 'cancel must clear the drop target')
+  assert.equal(await source.getAttribute('data-dragging'), 'false', 'cancel must restore the source')
+  await transfer.dispose()
+  return { ...feedback, opacity, cursor, effect }
+}
+
+async function verifySelectionMaterial(page) {
+  for (const scheme of ['light', 'dark']) {
+    await page.emulateMedia({ colorScheme: scheme })
+    const selection = await page.locator('.ProseMirror p').first().evaluate(node => {
+      node.closest('[contenteditable]').focus()
+      const range = document.createRange(); range.selectNodeContents(node)
+      const selection = window.getSelection(); selection.removeAllRanges(); selection.addRange(range)
+      const style = getComputedStyle(node, '::selection')
+      return { background: style.backgroundColor, color: style.color }
+    })
+    assert.deepEqual(selection, scheme === 'light'
+      ? { background: 'rgb(184, 200, 214)', color: 'rgb(23, 33, 43)' }
+      : { background: 'rgb(69, 91, 104)', color: 'rgb(255, 255, 255)' })
+    const luminance = rgb => rgb.match(/\d+/g).map(Number).map(value => value / 255).map(value => value <= .04045 ? value / 12.92 : ((value + .055) / 1.055) ** 2.4).reduce((sum, value, i) => sum + value * [.2126, .7152, .0722][i], 0)
+    const lights = [luminance(selection.background), luminance(selection.color)].sort((a, b) => b - a)
+    assert.ok((lights[0] + .05) / (lights[1] + .05) >= 4.5, 'selected text must remain legible')
+    await page.screenshot({ path: join(root, `selection-${scheme}.png`) })
+    await page.evaluate(() => window.getSelection().removeAllRanges())
+  }
+}
+
+async function verifyRestrainedMotion(page) {
+  await page.setViewportSize({ width: 1280, height: 850 })
+  await page.emulateMedia({ reducedMotion: 'no-preference' })
+  await page.evaluate(() => {
+    document.body.innerHTML = `<main style="padding:30px;display:grid;gap:12px">
+      <button class="button">操作</button><article class="base-card">知识库</article>
+      <article class="knowledge-card">知识卡片</article><article class="metric">统计</article>
+      <button class="note-tree-document" aria-current="page">知识文档</button>
+      <div class="notes-tree-item" data-selected="true"><button class="notes-tree-row">笔记</button><div class="notes-row-actions"><button class="button tiny">下载</button></div></div>
+      <div class="loading-skeleton"><span class="skeleton-phase">正在加载</span><div class="skeleton-line skeleton-title"></div><div class="skeleton-block"></div></div>
+      <div class="route-progress"><span style="--route-progress:.4"></span></div>
+      </main>`
+  })
+  for (const scheme of ['light', 'dark']) {
+    await page.emulateMedia({ colorScheme: scheme })
+    for (const selector of ['.button', '.base-card', '.knowledge-card', '.metric', '.note-tree-document', '.notes-tree-item']) {
+      const node = page.locator(selector).first()
+      await page.mouse.move(0, 0)
+      // Settle palette transitions before comparing stationary hover geometry/shadow.
+      await node.evaluate(async node => { await Promise.all(node.getAnimations().map(a => a.finished.catch(() => {}))) })
+      const before = await node.boundingBox()
+      const shadow = await node.evaluate(node => getComputedStyle(node).boxShadow)
+      await node.hover()
+      await page.waitForTimeout(200)
+      assert.deepEqual(await node.boundingBox(), before, `${scheme}: ${selector} moves on hover`)
+      assert.equal(await node.evaluate(node => getComputedStyle(node).boxShadow), shadow, `${selector} grows a shadow`)
+    }
+  }
+  await page.locator('.notes-tree-row').focus()
+  assert.equal(await page.locator('.notes-row-actions').evaluate(node => getComputedStyle(node).pointerEvents), 'auto', 'row actions must work with keyboard focus')
+  assert.equal(await page.locator('.skeleton-line').evaluate(node => getComputedStyle(node, '::after').content), 'none')
+  assert.equal(await page.locator('.skeleton-block').evaluate(node => getComputedStyle(node, '::after').animationName), 'none')
+  assert.equal(await page.locator('.route-progress span').evaluate(node => getComputedStyle(node).transitionProperty), 'transform')
+  await page.emulateMedia({ reducedMotion: 'reduce' })
+  assert.equal(await page.locator('.skeleton-phase').evaluate(node => getComputedStyle(node, '::before').animationName), 'none')
+}
+
+async function verifyMaterialParity(browser, outputDirectory) {
+  const [clientCss, activityCss, workspaceCss] = await Promise.all([
+    readFile(new URL('../src/client.css', import.meta.url), 'utf8'),
+    readFile(new URL('../src/knowledge-activity.css', import.meta.url), 'utf8'),
+    readFile(new URL('../web/styles.css', import.meta.url), 'utf8'),
+  ])
+  const page = await browser.newPage({ viewport: { width: 1100, height: 760 } })
+  try {
+    await page.emulateMedia({ reducedMotion: 'reduce' })
+    await page.setContent(`<style>${knowledgeDesignCss('.dsh-knowledge-activity-panel', 'body[data-ds-dark-theme] .dsh-knowledge-activity-panel', false)}${clientCss}${activityCss}
+      body{margin:0;padding:24px;background:#e6e8ea}.comparison{height:690px;display:grid;grid-template-columns:1fr 1fr;gap:24px}iframe{width:100%;height:100%;border:0}
+      </style><div class="comparison"><section class="dsh-knowledge-activity-panel">
+      <header class="dsh-knowledge-activity-header">会话知识库</header><nav class="dsh-knowledge-activity-tabs"><button class="is-active">知识文档</button><button>笔记文档</button></nav>
+      <div class="dsh-knowledge-activity-browser"><form class="dsh-knowledge-activity-search"><input placeholder="搜索已挂载知识…"></form><div class="dsh-knowledge-activity-list-heading"><strong>项目资料</strong></div><button class="dsh-knowledge-activity-row">右栏 · 中性玻璃材质</button></div>
+      </section><iframe></iframe></div><section class="dsh-knowledge-workspace"><header class="dsh-knowledge-workspace-header">知识库</header></section>`)
+    const frame = await (await page.locator('iframe').elementHandle()).contentFrame()
+    await frame.setContent(`<html data-dsh-embed-mode="embedded"><head><style>${knowledgeDesignCss()}${workspaceCss}</style></head><body><main class="main" style="margin:0;width:100%;height:690px"><header class="topbar">完整工作区</header><div style="padding:16px"><input class="input" placeholder="搜索文档…"><p>完整工作区 · 中性玻璃材质</p></div></main></body></html>`)
+    const material = node => {
+      const css = getComputedStyle(node)
+      return { background: css.backgroundColor, filter: css.backdropFilter, color: css.color }
+    }
+    for (const scheme of ['light', 'dark']) {
+      await page.evaluate(scheme => {
+        document.body.toggleAttribute('data-ds-dark-theme', scheme === 'dark')
+        document.body.style.background = scheme === 'dark' ? '#182022' : '#e6e8ea'
+      }, scheme)
+      await frame.evaluate(scheme => { document.documentElement.dataset.colorScheme = scheme }, scheme)
+      await frame.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))))
+      const activity = await page.locator('.dsh-knowledge-activity-panel').evaluate(material)
+      const header = await page.locator('.dsh-knowledge-workspace-header').evaluate(material)
+      assert.equal(header.background, scheme === 'light' ? 'rgba(255, 255, 255, 0.16)' : 'rgba(25, 33, 35, 0.16)', `${scheme}: header keeps the same light tint opacity in both themes`)
+      assert.equal(header.filter, 'saturate(1.22) contrast(1.03) blur(32px)', `${scheme}: header matches SSH chrome frost without gray desaturation`)
+      const workspace = await frame.locator('.main').evaluate(material)
+      assert.equal(activity.filter, workspace.filter, `${scheme}: pane frost must stay consistent`)
+      assert.equal(workspace.filter, header.filter, `${scheme}: panes and header use the same SSH-aligned frost`)
+      assert.equal(activity.color, workspace.color, `${scheme}: pane text must stay consistent`)
+      assert.equal(activity.background, scheme === 'light' ? 'rgba(255, 255, 255, 0.14)' : 'rgba(29, 36, 38, 0.24)')
+      assert.equal(workspace.background, scheme === 'light' ? 'rgba(255, 255, 255, 0.08)' : 'rgba(16, 23, 25, 0.18)', 'sidebar tint must not change workspace material')
+      assert.equal(await page.locator('.dsh-knowledge-activity-header').evaluate(node => getComputedStyle(node).backgroundColor), 'rgba(0, 0, 0, 0)')
+      assert.deepEqual(await page.locator('.dsh-knowledge-activity-tabs').evaluate(node => {
+        const style = getComputedStyle(node)
+        return { radius: style.borderRadius, filter: style.backdropFilter }
+      }), { radius: '14px', filter: 'none' }, 'tabs use an inset track, not another frosted pane')
+      const control = await page.locator('.dsh-knowledge-activity-search').evaluate(node => getComputedStyle(node).backgroundColor)
+      assert.equal(control, await frame.locator('.input').evaluate(node => getComputedStyle(node).backgroundColor))
+      await page.screenshot({ path: join(outputDirectory, `material-${scheme}.png`) })
+    }
+  } finally { await page.close() }
+}

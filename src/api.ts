@@ -1,0 +1,1162 @@
+import type { IncomingMessage, ServerResponse } from 'node:http'
+import {
+  DEFAULT_KNOWLEDGE_BASE_ID, isKnowledgeType, normalizeDraft, normalizeKnowledgeBaseDraft,
+  normalizeKnowledgeMountDraft, type CandidateProposal, type KnowledgeBaseDraft, type KnowledgeDraft,
+  type ApiTokenRecord, type CandidateChange, type ExtractionJobCompletion, type KnowledgeBasePatch, type KnowledgeMountDraft, type ReviewDecision, type TokenPermission,
+} from './domain.js'
+import { LocalKnowledgeProvider } from './local-provider.js'
+import { normalizeFinalizationChange } from './document-lifecycle.js'
+import { normalizeDocumentGroup } from './document-groups.js'
+import type { RuntimeContextLike } from './runtime.js'
+import { isNoteId, type NoteReference, type NoteListRequest } from './notes/domain.js'
+import { renderNoteSharePage } from './notes/share-page.js'
+import { createNoteShareManifest, importNoteShare, inspectNoteShareUrl, type NoteShareRequestPolicy } from './notes/share-import.js'
+
+const MAX_BODY_BYTES = 1_048_576
+const MAX_NOTE_BODY_BYTES = 64 * 1024 * 1024
+const MAX_SHARED_NOTE_PREVIEW_BYTES = 512 * 1024
+export const LOCAL_MANAGEMENT_API_PREFIX = '/knowledge-local/v1'
+
+export interface KnowledgeApiOptions {
+  worklog?: (method: string, path: string, data: Record<string, unknown>, query: URLSearchParams) => Promise<unknown>
+  shareRequestPolicy?: () => NoteShareRequestPolicy
+  authMode?: 'bearer' | 'same-origin'
+  service?: {
+    current(): { publicApiEnabled: boolean; publicApiPrefix: string; writebackProvider?: string; writebackModel?: string }
+    update(patch: { publicApiEnabled?: boolean; writebackProvider?: string | null; writebackModel?: string | null }): Promise<{ publicApiEnabled: boolean; publicApiPrefix: string; writebackProvider?: string; writebackModel?: string }>
+  }
+}
+
+export function registerKnowledgeApi(
+  ctx: RuntimeContextLike,
+  provider: LocalKnowledgeProvider,
+  prefix: string,
+  options: KnowledgeApiOptions = {},
+): () => void {
+  const webServer = ctx.webServer ?? ctx.get('webServer') as RuntimeContextLike['webServer']
+  if (webServer === undefined) throw new Error('exposeApi requires the DSH webServer service')
+  return webServer.register({
+    kind: 'prefix',
+    path: prefix,
+    handler: async (req, res) => {
+      try {
+        await dispatch(provider, prefix, options, req, res)
+      } catch (error) {
+        sendError(res, error)
+      }
+    },
+  })
+}
+
+async function dispatch(
+  provider: LocalKnowledgeProvider,
+  prefix: string,
+  options: KnowledgeApiOptions,
+  req: IncomingMessage,
+  res: ServerResponse,
+): Promise<void> {
+  const url = new URL(req.url ?? '/', 'http://knowledge.local')
+  const relative = url.pathname.slice(prefix.length).replace(/^\/+|\/+$/g, '')
+  let segments: string[]
+  try {
+    segments = relative.length === 0 ? [] : relative.split('/').map(decodeURIComponent)
+  } catch {
+    throw httpError(400, 'knowledge API path contains invalid encoding')
+  }
+  const method = req.method ?? 'GET'
+
+  if (method === 'GET' && segments[0] === 'health') {
+    return sendJson(res, 200, { ok: true, service: 'dsh-knowledge', schemaVersion: 15 })
+  }
+
+  if (segments[0] === 'shared') {
+    if (method !== 'GET') throw httpError(405, 'shared notes are read-only')
+    const token = segments[1]
+    if (token === undefined) throw httpError(404, 'shared note was not found')
+    const share = provider.notes.getShareByToken(token)
+    if (share === undefined) throw httpError(404, 'shared note was not found or is no longer available')
+    if (segments[2] === 'content' && segments.length === 3) {
+      const requestedId = url.searchParams.get('noteId') ?? share.noteId
+      if (!isNoteId(requestedId) || !provider.notes.isWithin(share.noteId, requestedId)) throw httpError(404, 'shared note content was not found')
+      const note = await provider.notes.read(requestedId)
+      return sendOpaqueFile(res, note.node.name, note.node.mediaType ?? 'application/octet-stream', note.content, url.searchParams.get('download') === '1')
+    }
+    if (segments[2] === 'manifest' && segments.length === 3) {
+      const sharedNodes = share.node.kind === 'folder' ? provider.notes.listSharedSubtree(share.noteId, 501) : [share.node]
+      const truncated = sharedNodes.length > 500
+      return sendJson(res, 200, createNoteShareManifest(share, sharedNodes.slice(0, 500), truncated))
+    }
+    if (segments.length !== 2) throw httpError(404, 'shared note route was not found')
+    const sharedNodes = share.node.kind === 'folder' ? provider.notes.listSharedSubtree(share.noteId, 501) : [share.node]
+    const listTruncated = sharedNodes.length > 500
+    const nodes = sharedNodes.slice(0, 500)
+    const requestedId = url.searchParams.get('note')
+    let selectedNode = share.node.kind === 'folder' ? undefined : share.node
+    if (requestedId !== null) {
+      if (!isNoteId(requestedId) || !provider.notes.isWithin(share.noteId, requestedId)) throw httpError(404, 'shared note content was not found')
+      const requested = provider.notes.get(requestedId)
+      if (requested === undefined || requested.kind === 'folder') throw httpError(404, 'shared note content was not found')
+      selectedNode = requested
+    }
+    let selectedText: string | undefined
+    let contentTruncated = false
+    if (selectedNode?.editable) {
+      const preview = await provider.notes.readPreview(selectedNode.id, MAX_SHARED_NOTE_PREVIEW_BYTES)
+      selectedText = preview.content.toString('utf8')
+      contentTruncated = preview.truncated
+    }
+    return sendHtml(res, 200, renderNoteSharePage({
+      apiPrefix: prefix,
+      share,
+      nodes,
+      ...selectedNode === undefined ? {} : { selectedNode },
+      ...selectedText === undefined ? {} : { selectedText },
+      contentTruncated,
+      listTruncated,
+    }))
+  }
+
+  const actor = options.authMode === 'same-origin' ? authenticateSameOrigin(req) : authenticateBearer(provider, req)
+
+  if (segments[0] === 'worklog') {
+    if (!['GET', 'POST'].includes(method) || segments.length !== 2) throw httpError(404, '日报接口不存在')
+    requirePermission(actor.permissions, method === 'GET' ? 'read' : segments[1] === 'settings' || segments[1] === 'archive' ? 'admin' : 'write')
+    if (!options.worklog) throw httpError(503, '中央日报服务尚未就绪')
+    const result = await options.worklog(method, `/${segments[1]}`, method === 'POST' ? await readObject(req) : {}, url.searchParams)
+    return sendJson(res, 200, segments[1] === 'state' && method === 'GET' ? { ...(result as Record<string, unknown>), canManage: actor.permissions.includes('admin') } : result)
+  }
+
+  if (segments[0] === 'notes') {
+    if (method === 'GET' && segments.length === 1) {
+      requirePermission(actor.permissions, 'read')
+      const query = url.searchParams.get('q')
+      const parentId = url.searchParams.get('parentId')
+      const kind = url.searchParams.get('kind')
+      if (kind !== null && kind !== 'document' && kind !== 'folder' && kind !== 'file') throw httpError(400, 'invalid note kind')
+      const request: NoteListRequest = {
+        ...query === null ? {} : { query },
+        ...query === null ? { parentId } : {},
+        limit: integerParam(url, 'limit', 200, 1, 500),
+        ...kind === null ? {} : { kind },
+        ...url.searchParams.get('recursive') === '1' ? { recursive: true } : {},
+      }
+      return sendJson(res, 200, url.searchParams.get('paged') === '1'
+        ? provider.notes.listPage(request, url.searchParams.get('cursor') || undefined)
+        : provider.notes.list(request))
+    }
+    if (method === 'POST' && segments[1] === 'folders' && segments.length === 2) {
+      requirePermission(actor.permissions, 'write')
+      const body = await readObject(req)
+      return sendJson(res, 201, await provider.notes.createFolder(requiredString(body.name, 'name'), nullableString(body.parentId, 'parentId')))
+    }
+    if (method === 'POST' && segments[1] === 'documents' && segments.length === 2) {
+      requirePermission(actor.permissions, 'write')
+      const body = await readObject(req)
+      return sendJson(res, 201, await provider.notes.createDocument(
+        requiredString(body.name, 'name'),
+        nullableString(body.parentId, 'parentId'),
+        typeof body.content === 'string' ? body.content : '',
+      ))
+    }
+    if (method === 'POST' && segments[1] === 'files' && segments.length === 2) {
+      requirePermission(actor.permissions, 'write')
+      const name = url.searchParams.get('name') ?? ''
+      const parentId = url.searchParams.get('parentId')
+      const mediaType = firstHeader(req.headers['content-type']) ?? 'application/octet-stream'
+      const content = await readBinary(req, MAX_NOTE_BODY_BYTES)
+      return sendJson(res, 201, await provider.notes.upload({ name, parentId, mediaType, content }))
+    }
+    if (method === 'GET' && segments[1] === 'shares' && segments.length === 2) {
+      requirePermission(actor.permissions, 'admin')
+      return sendJson(res, 200, provider.notes.listShares())
+    }
+    if (method === 'POST' && segments[1] === 'import-share' && segments[2] === 'inspect' && segments.length === 3) {
+      requirePermission(actor.permissions, 'read')
+      const body = await readObject(req)
+      const policy = { ...options.shareRequestPolicy?.() }
+      if (body.confirmPrivateShare === true) {
+        requirePermission(actor.permissions, 'admin')
+        policy.confirmedPrivateShareUrl = requiredString(body.url, 'url')
+      }
+      return sendJson(res, 200, await inspectNoteShareUrl(requiredString(body.url, 'url'), provider.notes, policy))
+    }
+    if (method === 'POST' && segments[1] === 'import-share' && segments.length === 2) {
+      requirePermission(actor.permissions, 'write')
+      const body = await readObject(req)
+      const policy = { ...options.shareRequestPolicy?.() }
+      if (body.confirmPrivateShare === true) {
+        requirePermission(actor.permissions, 'admin')
+        policy.confirmedPrivateShareUrl = requiredString(body.url, 'url')
+      }
+      return sendJson(res, 201, await importNoteShare(
+        provider.notes,
+        requiredString(body.url, 'url'),
+        nullableString(body.parentId, 'parentId'),
+        policy,
+      ))
+    }
+    const id = segments[1]
+    if (id !== undefined && method === 'GET' && segments.length === 2) {
+      requirePermission(actor.permissions, 'read')
+      const node = provider.notes.get(id)
+      if (node === undefined) throw httpError(404, `note node "${id}" was not found`)
+      return sendJson(res, 200, node)
+    }
+    if (id !== undefined && method === 'GET' && segments[2] === 'content' && segments.length === 3) {
+      requirePermission(actor.permissions, 'read')
+      const note = await provider.notes.read(id)
+      return sendOpaqueFile(res, note.node.name, note.node.mediaType ?? 'application/octet-stream', note.content, url.searchParams.get('download') === '1')
+    }
+    if (id !== undefined && method === 'PUT' && segments[2] === 'content' && segments.length === 3) {
+      requirePermission(actor.permissions, 'write')
+      const expectedVersion = url.searchParams.has('expectedVersion') ? integerParam(url, 'expectedVersion', 1, 1, Number.MAX_SAFE_INTEGER) : undefined
+      return sendJson(res, 200, await provider.notes.updateContent(id, await readBinary(req, MAX_NOTE_BODY_BYTES), expectedVersion))
+    }
+    if (id !== undefined && method === 'GET' && segments[2] === 'versions' && segments.length === 3) {
+      requirePermission(actor.permissions, 'read')
+      return sendJson(res, 200, provider.notes.listVersions(id, integerParam(url, 'limit', 100, 1, 200)))
+    }
+    if (id !== undefined && method === 'GET' && segments[2] === 'versions' && segments[3] !== undefined && segments[4] === 'content' && segments.length === 5) {
+      requirePermission(actor.permissions, 'read')
+      const historical = await provider.notes.readVersion(id, pathInteger(segments[3], 'version'))
+      return sendOpaqueFile(res, historical.version.name, historical.version.mediaType ?? 'application/octet-stream', historical.content, false)
+    }
+    if (id !== undefined && method === 'POST' && segments[2] === 'versions' && segments[3] !== undefined && segments[4] === 'restore' && segments.length === 5) {
+      requirePermission(actor.permissions, 'write')
+      const body = await readObject(req)
+      return sendJson(res, 200, await provider.notes.restoreVersion(
+        id,
+        pathInteger(segments[3], 'version'),
+        Object.hasOwn(body, 'expectedVersion') ? boundedInteger(body.expectedVersion, 'expectedVersion', 1, 1, Number.MAX_SAFE_INTEGER) : undefined,
+      ))
+    }
+    if (id !== undefined && method === 'GET' && segments[2] === 'references' && segments.length === 3) {
+      requirePermission(actor.permissions, 'read')
+      return sendJson(res, 200, await noteReferencesForSubtree(provider, id))
+    }
+    if (id !== undefined && method === 'POST' && segments[2] === 'share' && segments.length === 3) {
+      requirePermission(actor.permissions, 'admin')
+      return sendJson(res, 201, provider.notes.createShare(id))
+    }
+    if (id !== undefined && method === 'DELETE' && segments[2] === 'share' && segments.length === 3) {
+      requirePermission(actor.permissions, 'admin')
+      if (!provider.notes.deleteShare(id)) throw httpError(404, `note share for "${id}" was not found`)
+      return sendJson(res, 204, undefined)
+    }
+    if (id !== undefined && method === 'PATCH' && segments.length === 2) {
+      requirePermission(actor.permissions, 'write')
+      const body = await readObject(req)
+      let node = provider.notes.get(id)
+      if (node === undefined) throw httpError(404, `note node "${id}" was not found`)
+      if (body.expectedName !== undefined && requiredString(body.expectedName, 'expectedName') !== node.name) throw httpError(409, '笔记标题已被修改，请重新查看最新标题后再修改')
+      if (Object.hasOwn(body, 'name')) node = provider.notes.rename(id, requiredString(body.name, 'name'))
+      if (Object.hasOwn(body, 'parentId')) node = provider.notes.move(id, nullableString(body.parentId, 'parentId'))
+      return sendJson(res, 200, node)
+    }
+    if (id !== undefined && method === 'POST' && segments[2] === 'copy' && segments.length === 3) {
+      requirePermission(actor.permissions, 'write')
+      const body = await readObject(req)
+      return sendJson(res, 201, await provider.notes.copy(
+        id,
+        Object.hasOwn(body, 'parentId') ? nullableString(body.parentId, 'parentId') : undefined,
+        Object.hasOwn(body, 'name') ? requiredString(body.name, 'name') : undefined,
+      ))
+    }
+    if (id !== undefined && method === 'DELETE' && segments.length === 2) {
+      requirePermission(actor.permissions, 'admin')
+      const noteIds = provider.notes.subtree(id).filter(node => node.kind !== 'folder').map(node => node.id)
+      const references = await noteReferencesForSubtree(provider, id)
+      if (references.length > 0 && url.searchParams.get('force') !== 'true') {
+        throw httpError(409, `note content is referenced by ${references.length} knowledge document(s)`)
+      }
+      await provider.notes.delete(id)
+      provider.deleteNoteReferences(noteIds)
+      return sendJson(res, 204, undefined)
+    }
+  }
+
+  if (segments[0] === 'settings' && segments.length === 1) {
+    requirePermission(actor.permissions, 'read')
+    if (method === 'GET') return sendJson(res, 200, await provider.getSettings())
+    if (method === 'PUT') {
+      requirePermission(actor.permissions, 'admin')
+      const body = await readObject(req)
+      if (!isRecord(body.patch)) throw httpError(400, 'knowledge settings patch is invalid')
+      const writebackPolicy = body.patch.writebackPolicy
+      if (writebackPolicy !== undefined && writebackPolicy !== 'conservative' && writebackPolicy !== 'proactive') throw httpError(400, 'writebackPolicy must be conservative or proactive')
+      return sendJson(res, 200, await provider.updateSettings({
+        ...writebackPolicy === undefined ? {} : { writebackPolicy },
+      }))
+    }
+  }
+
+  if (segments[0] === 'service' && segments.length === 1 && options.service !== undefined) {
+    requirePermission(actor.permissions, 'admin')
+    if (method === 'GET') return sendJson(res, 200, options.service.current())
+    if (method === 'PUT') {
+      const body = await readObject(req)
+      if (body.publicApiEnabled !== undefined && typeof body.publicApiEnabled !== 'boolean') throw httpError(400, 'publicApiEnabled must be a boolean')
+      const writebackProvider = body.writebackProvider
+      const writebackModel = body.writebackModel
+      if (writebackProvider !== undefined && writebackProvider !== null && typeof writebackProvider !== 'string') throw httpError(400, 'writebackProvider must be a string or null')
+      if (writebackModel !== undefined && writebackModel !== null && typeof writebackModel !== 'string') throw httpError(400, 'writebackModel must be a string or null')
+      return sendJson(res, 200, await options.service.update({
+        ...body.publicApiEnabled === undefined ? {} : { publicApiEnabled: body.publicApiEnabled },
+        ...writebackProvider === undefined ? {} : { writebackProvider },
+        ...writebackModel === undefined ? {} : { writebackModel },
+      }))
+    }
+  }
+
+  if ((method === 'GET' || method === 'POST') && segments[0] === 'search' && segments.length === 1) {
+    requirePermission(actor.permissions, 'read')
+    if (method === 'POST') {
+      const body = await readObject(req)
+      if (typeof body.text !== 'string') throw httpError(400, 'search text must be a string')
+      if (body.projectId !== undefined && typeof body.projectId !== 'string') throw httpError(400, 'projectId must be a string')
+      const types = stringArray(body.types, 'types', 100)
+      if (!types.every(isKnowledgeType)) throw httpError(400, 'search types are invalid')
+      return sendJson(res, 200, await provider.search({
+        text: body.text,
+        ...body.projectId === undefined ? {} : { projectId: body.projectId },
+        knowledgeBaseIds: stringArray(body.knowledgeBaseIds, 'knowledgeBaseIds', 100),
+        includeTags: stringArray(body.includeTags, 'includeTags', 100),
+        excludeTags: stringArray(body.excludeTags, 'excludeTags', 100),
+        types,
+        limit: boundedInteger(body.limit, 'limit', 10, 1, 100),
+      }))
+    }
+    const types = url.searchParams.getAll('type').filter(isKnowledgeType)
+    const projectId = url.searchParams.get('projectId') ?? undefined
+    const knowledgeBaseIds = url.searchParams.getAll('knowledgeBaseId').filter(Boolean)
+    const includeTags = url.searchParams.getAll('includeTag').filter(Boolean)
+    const excludeTags = url.searchParams.getAll('excludeTag').filter(Boolean)
+    const result = await provider.search({
+      text: url.searchParams.get('q') ?? '',
+      ...projectId === undefined ? {} : { projectId },
+      ...knowledgeBaseIds.length === 0 ? {} : { knowledgeBaseIds },
+      ...includeTags.length === 0 ? {} : { includeTags },
+      ...excludeTags.length === 0 ? {} : { excludeTags },
+      ...types.length === 0 ? {} : { types },
+      limit: integerParam(url, 'limit', 10, 1, 100),
+    })
+    return sendJson(res, 200, result)
+  }
+
+  if (method === 'GET' && segments[0] === 'stats' && segments.length === 1) {
+    requirePermission(actor.permissions, 'read')
+    return sendJson(res, 200, await provider.stats())
+  }
+
+  if (method === 'GET' && segments[0] === 'document-index' && segments.length === 1) {
+    requirePermission(actor.permissions, 'read')
+    const query = url.searchParams.get('q') ?? undefined
+    const cursor = url.searchParams.get('cursor') ?? undefined
+    const requestedBaseIds = url.searchParams.getAll('knowledgeBaseId').map(id => id.trim()).filter(Boolean)
+    const sessionId = url.searchParams.get('sessionId')?.trim()
+    const knowledgeBaseIds = sessionId
+      ? (await provider.resolveMounts(sessionId, url.searchParams.get('projectId') ?? undefined)).map(mount => mount.knowledgeBaseId)
+      : requestedBaseIds.length > 0 ? requestedBaseIds : undefined
+    return sendJson(res, 200, await provider.listDocumentIndex({
+      ...knowledgeBaseIds === undefined ? {} : { knowledgeBaseIds },
+      activeKnowledgeBasesOnly: url.searchParams.get('active') === '1',
+      ...query === undefined ? {} : { query },
+      ...cursor === undefined ? {} : { cursor },
+      limit: integerParam(url, 'limit', 60, 1, 100),
+    }))
+  }
+
+  if (segments[0] === 'knowledge-bases') {
+    if (method === 'POST' && segments[1] === 'group' && segments.length === 2) {
+      requirePermission(actor.permissions, 'write')
+      const body = await readObject(req)
+      if (!Array.isArray(body.ids) || !body.ids.length || body.ids.length > 1000 || body.ids.some(id => typeof id !== 'string' || !id)) throw httpError(400, 'select 1-1000 knowledge bases')
+      if (typeof body.group !== 'string' || body.group.trim().length > 64 || /[\u0000-\u001f\u007f]/u.test(body.group)) throw httpError(400, 'invalid knowledge base group')
+      return sendJson(res, 200, await provider.assignKnowledgeBaseGroup(body.ids as string[], body.group))
+    }
+    if (method === 'GET' && segments.length === 1) {
+      requirePermission(actor.permissions, 'read')
+      return sendJson(res, 200, await provider.listKnowledgeBases())
+    }
+    if (method === 'POST' && segments.length === 1) {
+      requirePermission(actor.permissions, 'write')
+      const body = await readObject(req)
+      return sendJson(res, 201, await provider.createKnowledgeBase(parseKnowledgeBaseDraft(body.draft)))
+    }
+    const id = segments[1]
+    if (id !== undefined && method === 'GET' && segments.length === 2) {
+      requirePermission(actor.permissions, 'read')
+      const base = await provider.getKnowledgeBase(id)
+      if (base === undefined) throw httpError(404, `knowledge base "${id}" was not found`)
+      return sendJson(res, 200, base)
+    }
+    if (id !== undefined && method === 'PUT' && segments.length === 2) {
+      requirePermission(actor.permissions, 'write')
+      const body = await readObject(req)
+      return sendJson(res, 200, await provider.updateKnowledgeBase(id, parseKnowledgeBaseDraft(body.draft)))
+    }
+    if (id !== undefined && method === 'PATCH' && segments.length === 2) {
+      requirePermission(actor.permissions, 'write')
+      const body = await readObject(req)
+      return sendJson(res, 200, await provider.patchKnowledgeBase(id, parseKnowledgeBasePatch(body.patch)))
+    }
+    if (id !== undefined && method === 'POST' && segments[2] === 'archive' && segments.length === 3) {
+      requirePermission(actor.permissions, 'admin')
+      return sendJson(res, 200, await provider.archiveKnowledgeBase(id))
+    }
+    if (id !== undefined && method === 'POST' && segments[2] === 'restore' && segments.length === 3) {
+      requirePermission(actor.permissions, 'admin')
+      return sendJson(res, 200, await provider.restoreKnowledgeBase(id))
+    }
+    if (id !== undefined && method === 'DELETE' && segments.length === 2) {
+      requirePermission(actor.permissions, 'admin')
+      await provider.deleteKnowledgeBase(id)
+      return sendJson(res, 204, undefined)
+    }
+  }
+
+  if (segments[0] === 'mounts') {
+    if (method === 'GET' && segments[1] === 'resolve' && segments.length === 2) {
+      requirePermission(actor.permissions, 'read')
+      const sessionId = url.searchParams.get('sessionId')?.trim()
+      if (!sessionId) throw httpError(400, 'sessionId is required')
+      return sendJson(res, 200, await provider.resolveMounts(sessionId, url.searchParams.get('projectId') ?? undefined))
+    }
+    if (method === 'GET' && segments.length === 1) {
+      requirePermission(actor.permissions, 'read')
+      const targetKind = url.searchParams.get('targetKind')
+      if (targetKind !== null && targetKind !== 'project' && targetKind !== 'session') throw httpError(400, 'invalid mount targetKind')
+      return sendJson(res, 200, await provider.listMounts(targetKind ?? undefined, url.searchParams.get('targetId') ?? undefined))
+    }
+    if (method === 'POST' && segments.length === 1) {
+      requirePermission(actor.permissions, 'write')
+      const body = await readObject(req)
+      return sendJson(res, 200, await provider.upsertMount(parseMountDraft(body.draft)))
+    }
+    if (method === 'POST' && segments[1] === 'bulk' && segments.length === 2) {
+      requirePermission(actor.permissions, 'write')
+      const body = await readObject(req)
+      const upserts = Array.isArray(body.upserts) ? body.upserts.map(parseMountDraft) : []
+      const deleteIds = Array.isArray(body.deleteIds)
+        ? body.deleteIds.map(id => typeof id === 'string' ? id.trim() : '').filter(Boolean)
+        : []
+      if (upserts.length + deleteIds.length === 0) throw httpError(400, 'mount batch must contain at least one operation')
+      if (upserts.length + deleteIds.length > 500) throw httpError(400, 'mount batch must contain at most 500 operations')
+      return sendJson(res, 200, await provider.applyMountBatch({ upserts, deleteIds }))
+    }
+    if (method === 'DELETE' && segments[1] !== undefined && segments.length === 2) {
+      requirePermission(actor.permissions, 'write')
+      await provider.deleteMount(segments[1])
+      return sendJson(res, 204, undefined)
+    }
+  }
+
+  if (segments[0] === 'note-excerpts' && segments.length === 1 && method === 'POST') {
+    requirePermission(actor.permissions, 'read')
+    requirePermission(actor.permissions, 'write')
+    const body = await readObject(req)
+    const documentId = optionalString(body.documentId)
+    return sendJson(res, 200, await provider.excerptNote({
+      requestId: requiredString(body.requestId, 'requestId'),
+      noteId: requiredString(body.noteId, 'noteId'),
+      text: requiredString(body.text, 'text'),
+      knowledgeBaseId: requiredString(body.knowledgeBaseId, 'knowledgeBaseId'),
+      ...(documentId ? { documentId, expectedVersion: boundedInteger(body.expectedVersion, 'expectedVersion', 0, 1, Number.MAX_SAFE_INTEGER) } : {}),
+      ...(typeof body.title === 'string' ? { title: body.title } : {}),
+      ...(typeof body.group === 'string' ? { group: body.group } : {}),
+    }))
+  }
+
+  if (segments[0] === 'document-groups' && segments.length === 1) {
+    if (method === 'GET') {
+      requirePermission(actor.permissions, 'read')
+      return sendJson(res, 200, await provider.listDocumentGroups(requiredString(url.searchParams.get('knowledgeBaseId'), 'knowledgeBaseId')))
+    }
+    if (method === 'POST') {
+      requirePermission(actor.permissions, 'write')
+      const body = await readObject(req)
+      if (!Array.isArray(body.ids) || body.ids.some(id => typeof id !== 'string') || typeof body.group !== 'string') throw httpError(400, '文档分组参数无效')
+      return sendJson(res, 200, await provider.assignDocumentGroup(requiredString(body.knowledgeBaseId, 'knowledgeBaseId'), body.ids as string[], body.group))
+    }
+  }
+
+  if (segments[0] === 'documents') {
+    if (method === 'GET' && segments.length === 1) {
+      requirePermission(actor.permissions, 'read')
+      return sendJson(res, 200, await provider.listDocuments(
+        url.searchParams.get('knowledgeBaseId') ?? undefined,
+        url.searchParams.get('q') ?? undefined,
+      ))
+    }
+    if (method === 'GET' && segments[1] !== undefined && segments.length === 2) {
+      requirePermission(actor.permissions, 'read')
+      const document = await provider.getDocument(segments[1])
+      if (document === undefined) throw httpError(404, `knowledge document "${segments[1]}" was not found`)
+      return sendJson(res, 200, document)
+    }
+    if (method === 'POST' && segments[1] !== undefined && segments[2] === 'finalize' && segments.length === 3) {
+      requirePermission(actor.permissions, 'write')
+      const body = await readObject(req)
+      if (body.state !== 'resolved' && body.state !== 'complete') {
+        throw httpError(400, 'document finalization state must be resolved or complete')
+      }
+      const note = optionalString(body.note)
+      return sendJson(res, 200, await provider.finalize(segments[1], body.state, note))
+    }
+    if (method === 'POST' && segments[1] !== undefined && segments[2] === 'reopen' && segments.length === 3) {
+      requirePermission(actor.permissions, 'write')
+      return sendJson(res, 200, await provider.reopen(segments[1]))
+    }
+    if (method === 'POST' && segments[1] !== undefined && segments[2] === 'move' && segments.length === 3) {
+      requirePermission(actor.permissions, 'write')
+      const body = await readObject(req)
+      return sendJson(res, 200, await provider.moveDocument(
+        segments[1],
+        requiredString(body.knowledgeBaseId, 'knowledgeBaseId'),
+      ))
+    }
+  }
+
+  if (segments[0] === 'entries') {
+    if (method === 'GET' && segments.length === 1) {
+      requirePermission(actor.permissions, 'read')
+      const status = url.searchParams.get('status')
+      const type = url.searchParams.get('type')
+      const projectId = url.searchParams.get('projectId') ?? undefined
+      const knowledgeBaseId = url.searchParams.get('knowledgeBaseId') ?? undefined
+      const cursor = url.searchParams.get('cursor') ?? undefined
+      const result = await provider.list({
+        ...status === 'active' || status === 'archived' ? { status } : {},
+        ...type !== null && isKnowledgeType(type) ? { type } : {},
+        ...projectId === undefined ? {} : { projectId },
+        ...knowledgeBaseId === undefined ? {} : { knowledgeBaseId },
+        ...cursor === undefined ? {} : { cursor },
+        limit: integerParam(url, 'limit', 50, 1, 100),
+      })
+      return sendJson(res, 200, result)
+    }
+    if (method === 'POST' && segments.length === 1) {
+      requirePermission(actor.permissions, 'write')
+      const body = await readObject(req)
+      return sendJson(res, 201, await provider.create(parseDraft(body.draft)))
+    }
+    const id = segments[1]
+    if (id !== undefined && method === 'GET' && segments.length === 2) {
+      requirePermission(actor.permissions, 'read')
+      const entry = await provider.get(id)
+      if (entry === undefined) throw httpError(404, `knowledge entry "${id}" was not found`)
+      return sendJson(res, 200, entry)
+    }
+    if (id !== undefined && method === 'GET' && segments[2] === 'versions' && segments.length === 3) {
+      requirePermission(actor.permissions, 'read')
+      return sendJson(res, 200, await provider.versions(id))
+    }
+    if (id !== undefined && method === 'GET' && segments[2] === 'revision' && segments.length === 3) {
+      requirePermission(actor.permissions, 'read')
+      const entry = await provider.get(id)
+      if (entry === undefined) throw httpError(404, '文档已删除或不可访问')
+      return sendJson(res, 200, { id: entry.id, version: entry.version, updatedAt: entry.updatedAt, status: entry.status, documentState: entry.documentState })
+    }
+    if (id !== undefined && method === 'GET' && segments[2] === 'note-references' && segments.length === 3) {
+      requirePermission(actor.permissions, 'read')
+      return sendJson(res, 200, await provider.listKnowledgeNoteReferences(id))
+    }
+    if (id !== undefined && method === 'POST' && segments[2] === 'note-references' && segments.length === 3) {
+      requirePermission(actor.permissions, 'write')
+      const body = await readObject(req)
+      const source = body.source === 'agent' ? 'agent' : 'user'
+      const sourceSessionId = source === 'agent' ? optionalString(body.sourceSessionId) : undefined
+      return sendJson(res, 201, await provider.addKnowledgeNoteReference(
+        id,
+        requiredString(body.noteId, 'noteId'),
+        source,
+        sourceSessionId,
+      ))
+    }
+    if (id !== undefined && method === 'DELETE' && segments[2] === 'note-references' && segments[3] !== undefined && segments.length === 4) {
+      requirePermission(actor.permissions, 'write')
+      await provider.deleteKnowledgeNoteReference(id, segments[3])
+      return sendJson(res, 204, undefined)
+    }
+    if (id !== undefined && method === 'PUT' && segments.length === 2) {
+      requirePermission(actor.permissions, 'write')
+      const body = await readObject(req)
+      const expectedVersion = body.expectedVersion === undefined ? undefined : boundedInteger(body.expectedVersion, 'expectedVersion', 1, 1, Number.MAX_SAFE_INTEGER)
+      return sendJson(res, 200, await provider.update(id, parseDraft(body.draft), undefined, expectedVersion))
+    }
+    if (id !== undefined && method === 'POST' && segments[2] === 'archive' && segments.length === 3) {
+      requirePermission(actor.permissions, 'write')
+      return sendJson(res, 200, await provider.archive(id))
+    }
+    if (id !== undefined && method === 'DELETE' && segments.length === 2) {
+      requirePermission(actor.permissions, 'admin')
+      await provider.delete(id)
+      return sendJson(res, 204, undefined)
+    }
+  }
+
+  if (segments[0] === 'candidates') {
+    if (method === 'GET' && segments[1] === 'counts' && segments.length === 2) {
+      requirePermission(actor.permissions, 'read')
+      return sendJson(res, 200, provider.candidateCounts())
+    }
+    if (method === 'GET' && segments.length === 1) {
+      requirePermission(actor.permissions, 'read')
+      const status = url.searchParams.get('status')
+      if (status !== 'pending' && status !== 'approved' && status !== 'rejected') throw httpError(400, 'invalid candidate status')
+      const limit = integerParam(url, 'limit', 50, 1, 100)
+      if (url.searchParams.get('paged') === '1') {
+        const page = provider.candidatePage(status, limit, url.searchParams.get('cursor') || undefined)
+        const targetIds = page.items.flatMap(candidate => candidate.targetId ? [candidate.targetId] : [])
+        return sendJson(res, 200, { ...page, targets: url.searchParams.get('includeTargets') === '1' ? provider.entriesByIds(targetIds) : [] })
+      }
+      const candidates = await provider.listCandidates(status, limit)
+      if (url.searchParams.get('includeTargets') !== '1') return sendJson(res, 200, candidates)
+      const targetIds = candidates.flatMap(candidate => candidate.targetId === undefined ? [] : [candidate.targetId])
+      return sendJson(res, 200, { items: candidates, targets: provider.entriesByIds(targetIds) })
+    }
+    if (method === 'POST' && segments.length === 1) {
+      requirePermission(actor.permissions, 'propose')
+      const body = await readObject(req)
+      return sendJson(res, 201, await provider.propose(parseProposal(body.proposal), optionalString(body.sourceKey)))
+    }
+    if (method === 'POST' && segments[1] === 'direct' && segments.length === 2) {
+      requirePermission(actor.permissions, 'propose')
+      requirePermission(actor.permissions, 'write')
+      const body = await readObject(req)
+      return sendJson(res, 200, await provider.writeDirect(parseProposal(body.proposal), optionalString(body.sourceKey)))
+    }
+    if (method === 'POST' && segments[1] === 'bulk-review' && segments.length === 2) {
+      requirePermission(actor.permissions, 'write')
+      const body = await readObject(req)
+      return sendJson(res, 200, await provider.approvePendingBatch(
+        boundedInteger(body.limit, 'limit', 25, 1, 50),
+        stringArray(body.excludeIds, 'excludeIds', 5000),
+      ))
+    }
+    if (method === 'POST' && segments[1] !== undefined && segments[2] === 'review' && segments.length === 3) {
+      requirePermission(actor.permissions, 'write')
+      const body = await readObject(req)
+      return sendJson(res, 200, await provider.review(segments[1], parseReview(body)))
+    }
+  }
+
+  if (segments[0] === 'writeback-protocol' && segments.length === 1 && method === 'GET') {
+    requirePermission(actor.permissions, 'read')
+    return sendJson(res, 200, await provider.writebackProtocol?.() ?? { idempotentDirectWrites: false })
+  }
+
+  if (segments[0] === 'extraction-jobs' && segments[1] !== undefined) {
+    const sourceKey = segments[1]
+    if (method === 'GET' && segments.length === 2) {
+      requirePermission(actor.permissions, 'read')
+      const job = await provider.extractionJob(sourceKey)
+      if (job === undefined) throw httpError(404, 'extraction job was not found')
+      return sendJson(res, 200, job)
+    }
+    requirePermission(actor.permissions, 'propose')
+    if (method === 'POST' && segments[2] === 'claim') {
+      return sendJson(res, 200, { claimed: await provider.claimExtraction(sourceKey) })
+    }
+    if (method === 'POST' && segments[2] === 'complete') {
+      const body = await readObject(req)
+      const count = typeof body.candidateCount === 'number' && Number.isInteger(body.candidateCount) ? body.candidateCount : 0
+      await provider.completeExtraction(sourceKey, body.completion === undefined
+        ? Math.max(0, count)
+        : parseExtractionCompletion(body.completion))
+      return sendJson(res, 204, undefined)
+    }
+    if (method === 'POST' && segments[2] === 'fail') {
+      const body = await readObject(req)
+      await provider.failExtraction(sourceKey, typeof body.error === 'string' ? body.error : 'remote extraction failed')
+      return sendJson(res, 204, undefined)
+    }
+    if (method === 'POST' && segments[2] === 'reset') {
+      await provider.resetExtraction(sourceKey)
+      return sendJson(res, 204, undefined)
+    }
+  }
+
+  if (segments[0] === 'tokens') {
+    requirePermission(actor.permissions, 'admin')
+    if (method === 'GET' && segments.length === 1) return sendJson(res, 200, provider.listApiTokens())
+    if (method === 'POST' && segments.length === 1) {
+      const body = await readObject(req)
+      const name = typeof body.name === 'string' ? body.name : ''
+      const permissions = Array.isArray(body.permissions)
+        ? body.permissions.filter((permission): permission is TokenPermission => permission === 'read' || permission === 'propose' || permission === 'write' || permission === 'admin')
+        : []
+      return sendJson(res, 201, provider.createApiToken(name, permissions))
+    }
+    if (method === 'DELETE' && segments[1] !== undefined && segments.length === 2) {
+      if (segments[1] === actor.id) throw httpError(409, 'the current token cannot revoke itself')
+      const token = provider.listApiTokens().find(item => item.id === segments[1])
+      if (token === undefined) throw httpError(404, 'API token was not found')
+      if (token.revokedAt === undefined) provider.revokeApiToken(segments[1])
+      else provider.deleteApiToken(segments[1])
+      return sendJson(res, 204, undefined)
+    }
+  }
+
+  throw httpError(404, 'knowledge API route was not found')
+}
+
+function parseExtractionCompletion(value: unknown): ExtractionJobCompletion {
+  if (!isRecord(value)) throw httpError(400, 'completion must be an object')
+  const destinations = Array.isArray(value.destinations) ? value.destinations : []
+  if (destinations.length > 100) throw httpError(400, 'completion has too many destinations')
+  const integer = (input: unknown, field: string): number => {
+    if (typeof input !== 'number' || !Number.isInteger(input) || input < 0 || input > 10_000) throw httpError(400, `${field} must be a non-negative integer`)
+    return input
+  }
+  const string = (input: unknown, field: string, limit: number): string => {
+    if (typeof input !== 'string' || input.trim().length === 0 || input.trim().length > limit) throw httpError(400, `${field} is invalid`)
+    return input.trim()
+  }
+  if (value.outcome !== 'completed' && value.outcome !== 'skipped' && value.outcome !== 'unmounted') throw httpError(400, 'completion outcome is invalid')
+  return {
+    outcome: value.outcome,
+    candidateCount: integer(value.candidateCount, 'candidateCount'),
+    directCount: integer(value.directCount, 'directCount'),
+    auditCount: integer(value.auditCount, 'auditCount'),
+    destinations: destinations.map((destination, index) => {
+      if (!isRecord(destination)) throw httpError(400, `destinations[${index}] must be an object`)
+      if (destination.disposition !== 'written' && destination.disposition !== 'pending-review') throw httpError(400, `destinations[${index}].disposition is invalid`)
+      return {
+        knowledgeBaseId: string(destination.knowledgeBaseId, `destinations[${index}].knowledgeBaseId`, 200),
+        knowledgeBaseName: string(destination.knowledgeBaseName, `destinations[${index}].knowledgeBaseName`, 200),
+        ...destination.documentId === undefined ? {} : { documentId: string(destination.documentId, `destinations[${index}].documentId`, 200) },
+        documentTitle: string(destination.documentTitle, `destinations[${index}].documentTitle`, 500),
+        ...destination.documentPath === undefined ? {} : { documentPath: string(destination.documentPath, `destinations[${index}].documentPath`, 1000) },
+        disposition: destination.disposition,
+        ...destination.documentState === 'resolved' || destination.documentState === 'complete' ? { documentState: destination.documentState } : {},
+      }
+    }),
+  }
+}
+
+function parseKnowledgeBaseDraft(value: unknown): KnowledgeBaseDraft {
+  if (!isRecord(value)) throw httpError(400, 'knowledge base draft is invalid')
+  try {
+    const writebackProvider = optionalNullableStringProperty(value, 'writebackProvider')
+    const writebackModel = optionalNullableStringProperty(value, 'writebackModel')
+    const group = optionalNullableStringProperty(value, 'group')
+    const draft = normalizeKnowledgeBaseDraft({
+      ...(group == null ? {} : { group }),
+      name: typeof value.name === 'string' ? value.name : '',
+      description: typeof value.description === 'string' ? value.description : '',
+      defaultTags: Array.isArray(value.defaultTags) ? value.defaultTags.filter((tag): tag is string => typeof tag === 'string') : [],
+      extractionInstructions: typeof value.extractionInstructions === 'string' ? value.extractionInstructions : '',
+      writebackPolicy: value.writebackPolicy === 'proactive' ? 'proactive' : 'conservative',
+      ...writebackProvider === undefined || writebackProvider === null ? {} : { writebackProvider },
+      ...writebackModel === undefined || writebackModel === null ? {} : { writebackModel },
+    })
+    return { ...draft, ...(group === undefined ? {} : { group: group?.trim() ?? '' }) }
+  } catch (error) {
+    throw httpError(400, error instanceof Error ? error.message : 'knowledge base draft is invalid')
+  }
+}
+
+function parseKnowledgeBasePatch(value: unknown): KnowledgeBasePatch {
+  if (!isRecord(value)) throw httpError(400, 'knowledge base patch is invalid')
+  const patch: KnowledgeBasePatch = {}
+  if (Object.hasOwn(value, 'group')) patch.group = optionalNullableStringProperty(value, 'group') as string | null
+  if (Object.hasOwn(value, 'name')) {
+    if (typeof value.name !== 'string') throw httpError(400, 'knowledge base patch name must be a string')
+    patch.name = value.name
+  }
+  if (Object.hasOwn(value, 'description')) {
+    if (typeof value.description !== 'string') throw httpError(400, 'knowledge base patch description must be a string')
+    patch.description = value.description
+  }
+  if (Object.hasOwn(value, 'defaultTags')) {
+    if (!Array.isArray(value.defaultTags) || value.defaultTags.some(tag => typeof tag !== 'string')) {
+      throw httpError(400, 'knowledge base patch defaultTags must be a string array')
+    }
+    patch.defaultTags = value.defaultTags as string[]
+  }
+  if (Object.hasOwn(value, 'extractionInstructions')) {
+    if (typeof value.extractionInstructions !== 'string') throw httpError(400, 'knowledge base patch extractionInstructions must be a string')
+    patch.extractionInstructions = value.extractionInstructions
+  }
+  if (Object.hasOwn(value, 'writebackPolicy')) {
+    if (value.writebackPolicy !== 'conservative' && value.writebackPolicy !== 'proactive') throw httpError(400, 'knowledge base patch writebackPolicy is invalid')
+    patch.writebackPolicy = value.writebackPolicy
+  }
+  if (Object.hasOwn(value, 'writebackProvider')) {
+    patch.writebackProvider = optionalNullableStringProperty(value, 'writebackProvider') as string | null
+  }
+  if (Object.hasOwn(value, 'writebackModel')) {
+    patch.writebackModel = optionalNullableStringProperty(value, 'writebackModel') as string | null
+  }
+  if (Object.keys(patch).length === 0) throw httpError(400, 'knowledge base patch must contain at least one editable field')
+  return patch
+}
+
+function parseMountDraft(value: unknown): KnowledgeMountDraft {
+  if (!isRecord(value)) throw httpError(400, 'knowledge mount draft is invalid')
+  if (value.targetKind !== 'project' && value.targetKind !== 'session') {
+    throw httpError(400, 'knowledge mount targetKind must be project or session')
+  }
+  try {
+    return normalizeKnowledgeMountDraft({
+      targetKind: value.targetKind,
+      targetId: typeof value.targetId === 'string' ? value.targetId : '',
+      knowledgeBaseId: typeof value.knowledgeBaseId === 'string' ? value.knowledgeBaseId : '',
+      enabled: value.enabled !== false,
+      recallEnabled: value.recallEnabled !== false,
+      writeMode: value.writeMode === 'direct' || value.writeMode === 'none' ? value.writeMode : 'audit',
+      includeTags: Array.isArray(value.includeTags) ? value.includeTags.filter((tag): tag is string => typeof tag === 'string') : [],
+      excludeTags: Array.isArray(value.excludeTags) ? value.excludeTags.filter((tag): tag is string => typeof tag === 'string') : [],
+      extractionInstructions: typeof value.extractionInstructions === 'string' ? value.extractionInstructions : '',
+    })
+  } catch (error) {
+    throw httpError(400, error instanceof Error ? error.message : 'knowledge mount draft is invalid')
+  }
+}
+
+function authenticateBearer(provider: LocalKnowledgeProvider, req: IncomingMessage): ApiTokenRecord {
+  const authorization = req.headers.authorization
+  if (authorization === undefined || !authorization.startsWith('Bearer ')) throw httpError(401, 'bearer token is required')
+  const actor = provider.authenticate(authorization.slice(7).trim())
+  if (actor === undefined) throw httpError(401, 'bearer token is invalid or revoked')
+  return actor
+}
+
+function authenticateSameOrigin(req: IncomingMessage): ApiTokenRecord {
+  assertKnowledgeBrowserRequest(req, 'management-web')
+  return {
+    id: 'same-origin-management',
+    name: 'DSH management console',
+    permissions: ['admin'],
+    createdAt: new Date(0).toISOString(),
+  }
+}
+
+export function assertKnowledgeBrowserRequest(req: IncomingMessage, client: 'management-web' | 'conversation-web'): void {
+  if (req.headers['x-dsh-knowledge-client'] !== client) {
+    throw httpError(401, 'knowledge client header is required')
+  }
+  const fetchSite = req.headers['sec-fetch-site']
+  if (fetchSite !== undefined && fetchSite !== 'same-origin' && fetchSite !== 'none') {
+    throw httpError(403, 'cross-site knowledge request was rejected')
+  }
+  const origin = req.headers.origin
+  if (origin !== undefined) {
+    let originHost: string
+    try { originHost = new URL(origin).host } catch { throw httpError(403, 'knowledge request origin is invalid') }
+    const expectedHost = firstHeader(req.headers['x-forwarded-host']) ?? req.headers.host
+    if (expectedHost === undefined || originHost.toLowerCase() !== expectedHost.toLowerCase()) {
+      throw httpError(403, 'cross-origin knowledge request was rejected')
+    }
+  }
+}
+
+function firstHeader(value: string | string[] | undefined): string | undefined {
+  const raw = Array.isArray(value) ? value[0] : value
+  return raw?.split(',')[0]?.trim()
+}
+
+function requirePermission(permissions: TokenPermission[], required: TokenPermission): void {
+  if (permissions.includes('admin')) return
+  if (required === 'read' && (permissions.includes('write') || permissions.includes('propose'))) return
+  if (required === 'propose' && permissions.includes('write')) return
+  if (!permissions.includes(required)) throw httpError(403, `token lacks ${required} permission`)
+}
+
+async function readObject(req: IncomingMessage): Promise<Record<string, unknown>> {
+  const declared = Number(req.headers['content-length'] ?? 0)
+  if (Number.isFinite(declared) && declared > MAX_BODY_BYTES) throw httpError(413, 'request body is too large')
+  const chunks: Buffer[] = []
+  let size = 0
+  for await (const chunk of req) {
+    const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk)
+    size += buffer.length
+    if (size > MAX_BODY_BYTES) throw httpError(413, 'request body is too large')
+    chunks.push(buffer)
+  }
+  try {
+    const value = JSON.parse(Buffer.concat(chunks).toString('utf8')) as unknown
+    if (!isRecord(value)) throw new Error()
+    return value
+  } catch {
+    throw httpError(400, 'request body must be a JSON object')
+  }
+}
+
+async function readBinary(req: IncomingMessage, maximumBytes: number): Promise<Buffer> {
+  const declared = Number(req.headers['content-length'] ?? 0)
+  if (Number.isFinite(declared) && declared > maximumBytes) throw httpError(413, 'request body is too large')
+  const chunks: Buffer[] = []
+  let size = 0
+  for await (const chunk of req) {
+    const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk)
+    size += buffer.byteLength
+    if (size > maximumBytes) throw httpError(413, 'request body is too large')
+    chunks.push(buffer)
+  }
+  return Buffer.concat(chunks)
+}
+
+async function noteReferences(provider: LocalKnowledgeProvider, noteId: string): Promise<NoteReference[]> {
+  const node = provider.notes.get(noteId)
+  if (node === undefined) throw httpError(404, `note node "${noteId}" was not found`)
+  if (node.kind === 'folder') return []
+  const structured = provider.noteReferencesForNotes([noteId])
+  const legacy = provider.legacyNoteReferencesForNotes([noteId])
+  return deduplicateNoteReferences([...structured, ...legacy])
+}
+
+async function noteReferencesForSubtree(provider: LocalKnowledgeProvider, noteId: string): Promise<NoteReference[]> {
+  const noteIds = provider.notes.subtree(noteId).filter(node => node.kind !== 'folder').map(node => node.id)
+  if (noteIds.length === 0) return []
+  const structured = provider.noteReferencesForNotes(noteIds)
+  const legacy = provider.legacyNoteReferencesForNotes(noteIds)
+  return deduplicateNoteReferences([...structured, ...legacy])
+}
+
+function deduplicateNoteReferences(references: NoteReference[]): NoteReference[] {
+  return [...new Map(references.map(reference => [`${reference.documentId}\u0000${reference.noteId}`, reference])).values()]
+}
+
+function parseDraft(value: unknown): KnowledgeDraft {
+  if (!isRecord(value) || !isRecord(value.scope)) throw httpError(400, 'draft is invalid')
+  if (!isKnowledgeType(value.type)) throw httpError(400, 'draft type is invalid')
+  const scope = value.scope.kind === 'global'
+    ? { kind: 'global' as const }
+    : { kind: 'project' as const, id: typeof value.scope.id === 'string' ? value.scope.id : '' }
+  try {
+    const source = isRecord(value.source) ? parseSource(value.source) : undefined
+    return normalizeDraft({
+      knowledgeBaseId: optionalString(value.knowledgeBaseId) ?? DEFAULT_KNOWLEDGE_BASE_ID,
+      ...(value.group === undefined ? {} : { group: value.group as string }),
+      title: typeof value.title === 'string' ? value.title : '',
+      body: typeof value.body === 'string' ? value.body : '',
+      type: value.type,
+      tags: Array.isArray(value.tags) ? value.tags.filter((tag): tag is string => typeof tag === 'string') : [],
+      scope,
+      confidence: typeof value.confidence === 'number' ? value.confidence : 0.5,
+      ...source === undefined ? {} : { source },
+    })
+  } catch (error) {
+    throw httpError(400, error instanceof Error ? error.message : 'draft is invalid')
+  }
+}
+
+function parseProposal(value: unknown): CandidateProposal {
+  if (!isRecord(value) || (value.action !== 'create' && value.action !== 'update' && value.action !== 'conflict')) {
+    throw httpError(400, 'proposal is invalid')
+  }
+  const targetId = optionalString(value.targetId)
+  if (value.action !== 'create' && targetId === undefined) throw httpError(400, `${value.action} proposal requires targetId`)
+  if (value.action === 'create' && value.change !== undefined) throw httpError(400, 'create proposal cannot contain a document change')
+  return {
+    action: value.action,
+    ...targetId === undefined ? {} : { targetId },
+    ...value.change === undefined ? {} : { change: parseCandidateChange(value.change) },
+    draft: parseDraft(value.draft),
+    reason: typeof value.reason === 'string' ? value.reason : '',
+  }
+}
+
+function parseReview(value: Record<string, unknown>): ReviewDecision {
+  if (value.decision !== 'approve' && value.decision !== 'reject') throw httpError(400, 'review decision is invalid')
+  if (value.resolution !== undefined && value.resolution !== 'merge') throw httpError(400, 'review resolution is invalid')
+  const note = optionalString(value.note)
+  const expectedVersion = value.expectedVersion === undefined ? undefined : Number(value.expectedVersion)
+  if (expectedVersion !== undefined && (!Number.isSafeInteger(expectedVersion) || expectedVersion < 1)) {
+    throw httpError(400, 'review expectedVersion must be a positive integer')
+  }
+  return {
+    decision: value.decision,
+    ...value.resolution === 'merge' ? { resolution: value.resolution } : {},
+    ...note === undefined ? {} : { note },
+    ...value.draft === undefined ? {} : { draft: parseDraft(value.draft) },
+    ...expectedVersion === undefined ? {} : { expectedVersion },
+  }
+}
+
+function parseCandidateChange(value: unknown): CandidateChange {
+  if (!isRecord(value)) throw httpError(400, 'proposal change is invalid')
+  if (value.kind === 'append') return { kind: 'append' }
+  if (value.kind === 'group') {
+    if (!Number.isSafeInteger(value.baseVersion) || Number(value.baseVersion) < 1) throw httpError(400, '分组 baseVersion 必须为正整数')
+    return { kind: 'group', baseVersion: Number(value.baseVersion), group: normalizeDocumentGroup(value.group, true) }
+  }
+  if (value.kind === 'finalize') return normalizeFinalizationChange(value)
+  if (value.kind !== 'revise' || !Array.isArray(value.edits)) throw httpError(400, 'proposal change is invalid')
+  const baseVersion = Number(value.baseVersion)
+  const baseHash = typeof value.baseHash === 'string' ? value.baseHash.trim().toLocaleLowerCase() : ''
+  if (!Number.isSafeInteger(baseVersion) || baseVersion < 1 || !/^[a-f0-9]{64}$/u.test(baseHash)) {
+    throw httpError(400, 'proposal revision base is invalid')
+  }
+  if (value.edits.length < 1 || value.edits.length > 20) throw httpError(400, 'proposal revision must contain 1-20 edits')
+  const edits = value.edits.map((edit): { oldText: string; newText: string } => {
+    if (!isRecord(edit) || typeof edit.oldText !== 'string' || typeof edit.newText !== 'string') {
+      throw httpError(400, 'proposal revision edit is invalid')
+    }
+    if (edit.oldText.length < 1 || edit.oldText.length > 12_000 || edit.newText.length > 12_000) {
+      throw httpError(400, 'proposal revision edit is too large or has an empty anchor')
+    }
+    return { oldText: edit.oldText, newText: edit.newText }
+  })
+  if (typeof value.append === 'string' && value.append.length > 12_000) throw httpError(400, 'proposal revision append is too large')
+  return {
+    kind: 'revise',
+    baseVersion,
+    baseHash,
+    edits,
+    ...typeof value.append === 'string' ? { append: value.append } : {},
+  }
+}
+
+function parseSource(value: Record<string, unknown>): NonNullable<KnowledgeDraft['source']> {
+  const sessionId = optionalString(value.sessionId)
+  const messageId = optionalString(value.messageId)
+  const clientId = optionalString(value.clientId)
+  const evidence = value.evidence === 'explicit' || value.evidence === 'verified' || value.evidence === 'inferred'
+    ? value.evidence
+    : undefined
+  return {
+    ...sessionId === undefined ? {} : { sessionId },
+    ...messageId === undefined ? {} : { messageId },
+    ...typeof value.turn === 'number' && Number.isInteger(value.turn) ? { turn: value.turn } : {},
+    ...clientId === undefined ? {} : { clientId },
+    ...evidence === undefined ? {} : { evidence },
+  }
+}
+
+function integerParam(url: URL, name: string, fallback: number, min: number, max: number): number {
+  const raw = url.searchParams.get(name)
+  if (raw === null) return fallback
+  const value = Number(raw)
+  if (!Number.isInteger(value) || value < min || value > max) throw httpError(400, `${name} must be an integer from ${min} to ${max}`)
+  return value
+}
+
+function pathInteger(value: string, name: string): number {
+  const parsed = Number(value)
+  if (!Number.isSafeInteger(parsed) || parsed < 1) throw httpError(400, `${name} must be a positive integer`)
+  return parsed
+}
+
+function boundedInteger(value: unknown, name: string, fallback: number, min: number, max: number): number {
+  if (value === undefined) return fallback
+  const parsed = Number(value)
+  if (!Number.isSafeInteger(parsed) || parsed < min || parsed > max) {
+    throw httpError(400, `${name} must be an integer between ${min} and ${max}`)
+  }
+  return parsed
+}
+
+function stringArray(value: unknown, name: string, maximumItems: number): string[] {
+  if (value === undefined) return []
+  if (!Array.isArray(value) || value.length > maximumItems || value.some(item => typeof item !== 'string' || item.length === 0 || item.length > 200)) {
+    throw httpError(400, `${name} must be an array of at most ${maximumItems} non-empty strings`)
+  }
+  return [...new Set(value)]
+}
+
+function sendJson(res: ServerResponse, status: number, body: unknown): void {
+  if (status === 204) {
+    res.writeHead(status, { 'cache-control': 'no-store' })
+    res.end()
+    return
+  }
+  const payload = JSON.stringify(body)
+  res.writeHead(status, {
+    'content-type': 'application/json; charset=utf-8',
+    'content-length': Buffer.byteLength(payload),
+    'cache-control': 'no-store',
+    'x-content-type-options': 'nosniff',
+  })
+  res.end(payload)
+}
+
+function sendHtml(res: ServerResponse, status: number, body: string): void {
+  res.writeHead(status, {
+    'content-type': 'text/html; charset=utf-8',
+    'content-length': Buffer.byteLength(body),
+    'content-security-policy': "default-src 'none'; style-src 'unsafe-inline'; img-src 'self' data:; base-uri 'none'; form-action 'none'; frame-ancestors 'none'",
+    'cache-control': 'private, no-store',
+    'referrer-policy': 'no-referrer',
+    'x-content-type-options': 'nosniff',
+    'x-frame-options': 'DENY',
+  })
+  res.end(body)
+}
+
+function sendOpaqueFile(
+  res: ServerResponse,
+  originalName: string,
+  mediaType: string,
+  content: Buffer,
+  download: boolean,
+): void {
+  const asciiName = originalName.replace(/[^\x20-\x7e]/g, '_').replace(/["\\]/g, '_') || 'document'
+  const encodedName = encodeURIComponent(originalName).replaceAll("'", '%27')
+  res.writeHead(200, {
+    'content-type': mediaType,
+    'content-length': content.byteLength,
+    'content-disposition': `${download ? 'attachment' : 'inline'}; filename="${asciiName}"; filename*=UTF-8''${encodedName}`,
+    'content-security-policy': "sandbox; default-src 'none'",
+    'cache-control': 'private, no-store',
+    'x-content-type-options': 'nosniff',
+  })
+  res.end(content)
+}
+
+function sendError(res: ServerResponse, error: unknown): void {
+  const status = statusOf(error)
+  const message = error instanceof Error ? error.message : 'internal knowledge API error'
+  sendJson(res, status, { error: status >= 500 ? 'internal knowledge API error' : message, code: codeOf(error),
+    ...(isRecord(error) && error.code === 'PRIVATE_SHARE_CONFIRMATION_REQUIRED' && typeof error.origin === 'string' ? { origin: error.origin } : {}),
+  })
+}
+
+function statusOf(error: unknown): number {
+  if (isRecord(error) && typeof error.status === 'number') return error.status
+  if (isRecord(error) && error.code === 'NOT_FOUND') return 404
+  if (isRecord(error) && error.code === 'CONFLICT') return 409
+  if (error instanceof Error && /UNIQUE constraint failed/.test(error.message)) return 409
+  return 500
+}
+
+function codeOf(error: unknown): string {
+  if (isRecord(error) && typeof error.code === 'string') return error.code
+  return 'INTERNAL'
+}
+
+function httpError(status: number, message: string): Error {
+  return Object.assign(new Error(message), { status, code: status === 400 ? 'BAD_REQUEST' : `HTTP_${status}` })
+}
+
+function optionalString(value: unknown): string | undefined {
+  return typeof value === 'string' && value.length > 0 ? value : undefined
+}
+
+function requiredString(value: unknown, name: string): string {
+  if (typeof value !== 'string' || value.trim().length === 0) throw httpError(400, `${name} must be a non-empty string`)
+  return value
+}
+
+function nullableString(value: unknown, name: string): string | null {
+  if (value === undefined || value === null || value === '') return null
+  if (typeof value !== 'string') throw httpError(400, `${name} must be a string or null`)
+  return value
+}
+
+function optionalNullableStringProperty(
+  value: Record<string, unknown>,
+  key: string,
+): string | null | undefined {
+  if (!Object.hasOwn(value, key)) return undefined
+  const member = value[key]
+  if (member === null) return null
+  if (typeof member !== 'string') throw httpError(400, `${key} must be a string or null`)
+  return member
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === 'object' && !Array.isArray(value)
+}

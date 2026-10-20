@@ -1,0 +1,120 @@
+/**
+ * Small, dependency-free DOM primitives shared by the management views.
+ * Business renderers should describe content; browser normalization and
+ * element construction stay here.
+ */
+export function element(tag, attributes = {}, ...children) {
+  const node = document.createElement(tag)
+  for (const [key, value] of Object.entries(attributes)) {
+    if (value === undefined || value === null || value === false) continue
+    if (key === 'class') node.className = value
+    else if (key === 'text') node.textContent = value
+    else if (key.startsWith('on') && typeof value === 'function') node.addEventListener(key.slice(2).toLowerCase(), value)
+    else if (key === 'checked' || key === 'selected' || key === 'disabled') node[key] = Boolean(value)
+    else node.setAttribute(key, String(value))
+  }
+  for (const child of children.flat(Infinity)) {
+    if (child === undefined || child === null || child === false) continue
+    node.append(child instanceof Node ? child : document.createTextNode(String(child)))
+  }
+  return node
+}
+
+export function actionButton(label, onClick, variant = '', attributes = {}) {
+  return element('button', { type: 'button', class: `button ${variant}`.trim(), onClick, ...attributes }, label)
+}
+
+function vectorElement(tag, attributes = {}, ...children) {
+  const node = document.createElementNS('http://www.w3.org/2000/svg', tag)
+  for (const [key, value] of Object.entries(attributes)) {
+    if (value === undefined || value === null || value === false) continue
+    node.setAttribute(key === 'class' ? 'class' : key, String(value))
+  }
+  for (const child of children.flat(Infinity)) {
+    if (child instanceof Node) node.append(child)
+  }
+  return node
+}
+
+export function paneToggleButton(pane, visible, onClick, label) {
+  const action = `${visible ? '隐藏' : '显示'}${label}`
+  return element('button', {
+    type: 'button', class: 'pane-toggle-button', 'data-pane': pane,
+    'aria-label': action, 'aria-pressed': String(visible), title: action, onClick,
+  }, element('span', { class: `pane-icon pane-icon-${pane}`, 'aria-hidden': 'true' }))
+}
+
+export function interfaceIcon(name, className = 'interface-icon') {
+  const paths = {
+    close: 'M6 6l12 12M18 6L6 18',
+    'chevron-right': 'M9 5l7 7-7 7',
+    menu: 'M4 6h16M4 12h16M4 18h16',
+    search: 'M10.8 4.5a6.3 6.3 0 1 0 0 12.6 6.3 6.3 0 0 0 0-12.6Zm4.6 11 4.1 4',
+    more: 'M5 12h.01M12 12h.01M19 12h.01',
+    save: 'M5 3.5h11l3 3v14H5zM8 3.5v6h8v-6M8 20.5v-7h8v7',
+    outline: 'M8 6h11M8 12h11M8 18h11M4.5 6h.01M4.5 12h.01M4.5 18h.01',
+    history: 'M4 4v5h5M4.8 8.2A8 8 0 1 1 4 13M12 7.5V12l3 2',
+    download: 'M12 3v11M8 10l4 4 4-4M5 20h14',
+    'share-import': 'M13 3H6a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2v-2M13 3v5h5l-5-5M21 12H10m4-4-4 4 4 4',
+    link: 'M9.5 14.5l5-5M8.5 17H6a5 5 0 0 1 0-10h3M15.5 7H18a5 5 0 0 1 0 10h-3',
+    rename: 'M4 20l4.2-1 10.4-10.4a2.1 2.1 0 0 0-3-3L5.2 16zM14.5 6.5l3 3',
+    move: 'M3 7h6l2 2h10v11H3zM12 4h8m-3-3 3 3-3 3',
+    check: 'M5 12l4 4L19 6',
+    trash: 'M4 6h16M9 6V3h6v3M6 6l1 15h10l1-15M10 10v7M14 10v7',
+  }
+  return vectorElement('svg', {
+    class: className, viewBox: '0 0 24 24', fill: 'none', stroke: 'currentColor',
+    'stroke-width': '1.8', 'stroke-linecap': 'round', 'stroke-linejoin': 'round', 'aria-hidden': 'true',
+  }, vectorElement('path', { d: paths[name] }))
+}
+
+export function badge(label, variant = '') {
+  return element('span', { class: `badge ${variant}`.trim() }, label)
+}
+
+/** One nearest drop region at a time; the overlay never intercepts the pointer. */
+export function clearDropRegions(root = document) {
+  root.querySelectorAll('[data-drop-region="true"]').forEach(node => {
+    node.dataset.dropRegion = 'false'
+    if ('dropTarget' in node.dataset) node.dataset.dropTarget = 'false'
+    node.removeAttribute('data-drop-label')
+  })
+}
+
+export function activateDropRegion(event, label) {
+  event.preventDefault()
+  event.stopPropagation()
+  const target = event.currentTarget
+  if (target.dataset.dropRegion !== 'true') clearDropRegions()
+  target.dataset.dropRegion = 'true'
+  target.dataset.dropLabel = label
+}
+
+export function leaveDropRegion(event) {
+  if (event.currentTarget.contains(event.relatedTarget)) return
+  event.currentTarget.dataset.dropRegion = 'false'
+  if ('dropTarget' in event.currentTarget.dataset) event.currentTarget.dataset.dropTarget = 'false'
+  event.currentTarget.removeAttribute('data-drop-label')
+}
+
+export function createToastPresenter(region) {
+  return (message, kind = '') => {
+    let timer
+    const dismiss = () => { window.clearTimeout(timer); toast.remove() }
+    const pause = () => window.clearTimeout(timer)
+    const resume = () => {
+      pause()
+      if (!toast.matches(':hover') && !toast.contains(document.activeElement)) timer = window.setTimeout(dismiss, kind === 'error' ? 8000 : 4200)
+    }
+    const toast = element('div', { class: `toast ${kind}`.trim(), role: kind === 'error' ? 'alert' : 'status' },
+      element('span', {}, message),
+      kind === 'error' ? actionButton('关闭', dismiss, 'ghost small toast-close', { 'aria-label': '关闭错误提示' }) : null,
+    )
+    region.append(toast)
+    toast.addEventListener('mouseenter', pause)
+    toast.addEventListener('mouseleave', resume)
+    toast.addEventListener('focusin', pause)
+    toast.addEventListener('focusout', () => queueMicrotask(resume))
+    resume()
+  }
+}

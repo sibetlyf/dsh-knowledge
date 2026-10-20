@@ -1,0 +1,12 @@
+# Install this package as one DSH profile bundle. The profile's later user
+# patch may replace this row to select remote mode or expose the local API.
+- insert:
+    - id: knowledge
+      name: 'dsh-knowledge'
+      config:
+        backend: local
+        databasePath: !!js dshHomePath('knowledge/knowledge.sqlite')
+        connectionPath: !!js dshHomePath('knowledge/connection.json')
+        exposeApi: false
+        exposeWeb: true
+        extractionEnabled: true
