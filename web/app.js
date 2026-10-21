@@ -166,6 +166,30 @@ const notePages = new Map()
 let noteSearchPage = { nextCursor: '', total: 0, loading: false, error: '' }
 let routeFeedbackTimer = 0
 
+const LAST_DOCUMENT_KEY = 'dsh-knowledge:last-document'
+
+function readLastDocument() {
+  try {
+    const value = JSON.parse(localStorage.getItem(LAST_DOCUMENT_KEY) || 'null')
+    if (value === null || typeof value !== 'object') return undefined
+    if (typeof value.id !== 'string' || typeof value.knowledgeBaseId !== 'string') return undefined
+    return { id: value.id, knowledgeBaseId: value.knowledgeBaseId, title: typeof value.title === 'string' ? value.title : '' }
+  } catch { return undefined }
+}
+
+function rememberLastDocument(document) {
+  if (typeof document?.id !== 'string' || typeof document?.knowledgeBaseId !== 'string') return
+  try {
+    localStorage.setItem(LAST_DOCUMENT_KEY, JSON.stringify({
+      id: document.id, knowledgeBaseId: document.knowledgeBaseId, title: document.title || '',
+    }))
+  } catch { /* private mode or storage full */ }
+}
+
+function forgetLastDocument() {
+  try { localStorage.removeItem(LAST_DOCUMENT_KEY) } catch { /* ignore */ }
+}
+
 function readDocumentLayout() {
   const fallback = {
     sidebarHidden: false,
@@ -567,6 +591,15 @@ async function loadDocuments(signal, onPhase = () => {}) {
   state.documents = state.documents.filter(document => visibleBaseIds.has(document.knowledgeBaseId))
   const workspace = sessionDocumentWorkspace()
   const view = workspace.view
+  // Resume the last opened document automatically; a plain launcher visit should
+  // still show the empty state when there is no useful history.
+  if (!view.documentId) {
+    const last = readLastDocument()
+    if (last !== undefined && visibleBaseIds.has(last.knowledgeBaseId)) {
+      view.knowledgeBaseId = last.knowledgeBaseId
+      view.documentId = last.id
+    }
+  }
   const availableBaseIds = visibleBaseIds
   if (view.knowledgeBaseId && !availableBaseIds.has(view.knowledgeBaseId)) {
     view.knowledgeBaseId = ''
@@ -588,10 +621,12 @@ async function loadDocuments(signal, onPhase = () => {}) {
         view.knowledgeBaseId = document.knowledgeBaseId
         view.expandedBases.add(document.knowledgeBaseId)
         mergeDocumentSummaries(workspace, [documentSummary(document)], document.knowledgeBaseId, false)
+        rememberLastDocument(document)
       } else view.documentId = ''
     } catch (error) {
       if (error.name === 'AbortError') throw error
       view.documentId = ''
+      if (error.status === 404) forgetLastDocument()
     }
   }
   if (view.documentId) {
@@ -864,6 +899,7 @@ async function loadDocumentEditor(workspace, id, signal) {
     saveState: '已保存',
   }
   const editor = workspace.view.editor
+  rememberLastDocument(entry)
   void references.then(result => {
     if (signal?.aborted || workspace.view.loadRevision !== revision || workspace.view.editor !== editor) return
     editor.referencesLoading = false
@@ -953,24 +989,25 @@ function editorDraft(editor) {
   }
 }
 
-async function saveDocumentEditor(workspace = activeDocumentWorkspace()) {
+async function saveDocumentEditor(workspace = activeDocumentWorkspace(), options = {}) {
   if (!workspace) return false
   const editor = workspace.view.editor
   if (!editor || !editor.dirty) return true
   if (editor.saving) return false
+  if (editor.autoSaveTimer) { window.clearTimeout(editor.autoSaveTimer); editor.autoSaveTimer = 0 }
   if (!editor.isNew && editor.documentState !== 'open') {
-    showToast('这篇文档已经结束并封存；请先重新打开。', 'error')
+    if (!options.silent) showToast('这篇文档已经结束并封存；请先重新打开。', 'error')
     return false
   }
   if (!editor.title.trim() || !editor.body.trim()) {
-    showToast('标题和正文填写完整后才能保存。', 'error')
+    if (!options.silent) showToast('标题和正文填写完整后才能保存。', 'error')
     return false
   }
   if (editor.isNew && (!editor.group?.trim() || editor.group === '未分组')) {
-    showToast('新建知识文档必须指定分组。', 'error')
+    if (!options.silent) showToast('新建知识文档必须指定分组。', 'error')
     return false
   }
-  editor.saveState = '正在保存…'
+  editor.saveState = options.auto ? '自动保存中…' : '正在保存…'
   editor.saving = true
   updateEditorSaveState(editor.saveState)
   try {
@@ -984,21 +1021,32 @@ async function saveDocumentEditor(workspace = activeDocumentWorkspace()) {
     editor.version = saved.version
     editor.documentState = saved.documentState
     editor.updatedAt = saved.updatedAt
-    editor.saveState = editor.dirty ? '未保存' : '已保存'
+    editor.saveState = editor.dirty ? '未保存' : options.auto ? '已自动保存' : '已保存'
     workspace.view.documentId = saved.id
     updateEditorSaveState(editor.saveState)
     await reloadDocumentWorkspace(workspace)
     void refreshDocumentLinks(workspace, editor)
     return !editor.dirty
   } catch (error) {
-    editor.saveState = '保存失败'
+    editor.saveState = options.auto ? '自动保存失败' : '保存失败'
     updateEditorSaveState(editor.saveState)
-    showToast(friendlyError(error), 'error')
+    if (!options.silent) showToast(friendlyError(error), 'error')
     if (error.status === 409) void openDocumentSyncConflict()
     return false
   } finally {
     editor.saving = false
+    if (editor.dirty && options.auto) scheduleDocumentAutoSave(workspace, editor)
   }
+}
+
+function scheduleDocumentAutoSave(workspace, editor) {
+  if (editor.isNew || editor.documentState !== 'open' || documentWorkspaceReadOnly(workspace)) return
+  if (editor.autoSaveTimer) window.clearTimeout(editor.autoSaveTimer)
+  editor.autoSaveTimer = window.setTimeout(() => {
+    editor.autoSaveTimer = 0
+    if (workspace.view.editor !== editor || !editor.dirty || editor.saving) return
+    void saveDocumentEditor(workspace, { auto: true, silent: true })
+  }, 1400)
 }
 
 function activateKnowledgeBaseDropTarget(event, workspace, baseId) {
@@ -2050,6 +2098,7 @@ function renderNoteEditor(workspace, editor, base) {
     editor.dirty = true
     editor.saveState = editor.saving ? '正在保存…' : '未保存'
     updateEditorSaveState(editor.saveState)
+    scheduleDocumentAutoSave(workspace, editor)
   }
   const title = element('input', {
     class: 'note-title-input', value: editor.title, maxlength: 200, placeholder: '无标题文档', 'aria-label': '文档标题',
