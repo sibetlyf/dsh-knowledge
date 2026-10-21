@@ -186,6 +186,12 @@ The management API adds `GET /entries/:id/links` under the existing read permiss
 
 `document-graph.ts` builds the graph for one knowledge base from up to 100 active entries. Bodies are parsed once into `LinkInput` sets, every unordered pair is scored with the same `relationBetween` rules as the document-link panel, and edges keep their dominant reason. `GET /graph?knowledgeBaseId=...&limit=...` returns `{knowledgeBase, nodes, edges, truncated}` under the normal read permission. The console renders it in a canvas force simulation: group-colored glowing nodes, curved edges with travelling particles, drag/zoom/hover/click, a reduced-motion static fallback, and a keyboard-operable node chip list. Clicking a node routes through the existing document loader, so the graph stays read-only.
 
+## Conversation knowledge-base introduction
+
+`knowledge-base-mention-source.ts` registers a second `@` input-trigger source. Its candidates come from the same-origin conversation activity surface: `GET /knowledge-control/v1/activity/knowledge-bases?sessionId=...&q=...` returns active bases with a `mounted` flag. Picking a candidate inserts a normal reference chip, so editing, undo and copy behave like a file mention.
+
+At submit time the codec calls `POST .../knowledge-bases/:id/introduce?sessionId=...`, which upserts a **session mount** with `recallEnabled: true` and `writeMode: none` (reusing an already-enabled session mount). Serialization then returns a short instruction block naming the base. Because the mount exists before the next `agent/pre-step`, the existing recall path searches it, `knowledge_search` can address it, and `knowledge_read` accepts its handles; conversation extraction still writes only to writable mounts. A read-only remote token without mount permission fails the submit instead of silently sending without the base.
+
 ## Work journal integration
 
 Knowledge writes feed the built-in worklog. `KnowledgeWriteEvent` (from `src/knowledge-events.ts`) is emitted by the completed-turn extractor after a direct document write and by the artifact archiver after a new document version; code-category artifacts are archived and linked but intentionally do not emit a worklog event, so routine source reads cannot flood the daily report. `src/index.ts` forwards it to `journalRuntime.recordKnowledge` unless `worklogAutoUpdateEnabled` is false.

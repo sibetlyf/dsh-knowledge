@@ -41,6 +41,53 @@ const note = {
   editable: true, size: 24, sha256: 'def', version: 2, createdAt: '2026-09-01T00:00:00Z', updatedAt: '2026-09-02T00:00:00Z',
 }
 
+test('knowledge bases can be listed and introduced as a recall-only session mount', async t => {
+  let mounts = []
+  let introduced
+  const server = await activityServer({
+    async listKnowledgeBases() {
+      return [base, { ...base, id: 'base-archived', name: '已归档', status: 'archived' }]
+    },
+    async resolveMounts() { return mounts },
+    async listMounts(kind, id) {
+      assert.equal(kind, 'session')
+      assert.equal(id, 'session-a')
+      return mounts
+    },
+    async upsertMount(draft) {
+      introduced = draft
+      const created = { ...mount, ...draft, id: 'mount-new', base }
+      mounts = [created]
+      return created
+    },
+  }, { sourceKey: () => 'b'.repeat(64) })
+  t.after(server.close)
+  const headers = { 'x-dsh-knowledge-client': 'conversation-web' }
+  const listUrl = `${server.url}/knowledge-bases?sessionId=session-a&q=项目`
+  const listed = await (await fetch(listUrl, { headers })).json()
+  assert.equal(listed.sourceKey, 'b'.repeat(64))
+  assert.deepEqual(listed.items.map(item => item.id), [base.id])
+  assert.equal(listed.items[0].mounted, false)
+  const unauthorized = await fetch(listUrl)
+  assert.equal(unauthorized.status, 401)
+
+  const response = await fetch(`${server.url}/knowledge-bases/${base.id}/introduce?sessionId=session-a`, {
+    method: 'POST', headers,
+  })
+  assert.equal(response.status, 200)
+  const body = await response.json()
+  assert.equal(body.introduced, true)
+  assert.equal(body.knowledgeBase.name, base.name)
+  assert.equal(introduced.targetKind, 'session')
+  assert.equal(introduced.targetId, 'session-a')
+  assert.equal(introduced.knowledgeBaseId, base.id)
+  assert.equal(introduced.recallEnabled, true)
+  assert.equal(introduced.writeMode, 'none')
+
+  const after = await (await fetch(listUrl, { headers })).json()
+  assert.equal(after.items[0].mounted, true)
+})
+
 test('note mentions search documents only and issue fresh session-bound handles without reading content', async t => {
   const codec = new KnowledgeNoteHandleCodec(Buffer.alloc(32, 1))
   let sourceKey = 'a'.repeat(64), current = note

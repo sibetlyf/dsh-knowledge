@@ -22,6 +22,9 @@ function fixture() {
     ensureKnowledgeBases: async () => { calls.push('knowledge-bases'); return [{ id: 'base', status: 'active' }] },
     documentKnowledgeBases: bases => bases,
     sessionDocumentWorkspace: () => ({ kind: 'session', view }),
+    readLastDocument: () => undefined,
+    rememberLastDocument: () => {},
+    predictStartupDocument: async () => undefined,
   }
   return { view, state, calls, values }
 }
@@ -58,6 +61,20 @@ test('explicit deep links still load their selected document, including links wi
     assert.equal(view.expandedBases.has('base'), true)
     assert.ok(!calls.includes('stats'))
   }
+})
+
+test('a predicted recent document opens without requiring the directory', async () => {
+  const { view, calls, values } = fixture()
+  values.predictStartupDocument = async () => ({ id: 'recent', knowledgeBaseId: 'base' })
+  values.api = async path => { calls.push(path); return { id: 'recent', knowledgeBaseId: 'base' } }
+  values.documentSummary = value => value
+  values.mergeDocumentSummaries = () => {}
+  values.loadDocumentPage = async () => { calls.push('index') }
+  values.loadDocumentEditor = async (_workspace, id) => { calls.push('entry:' + id) }
+  await functions(['loadDocuments'], values).loadDocuments()
+  assert.equal(view.documentId, 'recent')
+  assert.equal(view.knowledgeBaseId, 'base')
+  assert.ok(calls.includes('entry:recent'))
 })
 
 test('unmounted document links are not fetched or opened', async () => {

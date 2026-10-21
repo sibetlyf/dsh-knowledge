@@ -31,15 +31,20 @@ export function registerKnowledgeActivityControl(
 }
 
 async function dispatch(req: IncomingMessage, res: ServerResponse, provider: KnowledgeProvider, mentions?: NoteMentionOptions): Promise<void> {
-  if (req.method !== 'GET') {
-    res.setHeader('allow', 'GET')
-    throw httpError(405, '会话知识侧栏只支持读取。')
+  if (req.method !== 'GET' && req.method !== 'POST') {
+    res.setHeader('allow', 'GET, POST')
+    throw httpError(405, '会话知识侧栏只支持读取和引入知识库。')
   }
   assertKnowledgeBrowserRequest(req, 'conversation-web')
   const url = new URL(req.url ?? '/', 'http://knowledge.local')
   const relative = url.pathname.slice(KNOWLEDGE_ACTIVITY_PATH.length).replace(/^\/+|\/+$/g, '')
   let segments: string[]
   try { segments = relative ? relative.split('/').map(decodeURIComponent) : [] } catch { throw httpError(400, '知识侧栏路径格式无效。') }
+  const introducesKnowledgeBase = segments[0] === 'knowledge-bases' && segments.length === 3 && segments[2] === 'introduce'
+  if (req.method !== 'GET' && !introducesKnowledgeBase) {
+    res.setHeader('allow', 'GET')
+    throw httpError(405, '会话知识侧栏只支持读取和引入知识库。')
+  }
   const sessionId = url.searchParams.get('sessionId')?.trim()
   if (!sessionId) throw httpError(400, 'sessionId is required')
   const projectId = url.searchParams.get('projectId')?.trim() || undefined
@@ -80,6 +85,56 @@ async function dispatch(req: IncomingMessage, res: ServerResponse, provider: Kno
       return sendJson(res, 200, { text: `${noteReferenceMarkdown(node)}\n（笔记文档引用；使用 knowledge_note_read 读取，noteHandle: ${handle}；此引用不授权修改或删除。）` })
     }
     throw httpError(404, '笔记引用接口不存在。')
+  }
+
+  if (segments[0] === 'knowledge-bases') {
+    if (segments.length === 1 && (req.method === 'GET' || req.method === undefined)) {
+      const query = url.searchParams.get('q')?.trim() ?? ''
+      const bases = (await provider.listKnowledgeBases()).filter(base => base.status === 'active')
+      const mounts = await provider.resolveMounts(sessionId, projectId)
+      const mountedIds = new Set(mounts.filter(mount => mount.enabled && mount.recallEnabled).map(mount => mount.knowledgeBaseId))
+      const items = bases
+        .filter(base => query.length === 0 || `${base.name} ${base.description}`.toLocaleLowerCase('zh-CN').includes(query.toLocaleLowerCase('zh-CN')))
+        .slice(0, 50)
+        .map(base => ({
+          id: base.id,
+          name: base.name,
+          description: base.description,
+          mounted: mountedIds.has(base.id),
+        }))
+      return sendJson(res, 200, {
+        sourceKey: mentions?.sourceKey() ?? '',
+        items,
+      })
+    }
+    if (segments.length === 3 && segments[2] === 'introduce') {
+      if (req.method !== 'POST') throw httpError(405, '引入知识库只支持 POST。')
+      const knowledgeBaseId = segments[1]!
+      const bases = await provider.listKnowledgeBases()
+      const base = bases.find(item => item.id === knowledgeBaseId && item.status === 'active')
+      if (base === undefined) throw httpError(404, '这个知识库不存在或已归档。')
+      const existing = await provider.listMounts('session', sessionId)
+      const mount = existing.find(item => item.knowledgeBaseId === knowledgeBaseId)
+      const mountId = mount !== undefined && mount.enabled && mount.recallEnabled
+        ? mount.id
+        : (await provider.upsertMount({
+          targetKind: 'session',
+          targetId: sessionId,
+          knowledgeBaseId,
+          enabled: true,
+          recallEnabled: true,
+          writeMode: 'none',
+          includeTags: [],
+          excludeTags: [],
+          extractionInstructions: '',
+        })).id
+      return sendJson(res, 200, {
+        knowledgeBase: { id: base.id, name: base.name },
+        mountId,
+        introduced: true,
+      })
+    }
+    throw httpError(404, '知识库引入接口不存在。')
   }
 
   if (segments[0] === 'notes' && segments.length === 1) {

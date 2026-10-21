@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { WritebackStatusClient } from './writeback/status-client.js'
 import { createNoteMentionSource } from './note-mention-source.js'
+import { createKnowledgeBaseMentionSource } from './knowledge-base-mention-source.js'
 import type {} from '@deepseek-ai/dsh-client-ui-input-trigger/client'
 import { observeWritebackVisibility } from './writeback/status-visibility.js'
 import { subscribeWritebackChanges } from '../web/writeback-live.js'
@@ -88,6 +89,8 @@ export function apply(ctx: ClientContext): void {
     scoped.effect(() => scoped.inputTriggers.registerSource(createNoteMentionSource(
       noteId => workspace.openDocument({ view: 'notes', noteId }),
     )), 'dsh-knowledge: @ note documents')
+    scoped.effect(() => scoped.inputTriggers.registerSource(createKnowledgeBaseMentionSource()),
+      'dsh-knowledge: @ knowledge bases')
   })
   activity = createKnowledgeActivityController(ctx, {
     beforeOpen: () => { workspace.close(); if (!docked) activatePluginWorkspace(PLUGIN_ID) },
