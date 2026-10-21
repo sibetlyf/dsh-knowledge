@@ -39,6 +39,8 @@ export interface ExtractionCheckpoint {
   save(proposals: PlannedWrite[]): void
 }
 
+const autoBaseBudget = { day: '', count: 0 }
+
 export class ExtractionCoordinator {
   private closing = false
   private readonly shutdown = new AbortController()
@@ -151,7 +153,7 @@ export class ExtractionCoordinator {
         ))
       }
       if (saved === undefined && this.config.autoCreateKnowledgeBases) {
-        mounts = [...mounts, ...await resolveAutoDestinations(this.provider, this.ctx, proposals, snapshot, signal)]
+        mounts = [...mounts, ...await resolveAutoDestinations(this.provider, this.ctx, proposals, snapshot, signal, this.config.autoCreateKnowledgeBasesMaxPerDay)]
       }
       const plan: PlannedWrite[] = saved ?? coalesceDocumentProposals(proposals).flatMap(proposal => {
         const mount = mounts.find(item => item.knowledgeBaseId === proposal.draft.knowledgeBaseId)
@@ -570,9 +572,15 @@ async function resolveAutoDestinations(
   proposals: ExtractionProposal[],
   snapshot: TurnSnapshot,
   signal: AbortSignal,
+  maxCreationsPerDay: number,
 ): Promise<ResolvedKnowledgeMount[]> {
   const created: ResolvedKnowledgeMount[] = []
   const resolved = new Map<string, { base: KnowledgeBase; mount: ResolvedKnowledgeMount }>()
+  const day = new Date().toISOString().slice(0, 10)
+  if (autoBaseBudget.day !== day) {
+    autoBaseBudget.day = day
+    autoBaseBudget.count = 0
+  }
   for (const proposal of proposals) {
     const requested = proposal.newKnowledgeBase
     if (requested === undefined) continue
@@ -583,6 +591,10 @@ async function resolveAutoDestinations(
       const bases = await provider.listKnowledgeBases(signal)
       let base = bases.find(item => item.status === 'active' && item.name.normalize('NFKC').trim().toLocaleLowerCase() === key)
       if (base === undefined) {
+        if (autoBaseBudget.count >= Math.max(0, maxCreationsPerDay)) {
+          ctx.logger.warn(`dsh-knowledge: 今日自动新建知识库已达上限 ${maxCreationsPerDay}，跳过「${requested.name}」`)
+          continue
+        }
         base = await provider.createKnowledgeBase({
           name: requested.name,
           description: requested.description,
@@ -590,6 +602,7 @@ async function resolveAutoDestinations(
           extractionInstructions: '',
           writebackPolicy: 'conservative',
         }, signal)
+        autoBaseBudget.count += 1
         ctx.logger.info(`dsh-knowledge: 自动新建知识栏目「${base.name}」`)
       }
       const target = snapshot.projectId === undefined

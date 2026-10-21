@@ -64,11 +64,14 @@ export interface Config {
   artifactArchiveMaxFileBytes: number
   artifactArchiveMaxChars: number
   artifactArchiveStoreContent: boolean
+  artifactArchivePaperEnabled: boolean
+  artifactArchivePaperBaseName: string
   artifactArchiveMaxEntries: number
   artifactArchiveAutoMount: boolean
   autoWritableMountEnabled: boolean
   autoWritableMountWriteMode: 'direct' | 'audit'
   autoCreateKnowledgeBases: boolean
+  autoCreateKnowledgeBasesMaxPerDay: number
   autoApprovePendingEnabled: boolean
   autoApprovePendingIntervalMinutes: number
   noteOrganizeAutoApprove: boolean
@@ -112,11 +115,14 @@ export const Config: Schema<Config> = Schema.object({
   artifactArchiveMaxFileBytes: Schema.number().min(1024).max(512 * 1024 * 1024).default(32 * 1024 * 1024).description('单个制品允许归档的最大字节数'),
   artifactArchiveMaxChars: Schema.number().min(1000).max(46_000).default(46_000).description('开启正文入库时单个制品写入知识文档的最大正文字符数'),
   artifactArchiveStoreContent: Schema.boolean().default(false).description('是否把抽取到的文件正文写入知识库文档；默认 false，数据库只保存文件链接、元数据与关键词，完整文件保留在归档目录'),
+  artifactArchivePaperEnabled: Schema.boolean().default(true).description('识别 PDF 论文并把摘要、关键词、分类与年份写入知识库；论文统一归入一个论文知识库，按类别分组'),
+  artifactArchivePaperBaseName: Schema.string().default('论文库').description('论文知识库名称；首次出现论文时自动创建，不按单篇论文新建知识库'),
   artifactArchiveMaxEntries: Schema.number().min(100).max(200_000).default(20_000).description('归档索引保留的最大记录数'),
   artifactArchiveAutoMount: Schema.boolean().default(true).description('首次归档时把制品知识库挂载到对应项目以参与召回'),
   autoWritableMountEnabled: Schema.boolean().default(true).description('当项目没有任何可写知识库挂载时，自动把默认知识库以可写模式挂载到项目，避免“未挂载可写知识库”而无法写入'),
   autoWritableMountWriteMode: Schema.union(['direct', 'audit']).default('direct').description('自动挂载默认知识库时使用的写入模式：direct 直接写入，audit 进入待审核'),
   autoCreateKnowledgeBases: Schema.boolean().default(true).description('提取时若现有知识库都不适合，允许模型自动新建一个知识栏目（知识库）并直接写入'),
+  autoCreateKnowledgeBasesMaxPerDay: Schema.number().min(0).max(20).default(3).description('每天最多自动新建多少个知识库（0 表示只复用现有知识库），避免知识库爆炸'),
   autoApprovePendingEnabled: Schema.boolean().default(true).description('自动批准待审核的非冲突候选，取消人工审核；包含凭据等敏感内容的候选仍保留人工处理'),
   autoApprovePendingIntervalMinutes: Schema.number().min(1).max(60).default(2).description('自动批准待审核候选的轮询间隔（分钟）'),
   noteOrganizeAutoApprove: Schema.boolean().default(true).description('笔记自动整理生成的草案直接落盘，不再等待人工批准'),
@@ -147,11 +153,14 @@ export interface ResolvedConfig extends Config {
   artifactArchiveMaxFileBytes: number
   artifactArchiveMaxChars: number
   artifactArchiveStoreContent: boolean
+  artifactArchivePaperEnabled: boolean
+  artifactArchivePaperBaseName: string
   artifactArchiveMaxEntries: number
   artifactArchiveAutoMount: boolean
   autoWritableMountEnabled: boolean
   autoWritableMountWriteMode: 'direct' | 'audit'
   autoCreateKnowledgeBases: boolean
+  autoCreateKnowledgeBasesMaxPerDay: number
   autoApprovePendingEnabled: boolean
   autoApprovePendingIntervalMinutes: number
   noteOrganizeAutoApprove: boolean
@@ -191,11 +200,14 @@ export function resolveConfig(config: Config): ResolvedConfig {
     artifactArchiveMaxFileBytes: config.artifactArchiveMaxFileBytes ?? 32 * 1024 * 1024,
     artifactArchiveMaxChars: config.artifactArchiveMaxChars ?? 46_000,
     artifactArchiveStoreContent: config.artifactArchiveStoreContent ?? false,
+    artifactArchivePaperEnabled: config.artifactArchivePaperEnabled ?? true,
+    artifactArchivePaperBaseName: (config.artifactArchivePaperBaseName ?? '论文库').trim() || '论文库',
     artifactArchiveMaxEntries: config.artifactArchiveMaxEntries ?? 20_000,
     artifactArchiveAutoMount: config.artifactArchiveAutoMount ?? true,
     autoWritableMountEnabled: config.autoWritableMountEnabled ?? true,
     autoWritableMountWriteMode: config.autoWritableMountWriteMode ?? 'direct',
     autoCreateKnowledgeBases: config.autoCreateKnowledgeBases ?? true,
+    autoCreateKnowledgeBasesMaxPerDay: config.autoCreateKnowledgeBasesMaxPerDay ?? 3,
     autoApprovePendingEnabled: config.autoApprovePendingEnabled ?? true,
     autoApprovePendingIntervalMinutes: config.autoApprovePendingIntervalMinutes ?? 2,
     noteOrganizeAutoApprove: config.noteOrganizeAutoApprove ?? true,

@@ -15,6 +15,8 @@
   - **文件放在归档文件夹，数据库只保存链接、元数据与关键词**（默认不复制正文，`artifactArchiveStoreContent: false`）；知识文档给出绝对文件路径与 `read` 提示，PDF/Office 抽取文字仅用于生成关键词。
   - 自动创建并挂载 `制品归档` 知识库（仅召回、不参与对话回写），文件按类别自动归入 `文档 / 表格 / 演示 / 图片 / 压缩包 / 音视频 / 代码 / 其他` 栏目并参与双向链接。
   - 没有可写挂载时自动把「默认知识库」以可写模式挂载到项目；新建知识栏目与普通待审候选都会自动落盘，不再需要人工审核（冲突与凭据类内容仍保留安全拦截）。
+  - **论文自动整理**：识别 PDF 论文并提取标题、摘要、关键词、年份、arXiv/DOI 与类别；首次出现论文时只创建一个「论文库」，按 `论文 · <类别>` 分组，摘要与关键词进入数据库并立即索引；非论文 PDF 仍留在制品库。
+  - **谨慎新建知识库**：对话提取最多每轮新建一个知识栏目，每天自动新建知识库默认不超过 3 个（`autoCreateKnowledgeBasesMaxPerDay`），同名栏目复用；论文只用一个论文库，不按单篇论文建库。
   - 控制台新增「制品文件」页面：按格式预览图片、PDF、纯文本、音视频，下载任意文件，并一键打开对应知识文档进行编辑、调整分组或移动。
   - 默认排除密钥、数据库与依赖目录，可配置扩展名、大小上限与排除模式。详见 [制品自动归档](docs/artifacts.md)。
 - **自动分类与免审核**：
@@ -82,10 +84,14 @@ artifactArchiveExclude: ['**/node_modules/**', '**/.env']     # 排除路径模�
 artifactArchiveMaxFileBytes: 33554432  # 单文件上限（字节，默认 32 MiB）
 artifactArchiveMaxChars: 46000          # 开启正文入库时的正文上限
 artifactArchiveStoreContent: false      # 默认只存链接/元数据/关键词；true 才把抽取正文写入数据库
+artifactArchivePaperEnabled: true       # 识别 PDF 论文并提取摘要/关键词/分类
+artifactArchivePaperBaseName: '论文库'  # 论文知识库，首次出现论文时创建一次
+autoCreateKnowledgeBasesMaxPerDay: 3    # 每天最多自动新建知识库数量
 artifactArchiveAutoMount: true         # 自动挂载制品库到项目以参与召回
 autoWritableMountEnabled: true         # 无可写知识库挂载时自动挂载「默认知识库」
 autoWritableMountWriteMode: direct     # direct 直接写入；audit 进入待审核
 autoCreateKnowledgeBases: true         # 现有栏目都不适合时自动新建知识栏目（知识库）
+autoCreateKnowledgeBasesMaxPerDay: 3   # 每天自动新建知识库上限；0 只复用现有库
 autoApprovePendingEnabled: true        # 自动批准非冲突待审候选，取消人工审核
 autoApprovePendingIntervalMinutes: 2   # 自动批准轮询间隔（分钟）
 noteOrganizeAutoApprove: true          # 笔记整理草案直接落盘

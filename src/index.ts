@@ -192,6 +192,8 @@ export function apply(ctx: Context, config: KnowledgeConfig): void {
     maxFileBytes: resolved.artifactArchiveMaxFileBytes,
     maxContentChars: resolved.artifactArchiveMaxChars,
     storeContent: resolved.artifactArchiveStoreContent,
+    paperEnabled: resolved.artifactArchivePaperEnabled,
+    paperBaseName: resolved.artifactArchivePaperBaseName,
     maxEntries: resolved.artifactArchiveMaxEntries,
     autoMount: resolved.artifactArchiveAutoMount,
     resolveUpload: createUploadReader({

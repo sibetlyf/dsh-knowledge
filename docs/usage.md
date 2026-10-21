@@ -78,13 +78,14 @@
 
 - 归档副本位于知识库数据库相邻的 `artifacts/`（可用 `artifactArchivePath` 修改），按 SHA-256 内容寻址；相同内容只保存一份，每次内容变化都保留旧版本字节。**具体文件保存在归档文件夹**，数据库中的知识文档只保存文件路径、归档副本链接、元数据、关键词与读取提示，默认不复制正文（`artifactArchiveStoreContent: false`；设为 `true` 才把抽取正文写入数据库）。
 - 每个制品对应一篇知识文档（标题形如 `制品 · reports/q4.md`，上传附件为 `制品 · 用户上传/<文件名>`，类型 `fact`），按文件类别归入 `制品 · 文档 / 表格 / 演示 / 图片 / 压缩包 / 音视频 / 代码 / 其他` 栏目；内容变化时原地更新并形成新版本，删除源文件后归档副本仍可读。
+- **PDF 论文**：自动识别后提取标题、摘要、关键词、年份、arXiv/DOI 与类别，标题为 `论文 · <标题>`，归入 `论文 · <类别>` 分组；首次出现论文时只创建一个「论文库」，摘要与关键词写入数据库并立即进入全文索引。非论文 PDF 不触发论文库。可用 `artifactArchivePaperEnabled: false` 关闭。
 - 默认归档所有格式（`artifactArchiveExtensions: ['*']`）；可改成扩展名列表收窄文件工具写入的范围，读取/引用/变更/交付/上传仍按“任务涉及即归档”处理。所有来源都受单文件大小上限与排除模式约束。
 - 源码文件会归档并参与双向链接，但不写入工作日报素材，避免日报被代码文件淹没。
 - 每篇知识文档包含文件路径、关键词与读取提示；PDF、Office/ODF、文本会抽取文字用于生成关键词（默认不写入正文），图片、压缩包、音视频和其他二进制保留元数据并以归档副本为准。
 - 管理台「制品文件」页面可预览图片、PDF、纯文本、音视频并下载任意格式，或一键打开对应知识文档进行编辑、调整分组与跨库移动；归档副本保持不可变。
 - 首次归档时自动创建 `artifactArchiveBaseName`（默认 `制品归档`）知识库，并以“仅召回、不参与对话回写”（`writeMode: none`）的方式挂载到当前项目，后续搜索与自动召回直接命中制品内容。已有挂载设置不会被覆盖；知识库被人工归档后停止自动归档。
 - 每轮第一个模型步骤检查项目挂载：没有任何可写挂载时，自动把「默认知识库」以 `autoWritableMountWriteMode`（默认 `direct`）挂载到项目；已有可写挂载、被显式关闭或设为仅召回的默认挂载都保持原样。可用 `autoWritableMountEnabled: false` 关闭该行为。
-- 对话知识提取优先复用已有文档分组；现有知识栏目都不适合时，`autoCreateKnowledgeBases` 允许模型自动新建一个知识栏目（知识库）并直接挂载写入。
+- 对话知识提取优先复用已有文档分组；现有知识栏目都不适合时，`autoCreateKnowledgeBases` 允许模型自动新建一个知识栏目（知识库）并直接挂载写入；每日自动新建知识库数量由 `autoCreateKnowledgeBasesMaxPerDay`（默认 3，0 表示只复用）限制，同名栏目复用。
 - `autoApprovePendingEnabled` 开启时，后台自动批准非冲突的待审核候选（默认 2 分钟一次，且每轮结束触发），`noteOrganizeAutoApprove` 让笔记整理草案直接落盘；真实冲突与凭据类内容仍保留人工确认。
 - 默认排除 `node_modules`、`.git`、`.dsh`、`.env`、证书私钥、SQLite 数据库等路径；单文件超过 `artifactArchiveMaxFileBytes` 或正文超过 `artifactArchiveMaxChars` 时跳过或截断。
 - 只读接口 `GET /knowledge-control/v1/artifacts`（最近 500 条记录）和 `GET /knowledge-control/v1/artifacts/<id>`（下载副本），与其他管理接口一样要求同源管理台请求头。

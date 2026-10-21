@@ -5,6 +5,7 @@ import { atomicWriteFile } from '../atomic-file.js'
 import type { KnowledgeDraft, KnowledgeEntry, KnowledgeScope } from '../domain.js'
 import type { KnowledgeProvider } from '../provider.js'
 import type { SessionLike } from '../runtime.js'
+import { extractPaperMetadata, type PaperMetadata } from './paper.js'
 import type { KnowledgeWriteEvent } from '../knowledge-events.js'
 import {
   collectTurnArtifacts,
@@ -82,6 +83,10 @@ export interface ArtifactArchiverOptions {
   maxEntries: number
   /** Mount the artifact base for recall on the artifact's project. */
   autoMount: boolean
+  /** Recognize PDF papers and file them in the paper base with metadata. */
+  paperEnabled?: boolean
+  /** Knowledge base that receives papers; created once on first paper. */
+  paperBaseName?: string
   /** Reads uploaded attachment bytes; absent when the Host has no attachment service. */
   resolveUpload?: (upload: ArtifactUploadCandidate) => Promise<ResolvedUpload | undefined>
   /** Called after a new artifact document version is stored; feeds the work journal. */
@@ -186,6 +191,7 @@ export class ArtifactArchiver {
   private dirty = false
   private closed = false
   private baseId: string | undefined
+  private paperBaseId: string | undefined
   private tail: Promise<unknown> = Promise.resolve()
   private queuedBatches = 0
   private activeBatch: { total: number; done: number; current?: string } | undefined
@@ -386,12 +392,25 @@ export class ArtifactArchiver {
       if (await this.entryUsable(previous.entryId)) return item('unchanged', previous.entryId)
     }
 
-    const baseId = await this.ensureBase()
     const blob = this.blobPath(sha256, input.extension)
     await this.writeBlob(blob, input.bytes)
     const content = extractArtifactContent(input.extension, input.bytes, this.options.maxContentChars)
-    const draft = this.buildDraft({ baseId, input, sha256, blob, content, context, projectId })
-    const reuse = previous !== undefined && previous.knowledgeBaseId === baseId ? previous : undefined
+    const paper = this.options.paperEnabled !== false && input.extension === 'pdf'
+      ? extractPaperMetadata(content.text, input.display)
+      : undefined
+    const baseId = await this.ensureBase(paper !== undefined)
+    const draft = this.buildDraft({ baseId, input, sha256, blob, content, ...paper === undefined ? {} : { paper }, context, projectId })
+    let reuse = previous !== undefined && previous.knowledgeBaseId === baseId ? previous : undefined
+    if (reuse === undefined && previous !== undefined && paper !== undefined) {
+      // Migrate an earlier PDF artifact into the paper base instead of creating a
+      // second document for the same path.
+      try {
+        await this.options.provider.moveDocument(previous.entryId, baseId)
+        reuse = { ...previous, knowledgeBaseId: baseId }
+      } catch (error) {
+        this.logger.warn(`dsh-knowledge: 迁移论文 ${input.display} 到论文库失败: ${message(error)}`)
+      }
+    }
     let action: 'created' | 'updated' = 'created'
     let entry: KnowledgeEntry | undefined
     if (reuse !== undefined) {
@@ -497,30 +516,45 @@ export class ArtifactArchiver {
     }
   }
 
-  private async ensureBase(): Promise<string> {
-    if (this.baseId !== undefined) {
+  private async ensureBase(paper = false): Promise<string> {
+    const name = paper ? (this.options.paperBaseName ?? '论文库') : this.options.baseName
+    if (paper && name === this.options.baseName) return this.ensureBase(false)
+    if (paper && this.paperBaseId !== undefined) {
+      const current = await this.options.provider.getKnowledgeBase(this.paperBaseId).catch(() => undefined)
+      if (current !== undefined && current.status === 'active') return this.paperBaseId
+      this.paperBaseId = undefined
+    }
+    if (!paper && this.baseId !== undefined) {
       const current = await this.options.provider.getKnowledgeBase(this.baseId).catch(() => undefined)
       if (current !== undefined && current.status === 'active') return this.baseId
       this.baseId = undefined
     }
     const bases = await this.options.provider.listKnowledgeBases()
-    const active = bases.find(base => base.name === this.options.baseName && base.status === 'active')
+    const active = bases.find(base => base.name === name && base.status === 'active')
     if (active !== undefined) {
-      this.baseId = active.id
+      if (paper) this.paperBaseId = active.id
+      else this.baseId = active.id
       return active.id
     }
-    if (bases.some(base => base.name === this.options.baseName)) {
-      throw new Error(`知识库「${this.options.baseName}」已归档，已停止自动归档`)
+    if (bases.some(base => base.name === name)) {
+      if (paper) {
+        this.logger.warn(`dsh-knowledge: 论文知识库「${name}」已归档，论文继续归档到制品库`)
+        return this.ensureBase(false)
+      }
+      throw new Error(`知识库「${name}」已归档，已停止自动归档`)
     }
     const created = await this.options.provider.createKnowledgeBase({
-      name: this.options.baseName,
-      description: '由 dsh-knowledge 自动归档的制品文件：交付文档、表格、演示文稿、图片与数据文件；每篇文档对应一个制品路径并保留完整版本历史。',
-      defaultTags: ['制品', 'artifact'],
+      name,
+      description: paper
+        ? '自动整理的学术论文：按论文类别分组，保存标题、摘要、关键词与年份，完整 PDF 保留在归档目录。'
+        : '由 dsh-knowledge 自动归档的制品文件：交付文档、表格、演示文稿、图片与数据文件；每篇文档对应一个制品路径并保留完整版本历史。',
+      defaultTags: paper ? ['论文', 'paper'] : ['制品', 'artifact'],
       extractionInstructions: '',
       writebackPolicy: 'conservative',
     })
-    this.baseId = created.id
-    this.logger.info(`dsh-knowledge: 已创建制品知识库「${created.name}」`)
+    if (paper) this.paperBaseId = created.id
+    else this.baseId = created.id
+    this.logger.info(`dsh-knowledge: 已创建${paper ? '论文' : '制品'}知识库「${created.name}」`)
     return created.id
   }
 
@@ -562,11 +596,13 @@ export class ArtifactArchiver {
     sha256: string
     blob: string
     content: ArtifactContent
+    paper?: PaperMetadata
     context: ArtifactIngestContext
     projectId: string | undefined
   }): KnowledgeDraft {
     const scope: KnowledgeScope = input.projectId === undefined ? { kind: 'global' } : { kind: 'project', id: input.projectId }
-    const title = artifactTitle(input.input.display)
+    const paper = input.paper
+    const title = paper === undefined ? artifactTitle(input.input.display) : paperTitle(paper.title)
     const source = input.input.source
     const tags = [
       'artifact',
@@ -574,10 +610,11 @@ export class ArtifactArchiver {
       ...(source === 'upload' ? ['upload'] : source === 'presented' ? ['deliverable'] : [source]),
       ...(input.input.extension.length > 0 ? [input.input.extension] : []),
       source,
+      ...paper === undefined ? [] : ['论文', 'paper', ...paper.categories, ...paper.codes, ...(paper.year === undefined ? [] : [String(paper.year)])],
     ]
     return {
       knowledgeBaseId: input.baseId,
-      group: artifactGroup(input.input.extension),
+      group: paper === undefined ? artifactGroup(input.input.extension) : `论文 · ${paper.categories[0] ?? '综合'}`,
       title,
       body: artifactBody({
         title,
@@ -590,6 +627,7 @@ export class ArtifactArchiver {
         ...input.input.description === undefined ? {} : { description: input.input.description },
         extension: input.input.extension,
         content: input.content,
+        ...paper === undefined ? {} : { paper },
         archivePath: join(this.root, input.blob),
         storeContent: this.storeContent,
         context: input.context,
@@ -698,6 +736,13 @@ export function artifactGroup(extension: string): string {
   return `制品 · ${artifactCategory(extension)}`.slice(0, 64)
 }
 
+function paperTitle(title: string): string {
+  const prefix = '论文 · '
+  const max = 200 - prefix.length
+  const value = title.replace(/\s+/gu, ' ').trim() || '未命名论文'
+  return value.length <= max ? `${prefix}${value}` : `${prefix}${value.slice(0, max - 1)}…`
+}
+
 function artifactBody(input: {
   title: string
   display: string
@@ -710,10 +755,13 @@ function artifactBody(input: {
   description?: string
   extension: string
   content: ArtifactContent
+  paper?: PaperMetadata
   storeContent: boolean
   context: ArtifactIngestContext
 }): string {
-  const keywords = extractArtifactKeywords(`${input.display}\n${input.content.text}`, 12)
+  const paper = input.paper
+  const extracted = paper === undefined ? extractArtifactKeywords(`${input.display}\n${input.content.text}`, 12) : []
+  const keywords = [...new Set([...(paper?.keywords ?? []), ...extracted])].slice(0, 20)
   const lines = [
     `# ${input.title}`,
     '',
@@ -725,15 +773,26 @@ function artifactBody(input: {
     `- SHA-256：\`${input.sha256}\``,
     `- 来源：${sourceLabel(input.source)}`,
     `- 会话：\`${input.context.sessionId}\` · 第 ${input.context.turn} 轮`,
+    ...paper === undefined ? [] : [
+      `- 论文分类：${paper.categories.join(' / ')}`,
+      ...paper.year === undefined ? [] : [`- 年份：${paper.year}`],
+      ...paper.arxivId === undefined ? [] : [`- arXiv：\`${paper.arxivId}\``],
+      ...paper.doi === undefined ? [] : [`- DOI：\`${paper.doi}\``],
+    ],
     `- 关键词：${keywords.length > 0 ? keywords.join('、') : '无'}`,
     ...input.description === undefined ? [] : [`- 说明：${oneLine(input.description)}`],
     '',
-    '> 数据库只保存文件链接、元数据与关键词；完整内容保存在归档目录中的文件里。',
+    '> 数据库保存文件链接、元数据、摘要与关键词；完整内容保存在归档目录中的文件里。',
     '',
+  ]
+  if (paper?.abstract) {
+    lines.push('## 摘要', '', paper.abstract, '')
+  }
+  lines.push(
     '## 使用',
     '',
     `使用 read 工具读取 \`${input.archivePath}\` 获取完整内容。`,
-  ]
+  )
   if (input.storeContent) {
     lines.push('', '## 内容')
     if (input.content.text.length > 0) {

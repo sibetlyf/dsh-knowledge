@@ -69,6 +69,19 @@
 
 文本、Markdown、CSV/TSV/JSON/YAML/XML/HTML 直接读取；PDF 使用内置纯 TypeScript 解析器；`.docx`、`.pptx`、`.xlsx` 与 `.odt/.ods/.odp` 从 Open XML / ODF 容器里抽取可见文字（Word 正文、页眉页脚与脚注，演示文稿逐页，表格按行转 TSV）。图片、压缩包、音视频与其他二进制保留元数据，原始字节以归档副本为准。抽取文字默认只用于生成关键词，开启 `artifactArchiveStoreContent` 后才写入正文，并按 `artifactArchiveMaxChars` 截断。
 
+## 论文自动整理
+
+`artifactArchivePaperEnabled` 默认开启。PDF 归档时插件用本地解析器识别论文，不调用模型：
+
+- 提取**标题、摘要（Abstract/摘要）、关键词、年份、arXiv ID、DOI**；没有关键词行时从标题生成少量稳定关键词；
+- 分类优先取 arXiv 类别（`cs.CL`、`cs.CV`、`cs.LG` 等），否则按标题/关键词规则归入自然语言处理、计算机视觉、机器学习、系统、理论、医学等；
+- 首次出现论文时**只创建一个**「论文库」知识库（`artifactArchivePaperBaseName`），论文按 `论文 · <类别>` 分组；不会按单篇论文新建知识库；
+- 数据库中的论文文档保存标题、摘要、关键词、分类、年份、arXiv/DOI、文件路径与读取提示；完整 PDF 仍在归档文件夹；
+- 摘要和关键词写入知识文档正文，创建/更新时立即进入全文索引，可被搜索与召回；
+- 非论文 PDF 继续进入「制品归档」，不会误建论文库；论文库被人工归档时回退到制品库，不重复创建。
+
+已有历史 PDF 若之前已归档到制品库，会在该文件内容下一次变化时移动到论文库；内容未变化的旧记录暂时保留，避免在归档路径中无提示地改动。
+
 ## 手动查看、预览、下载、编辑与移动
 
 管理台「知识工作区 → 制品文件」提供人工浏览界面：
@@ -111,11 +124,14 @@ artifactArchiveExclude: ['**/node_modules/**', '**/.env']     # 默认已含密�
 artifactArchiveMaxFileBytes: 33554432   # 单文件上限 32 MiB
 artifactArchiveMaxChars: 46000          # 开启正文入库时的正文上限
 artifactArchiveStoreContent: false      # 默认只存链接/元数据/关键词；true 才把抽取正文写入数据库
+artifactArchivePaperEnabled: true        # 识别 PDF 论文，提取摘要/关键词/分类并归档到论文库
+artifactArchivePaperBaseName: '论文库'   # 论文知识库；首次出现论文时创建一次，按类别分组
 artifactArchiveMaxEntries: 20000        # 索引记录上限（超出时淘汰最久未更新的记录）
 artifactArchiveAutoMount: true          # 自动挂载制品库到项目以便召回
 autoWritableMountEnabled: true          # 无可写挂载时自动挂载默认知识库
 autoWritableMountWriteMode: direct      # direct 直接写入；audit 进入待审核
 autoCreateKnowledgeBases: true          # 现有栏目都不适合时自动新建知识栏目
+autoCreateKnowledgeBasesMaxPerDay: 3    # 每天最多自动新建知识库数量；0 只复用现有库
 autoApprovePendingEnabled: true         # 自动批准非冲突待审候选
 autoApprovePendingIntervalMinutes: 2    # 自动批准轮询间隔（分钟）
 noteOrganizeAutoApprove: true           # 笔记整理草案直接落盘
