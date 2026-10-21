@@ -121,6 +121,8 @@ export interface RuntimeContextLike {
   llm: LlmLike
   tools: ToolRuntimeLike
   provide?(name: string, value: unknown): () => void
+  /** Optional Cordis event bridge used by the plugin integration contract. */
+  emit?(name: string, payload?: unknown): void
   webServer?: WebServerLike
   settings?: {
     configure(options: { auto: boolean }, owner?: unknown): () => void

@@ -1,13 +1,17 @@
 import type { Context } from '@deepseek-ai/cordis'
 import { createHash, randomBytes } from 'node:crypto'
 import { existsSync } from 'node:fs'
+import { readdir, stat } from 'node:fs/promises'
+import type { IncomingMessage } from 'node:http'
 import { homedir } from 'node:os'
-import { basename, dirname, join } from 'node:path'
+import { basename, dirname, join, resolve } from 'node:path'
 import { apply as registerWorklog, type JournalRuntime } from './worklog-runtime.js'
-import { ArtifactArchiver } from './artifacts/archive.js'
+import { ArtifactArchiver, globToRegExp } from './artifacts/archive.js'
+import { scanFolder } from './artifacts/folder-import.js'
 import { lastAssistantRoute } from './artifacts/collect.js'
 import { createUploadReader } from './artifacts/uploads.js'
 import { createKnowledgeWatcher } from './knowledge-watcher.js'
+import { createKnowledgeIntegration, createKnowledgeWriteBus, KNOWLEDGE_INTEGRATION_SERVICE } from './integration.js'
 import { migrateLegacyKnowledgeStore } from './migrate-knowledge-store.js'
 import { createWritableMountGuard } from './auto-writable.js'
 import { createPendingAutoApprover } from './auto-approve.js'
@@ -131,6 +135,7 @@ export function apply(ctx: Context, config: KnowledgeConfig): void {
   let activeConnection = initialConnection
   let connectionChanging = false
   let journalRuntime: JournalRuntime | undefined
+  const writeBus = createKnowledgeWriteBus(runtime)
   ctx.inject?.(['connection'], journal => {
     const connection = journal.get('connection') as { requestRejection?: unknown } | undefined
     if (typeof connection?.requestRejection !== 'function') return
@@ -146,7 +151,10 @@ export function apply(ctx: Context, config: KnowledgeConfig): void {
   }
   const knowledgeWatcher = resolved.worklogAutoUpdateEnabled && provider.mode === 'local' ? createKnowledgeWatcher({
     provider,
-    emit: event => { journalRuntime?.recordKnowledge(event) },
+    emit: event => {
+      writeBus.emit(event)
+      journalRuntime?.recordKnowledge(event)
+    },
     logger: runtime.logger,
   }) : undefined
   if (knowledgeWatcher) {
@@ -159,6 +167,7 @@ export function apply(ctx: Context, config: KnowledgeConfig): void {
       ? { provider: clientSettings.writebackProvider, model: clientSettings.writebackModel }
       : undefined
   ), event => {
+    writeBus.emit(event)
     if (resolved.worklogAutoUpdateEnabled) journalRuntime?.recordKnowledge(event)
   })
   const writebackStatuses = new Map<string, WritebackStatus>()
@@ -202,6 +211,7 @@ export function apply(ctx: Context, config: KnowledgeConfig): void {
       logger: runtime.logger,
     }),
     onArchived: event => {
+      writeBus.emit(event)
       if (resolved.worklogAutoUpdateEnabled) journalRuntime?.recordKnowledge(event)
     },
     logger: runtime.logger,
@@ -243,6 +253,11 @@ export function apply(ctx: Context, config: KnowledgeConfig): void {
   runtime.provide?.(KNOWLEDGE_TRACKING_SERVICE, createKnowledgeTrackingService(provider))
   runtime.provide?.(KNOWLEDGE_MOUNT_MANAGEMENT_SERVICE, createKnowledgeMountManagement(provider, () => providerRouter.revision))
   runtime.provide?.('dshKnowledgeNoteRecording', createNoteRecording(provider))
+  runtime.provide?.(KNOWLEDGE_INTEGRATION_SERVICE, createKnowledgeIntegration({
+    provider,
+    ...artifactArchiver === undefined ? {} : { archive: artifactArchiver },
+    bus: writeBus,
+  }))
 
   const autoOrganizer = managementProvider !== undefined ? new NoteAutoOrganizer(
     runtime,
@@ -495,13 +510,45 @@ export function apply(ctx: Context, config: KnowledgeConfig): void {
         path: '/knowledge-control/v1/artifacts',
         async handler(req, res) {
           try {
+            const url = new URL(req.url ?? '/', 'http://localhost')
+            const rest = url.pathname.replace(/^\/knowledge-control\/v1\/artifacts\/?/u, '')
+            if (req.method === 'POST' && rest === 'import') {
+              assertKnowledgeBrowserRequest(req, 'management-web')
+              const body = await readControlJson(req)
+              const folder = typeof body.path === 'string' ? body.path.trim() : ''
+              if (folder.length === 0) throw connectionError(400, '请选择要导入的文件夹')
+              const projectId = typeof body.projectId === 'string' && body.projectId.trim().length > 0 ? body.projectId.trim() : undefined
+              const archiveRoot = resolved.artifactArchivePath ?? join(
+                dirname(resolved.databasePath ?? resolved.connectionPath ?? join(homedir(), '.dsh', 'knowledge', 'knowledge.sqlite')),
+                'artifacts',
+              )
+              const scan = await scanFolder(folder, {
+                maxFiles: 800,
+                excludePatterns: resolved.artifactArchiveExclude.map(globToRegExp),
+                excludeRoots: [archiveRoot, dirname(resolved.databasePath ?? resolved.connectionPath ?? archiveRoot)],
+              })
+              const candidates = scan.files.map(path => ({ path, source: 'folder' as const }))
+              if (candidates.length > 0) {
+                const context = {
+                  sessionId: `folder-${randomBytes(8).toString('hex')}`,
+                  cwd: projectId ?? scan.root,
+                  turn: 0,
+                }
+                // The archiver bounds one pass; queue several passes instead of
+                // silently dropping the tail of a large folder.
+                for (let offset = 0; offset < candidates.length; offset += 256) {
+                  archive.schedule(candidates.slice(offset, offset + 256), context)
+                }
+              }
+              res.writeHead(202, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' })
+                .end(JSON.stringify({ accepted: candidates.length, root: scan.root, truncated: scan.truncated, skipped: scan.skipped }))
+              return
+            }
             if (req.method !== 'GET') {
-              res.writeHead(405, { allow: 'GET' }).end()
+              res.writeHead(405, { allow: 'GET, POST' }).end()
               return
             }
             assertKnowledgeBrowserRequest(req, 'management-web')
-            const url = new URL(req.url ?? '/', 'http://localhost')
-            const rest = url.pathname.replace(/^\/knowledge-control\/v1\/artifacts\/?/u, '')
             if (rest === '') {
               const artifacts = (await archive.list()).slice(0, 500)
               res.writeHead(200, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' })
@@ -533,6 +580,32 @@ export function apply(ctx: Context, config: KnowledgeConfig): void {
       })
       if (disposeArtifacts !== undefined) httpRuntime.effect(() => disposeArtifacts, 'dsh-knowledge.artifacts-api')
     }
+    const disposeFolders = httpRuntime.webServer?.register({
+      kind: 'prefix', path: '/knowledge-control/v1/folders',
+      async handler(req, res) {
+        try {
+          if (req.method !== 'GET') { res.writeHead(405, { allow: 'GET' }).end(); return }
+          assertKnowledgeBrowserRequest(req, 'management-web')
+          const url = new URL(req.url ?? '/', 'http://localhost')
+          const requested = url.searchParams.get('path')?.trim() || homedir()
+          const path = resolve(requested)
+          const info = await stat(path).catch(() => undefined)
+          if (info === undefined || !info.isDirectory()) throw connectionError(400, '文件夹不存在或不可访问')
+          const entries = await readdir(path, { withFileTypes: true })
+          const directories = entries
+            .filter(entry => entry.isDirectory() && !entry.isSymbolicLink())
+            .sort((left, right) => left.name.localeCompare(right.name))
+            .slice(0, 300)
+            .map(entry => ({ name: entry.name, path: join(path, entry.name) }))
+          const parent = dirname(path)
+          res.writeHead(200, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' })
+            .end(JSON.stringify({ path, parent: parent === path ? '' : parent, directories }))
+        } catch (error) {
+          sendControlError(res, error)
+        }
+      },
+    })
+    if (disposeFolders !== undefined) httpRuntime.effect(() => disposeFolders, 'dsh-knowledge.folders-api')
     const disposeModelCatalog = httpRuntime.webServer?.register({
       kind: 'exact', path: '/knowledge-control/v1/models',
       async handler(req, res) {
@@ -853,6 +926,25 @@ function workspaceChangeSeq(session: SessionLike, turn: number): number | undefi
     if (event?.type === 'turn/start' && event.data.turn === turn) break
   }
   return undefined
+}
+
+async function readControlJson(req: IncomingMessage): Promise<Record<string, unknown>> {
+  const chunks: Buffer[] = []
+  let size = 0
+  for await (const chunk of req) {
+    const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk as string)
+    size += buffer.length
+    if (size > 64 * 1024) throw connectionError(413, '请求内容过大')
+    chunks.push(buffer)
+  }
+  if (size === 0) return {}
+  try {
+    const value: unknown = JSON.parse(Buffer.concat(chunks).toString('utf8'))
+    if (value === null || typeof value !== 'object' || Array.isArray(value)) throw new Error('object required')
+    return value as Record<string, unknown>
+  } catch {
+    throw connectionError(400, '请求 JSON 格式无效')
+  }
 }
 
 function connectionError(status: number, message: string): Error {

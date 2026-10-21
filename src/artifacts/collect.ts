@@ -10,7 +10,7 @@ export interface ArtifactUploadCandidate {
 }
 
 /** Every source that can contribute a file to the archive. */
-export type ArtifactSource = 'presented' | 'file-tool' | 'upload' | 'reference' | 'workspace-change'
+export type ArtifactSource = 'presented' | 'file-tool' | 'upload' | 'reference' | 'workspace-change' | 'folder'
 
 /** One file involved in a completed turn. */
 export interface ArtifactCandidate {
@@ -30,6 +30,7 @@ const FILE_KEYS = /^(?:file_?path|filepath|path|paths|file|files|target|target_?
 const COMMAND_KEYS = /^(?:command|script|cmd|shell|code)$/iu
 const SOURCE_RANK: Record<ArtifactSource, number> = {
   'workspace-change': 0,
+  folder: 0,
   reference: 1,
   'file-tool': 2,
   presented: 3,

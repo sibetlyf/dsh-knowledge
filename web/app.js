@@ -4278,6 +4278,83 @@ async function loadArtifacts(signal) {
   }
 }
 
+async function fetchFolderJson(path, signal) {
+  const response = await fetch(`/knowledge-control/v1/folders?path=${encodeURIComponent(path)}`, {
+    credentials: 'same-origin',
+    headers: { 'x-dsh-knowledge-client': 'management-web' },
+    signal: signal ? AbortSignal.any([signal, AbortSignal.timeout(15000)]) : AbortSignal.timeout(15000),
+  })
+  const data = await response.json().catch(() => ({}))
+  if (!response.ok) throw Object.assign(new Error(data.error || `读取文件夹失败（${response.status}）`), { status: response.status })
+  return data
+}
+
+function openFolderImportDialog() {
+  const folderKey = 'dsh-knowledge:last-import-folder'
+  const stored = (() => { try { return localStorage.getItem(folderKey) || '' } catch { return '' } })()
+  const pathInput = element('input', { class: 'input', value: stored, placeholder: '例如 G:\\资料\\论文', 'aria-label': '要导入的文件夹路径' })
+  const status = element('p', { class: 'field-hint', role: 'status' }, '正在读取文件夹…')
+  const list = element('div', { class: 'folder-picker-list' })
+  let parentPath = ''
+  let loading = false
+  const parent = actionButton('上一级', () => { if (parentPath) void load(parentPath) }, 'ghost small', { disabled: !parentPath })
+  const load = async (value) => {
+    if (loading) return
+    loading = true
+    status.textContent = '正在读取文件夹…'
+    try {
+      const data = await fetchFolderJson(value)
+      pathInput.value = data.path
+      parentPath = data.parent || ''
+      parent.disabled = !parentPath
+      try { localStorage.setItem(folderKey, data.path) } catch { /* ignore */ }
+      status.textContent = `${data.directories.length} 个子文件夹；点击目录继续，或直接导入当前文件夹`
+      const rows = data.directories.map(directory => element('button', {
+        type: 'button', class: 'folder-picker-row', onClick: () => { void load(directory.path) },
+      }, element('span', { class: 'folder-picker-icon', 'aria-hidden': 'true' }), element('span', {}, directory.name)))
+      list.replaceChildren(...(rows.length > 0 ? rows : [element('p', { class: 'field-hint' }, '没有子文件夹')]))
+    } catch (error) {
+      status.textContent = friendlyError(error)
+    } finally {
+      loading = false
+    }
+  }
+  const body = element('div', { class: 'folder-picker' },
+    element('div', { class: 'folder-picker-path' }, pathInput, actionButton('打开', () => { void load(pathInput.value.trim()) }, 'small'), parent),
+    list,
+    status,
+  )
+  openSheet({
+    title: '导入文件夹',
+    description: '递归扫描所选文件夹，自动归档、按类别/论文整理并加入知识库。文件较多时会在后台继续处理。',
+    body,
+    primaryLabel: '扫描并导入',
+    onPrimary: async () => {
+      const path = pathInput.value.trim()
+      if (path.length === 0) { showToast('请先选择文件夹。', 'error'); return false }
+      try {
+        const response = await fetch('/knowledge-control/v1/artifacts/import', {
+          method: 'POST', credentials: 'same-origin',
+          headers: { 'content-type': 'application/json', 'x-dsh-knowledge-client': 'management-web' },
+          body: JSON.stringify({ path, projectId: state.mountContext.projectId || '' }),
+        })
+        const data = await response.json().catch(() => ({}))
+        if (!response.ok) throw Object.assign(new Error(data.error || `导入失败（${response.status}）`), { status: response.status })
+        if (data.accepted === 0) { showToast('该文件夹中没有可导入的文件。', 'error'); return false }
+        try { localStorage.setItem(folderKey, data.root || path) } catch { /* ignore */ }
+        showToast(`已加入后台队列：${data.accepted} 个文件${data.truncated ? '（达到上限，剩余文件未导入）' : ''}`, 'success')
+        window.setTimeout(() => { if (state.view === 'files') void navigate('files') }, 2000)
+        return true
+      } catch (error) {
+        showToast(friendlyError(error), 'error')
+        return false
+      }
+    },
+  })
+  void load(stored)
+}
+
+
 async function fetchArtifactJson(suffix, signal) {
   const response = await fetch(`/knowledge-control/v1/artifacts${suffix}`, {
     credentials: 'same-origin',
@@ -4318,6 +4395,7 @@ function renderArtifacts() {
           'aria-label': '搜索制品文件',
           onChange: event => { view.query = event.target.value; renderShell() },
         }),
+        actionButton('导入文件夹', () => openFolderImportDialog(), 'small'),
         actionButton('刷新', () => { void navigate('files') }, 'ghost small'),
       ),
     ),

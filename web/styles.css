@@ -2428,3 +2428,13 @@ button, input, select, textarea, .button, .nav-button, .note-tree-base, .note-tr
 @media (max-width: 1200px) {
   .topbar > .background-indicator { display: none; }
 }
+
+/* Folder import picker */
+.folder-picker { display: grid; gap: 10px; min-width: 0; }
+.folder-picker-path { display: flex; align-items: center; gap: 6px; }
+.folder-picker-path .input { flex: 1 1 auto; min-width: 0; }
+.folder-picker-list { max-height: 280px; overflow: auto; display: grid; gap: 2px; border: 1px solid var(--border); border-radius: 9px; padding: 4px; background: var(--material-panel); }
+.folder-picker-row { display: flex; align-items: center; gap: 8px; width: 100%; min-height: 34px; border: 0; border-radius: 6px; padding: 5px 8px; background: transparent; color: var(--text); text-align: left; font-size: 13.5px; cursor: pointer; }
+.folder-picker-row:hover { background: var(--surface-hover); }
+.folder-picker-icon { width: 14px; height: 11px; flex: none; border: 1.4px solid var(--text-tertiary); border-radius: 2px; position: relative; }
+.folder-picker-icon::before { content: ""; position: absolute; left: 1px; top: -4px; width: 6px; height: 4px; border: 1.4px solid var(--text-tertiary); border-bottom: 0; border-radius: 2px 2px 0 0; }

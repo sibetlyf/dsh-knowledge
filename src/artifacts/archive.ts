@@ -843,6 +843,7 @@ function sourceLabel(source: ArtifactCandidate['source']): string {
   if (source === 'upload') return '用户上传附件'
   if (source === 'reference') return '任务中读取或引用的文件'
   if (source === 'workspace-change') return '任务中变更的文件'
+  if (source === 'folder') return '用户选择文件夹中的文件'
   return '文件工具写入'
 }
 

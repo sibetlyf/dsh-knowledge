@@ -89,6 +89,8 @@
 - `autoApprovePendingEnabled` 开启时，后台自动批准非冲突的待审核候选（默认 2 分钟一次，且每轮结束触发），`noteOrganizeAutoApprove` 让笔记整理草案直接落盘；真实冲突与凭据类内容仍保留人工确认。
 - 默认排除 `node_modules`、`.git`、`.dsh`、`.env`、证书私钥、SQLite 数据库等路径；单文件超过 `artifactArchiveMaxFileBytes` 或正文超过 `artifactArchiveMaxChars` 时跳过或截断。
 - 只读接口 `GET /knowledge-control/v1/artifacts`（最近 500 条记录）和 `GET /knowledge-control/v1/artifacts/<id>`（下载副本），与其他管理接口一样要求同源管理台请求头。
+- **选择文件夹导入**：在「制品文件」点击「导入文件夹」，可逐级浏览本机目录或直接输入路径；确认后递归扫描（默认最多 800 个文件），跳过依赖/版本库/构建目录与符号链接，进入后台归档队列，继续自动分类、论文识别、双向链接与索引。接口为 `GET /knowledge-control/v1/folders` 与 `POST /knowledge-control/v1/artifacts/import`。
+- **插件联动**：宿主提供 `dshKnowledge` 服务，其他插件可调用 `ingestRecord` / `ingestFiles` / `search` / `listBases` / `introduceBase`，或订阅 `knowledge/write` 事件；未安装知识库插件时应降级。
 
 完整配置、解析规则与限制见 [制品自动归档](artifacts.md)。
 

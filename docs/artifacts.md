@@ -93,6 +93,34 @@
 
 知识文档本身同样支持重命名、编辑、分组拖拽、跨知识库移动与删除；归档副本保持不可变，作为原始依据。
 
+## 选择文件夹导入
+
+管理台「制品文件 → 导入文件夹」提供目录浏览器：输入或逐级选择本机文件夹，确认后递归扫描并加入后台归档队列。
+
+- `GET /knowledge-control/v1/folders?path=…` 只列目录，不读取文件内容；
+- `POST /knowledge-control/v1/artifacts/import` 接收 `{ path, projectId? }`，返回已排队的文件数与截断状态；
+- 递归扫描默认最多 800 个文件，跳过 `node_modules`、`.git`、`.dsh`、`dist`、`build`、符号链接与归档目录自身；排除模式仍生效；
+- 每个文件走同一套归档、分类、论文识别、双向链接与索引流程；
+- 传入 `projectId` 时知识文档归入该项目；未传入时以所选文件夹为项目作用域并挂载知识库；
+- 文件较多时 HTTP 立即返回，实际归档在后台继续，顶栏状态卡显示进度。
+
+## 与其他插件联动
+
+宿主提供稳定 Cordis 服务 `dshKnowledge`，会议、记忆、导入类插件可通过 `ctx.get('dshKnowledge')` 使用，无需依赖内部模块：
+
+```ts
+const knowledge = ctx.get('dshKnowledge')
+await knowledge.ingestRecord({ title, body, tags: ['会议'], group: '会议记录', projectId })
+await knowledge.ingestFiles(['/path/report.pdf'], { projectId })
+knowledge.onWrite(event => { /* event.documentId / knowledgeBaseId / action */ })
+```
+
+- `ingestRecord`：写入一篇知识文档并发 `knowledge/write`；
+- `ingestFiles`：把文件送入归档队列（未启用归档时明确拒绝）；
+- `search` / `listBases` / `introduceBase`：检索、列库、把库加入会话；
+- `onWrite` 与 Cordis 事件 `knowledge/write`：订阅归档、对话提取和其他插件写入的统一事件流；
+- 服务是可选依赖；其他插件未安装知识库插件时应自行降级。
+
 ## 自动挂载
 
 第一次归档某个项目的制品时：

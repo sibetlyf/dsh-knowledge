@@ -186,6 +186,12 @@ The management API adds `GET /entries/:id/links` under the existing read permiss
 
 `document-graph.ts` builds the graph for one knowledge base from up to 100 active entries. Bodies are parsed once into `LinkInput` sets, every unordered pair is scored with the same `relationBetween` rules as the document-link panel, and edges keep their dominant reason. `GET /graph?knowledgeBaseId=...&limit=...` returns `{knowledgeBase, nodes, edges, truncated}` under the normal read permission. The console renders it in a canvas force simulation: group-colored glowing nodes, curved edges with travelling particles, drag/zoom/hover/click, a reduced-motion static fallback, and a keyboard-operable node chip list. Clicking a node routes through the existing document loader, so the graph stays read-only.
 
+## Folder import and plugin integration
+
+`folder-import.ts` walks a user-selected directory with bounded breadth/depth, never follows symlinks, skips dependency/VCS/build folders and the archive/data roots, and returns absolute file paths. The management route pair is `GET /knowledge-control/v1/folders` (directories only) and `POST /knowledge-control/v1/artifacts/import` (`{path, projectId?}`): the latter validates the path, scans up to 800 files, queues candidates with source `folder`, and returns immediately; the existing serialized archive pass then applies the same exclusions, paper detection, grouping, links and indexing as turn-produced files.
+
+`integration.ts` provides the optional Cordis service `dshKnowledge` and the write bus. `KnowledgeWriteBus` fans one `KnowledgeWriteEvent` out to in-process listeners and to the Cordis event `knowledge/write`; archive callbacks, the extraction coordinator and the knowledge watcher all publish through it. `ingestRecord` writes a normal knowledge document, `ingestFiles` feeds the archive queue, `search`/`listBases`/`introduceBase` reuse provider contracts, and `onWrite` subscribes. Consumers must treat the service as optional and degrade when absent.
+
 ## Conversation knowledge-base introduction
 
 `knowledge-base-mention-source.ts` registers a second `@` input-trigger source. Its candidates come from the same-origin conversation activity surface: `GET /knowledge-control/v1/activity/knowledge-bases?sessionId=...&q=...` returns active bases with a `mounted` flag. Picking a candidate inserts a normal reference chip, so editing, undo and copy behave like a file mention.
