@@ -1271,7 +1271,6 @@ function renderShell() {
     tokens: ['访问管理', '管理其他客户端连接中央知识库的权限'],
   }
   const [title, subtitle] = titles[state.view]
-  const viewIndexes = { overview: '00', notes: '01', shares: '02', entries: '03', graph: '04', files: '05', candidates: '06', writeback: '07', bases: '08', worklog: '09', tokens: '10' }
   const nextShell = element('div', {
     class: 'app-shell', 'data-menu-open': String(state.menuOpen),
     'data-view': state.view, 'data-loading': String(state.loading),
@@ -1294,10 +1293,9 @@ function renderShell() {
             'aria-label': state.menuOpen ? '关闭导航菜单' : '打开导航菜单',
             'aria-expanded': String(state.menuOpen),
           }),
-          paneToggleButton('main', !state.documentView.sidebarHidden, () => setSidebarHidden(!state.documentView.sidebarHidden), '主导航栏'),
+          state.documentView.sidebarHidden ? paneToggleButton('main', false, () => setSidebarHidden(false), '显示主导航栏') : null,
           renderContextPaneToggle(),
           element('div', { class: 'topbar-heading' },
-            element('span', { class: 'topbar-kicker' }, `KNOWLEDGE / ${viewIndexes[state.view] || '00'}`),
             element('h1', {}, title),
             element('p', {}, subtitle)),
         ),
@@ -1310,11 +1308,38 @@ function renderShell() {
   if (navigationHadFocus) [...shell.querySelectorAll('[data-nav-view]')].find(button => button.dataset.navView === state.view)?.focus({ preventScroll: true })
   applySidebarVisibility(shell, state.documentView.sidebarHidden)
   restoreScrollPosition(currentScrollState())
+  suppressDuplicateDocumentHeading(shell)
   if (state.view === 'graph') mountKnowledgeGraph(shell)
   renderDocumentSyncNotice()
   if (state.loading) showPendingNavigation()
   else disposeInfiniteScroll = infiniteModule.connectInfiniteScroll(shell)
 }
+
+/**
+ * Archived documents often repeat their title as the first Markdown heading.
+ * Keep the content for editing, but do not render the same title twice.
+ */
+function suppressDuplicateDocumentHeading(root) {
+  const article = root.querySelector('.note-paper')
+  if (!article) return
+  const title = article.querySelector('.note-preview-title')?.textContent
+    ?? article.querySelector('.note-title-input')?.value
+    ?? ''
+  const normalized = normalizeWikiTitle(title)
+  if (normalized.length === 0) return
+  const surface = article.querySelector('.markdown-preview, .notes-live-editor-surface, .notes-plain-editor-surface')
+  if (surface === null) return
+  const headings = article.querySelectorAll('.notes-live-editor-surface h1, .notes-plain-editor-surface h1, .markdown-preview h1')
+  for (const heading of headings) {
+    if (normalizeWikiTitle(heading.textContent) === normalized) heading.dataset.duplicateTitle = 'true'
+  }
+}
+
+let duplicateHeadingTimer
+new MutationObserver(() => {
+  window.clearTimeout(duplicateHeadingTimer)
+  duplicateHeadingTimer = window.setTimeout(() => suppressDuplicateDocumentHeading(app), 80)
+}).observe(app, { childList: true, subtree: true })
 
 function showPendingNavigation() {
   const shell = app.querySelector('.app-shell')
@@ -1473,26 +1498,26 @@ function applySidebarVisibility(shell, hidden) {
 
 function renderSidebar() {
   const pending = state.candidateCounts?.pending
+  const tokenItems = [['tokens', '访问管理']].filter(([id]) => id !== 'tokens' || !state.service.remote)
   const navGroups = [
-    ['笔记工作区', [['notes', '笔记文档'], ['shares', '已分享']]],
-    ['知识工作区', [['entries', '知识文档'], ['graph', '思维链接'], ['files', '制品文件'], ['candidates', '待审核'], ['writeback', '回写任务'], ['bases', '知识库与挂载']]],
-    ['工作记录', [['worklog', '工作日报']]],
-    ['连接', [['tokens', '访问管理']].filter(([id]) => id !== 'tokens' || !state.service.remote)],
-  ].filter(([, items]) => items.length)
+    ['', [['entries', '知识文档'], ['notes', '笔记'], ['shares', '已分享'], ['files', '制品文件'], ['graph', '思维链接']]],
+    ['整理', [['candidates', '待审核'], ['writeback', '回写任务'], ['bases', '知识库与挂载'], ['worklog', '工作日报']]],
+    ...(tokenItems.length > 0 ? [['', tokenItems]] : []),
+  ]
   return element('aside', { class: 'sidebar', 'aria-label': '知识库导航' },
     element('div', { class: 'brand' },
       element('span', { class: 'brand-emblem', 'aria-hidden': 'true' }, element('span', {})),
-      element('div', { class: 'brand-copy' }, element('span', {}, 'DSH Knowledge'), element('strong', {}, '知识库')),
+      element('div', { class: 'brand-copy' }, element('strong', {}, '知识库')),
     ),
     element('nav', { class: 'nav' }, navGroups.map(([group, items]) => element('div', { class: 'nav-group' },
-      element('div', { class: 'nav-group-label' }, group),
+      group.length > 0 ? element('div', { class: 'nav-group-label' }, group) : null,
       items.map(([id, label]) => element('button', {
         type: 'button', class: 'nav-button', 'data-nav-view': id, 'aria-current': state.view === id ? 'page' : undefined,
         onClick: () => navigate(id),
       }, element('span', { class: 'nav-label' }, label),
       id === 'candidates' ? element('span', { class: 'nav-count', 'data-review-pending-count': '', hidden: pending === undefined, 'aria-label': `${pending ?? 0} 条待审核` }, pending ?? '') : null))))),
     element('div', { class: 'sidebar-footer' },
-      element('div', { class: 'connection' }, element('span', { class: 'status-dot', 'aria-hidden': 'true' }), state.service.remote ? '中央知识库已连接' : '本地知识库已连接'),
+      element('div', { class: 'connection' }, element('span', { class: 'status-dot', 'aria-hidden': 'true' }), state.service.remote ? '中央知识库' : '本地知识库'),
       AUTH_MODE === 'bearer' ? actionButton('退出当前会话', signOut, 'ghost small') : null,
     ),
   )
@@ -2393,6 +2418,10 @@ function renderDocumentLinksPanel(workspace, editor) {
   if (!links || links.documentId !== editor.id || editor.isNew) {
     return element('section', { class: 'document-links-panel', 'data-document-links': '', hidden: true })
   }
+  const hasLinks = links.related.length > 0 || links.backlinks.length > 0
+  if (!links.loading && !links.error && !hasLinks) {
+    return element('section', { class: 'document-links-panel', 'data-document-links': '', hidden: true })
+  }
   return element('section', { class: 'document-links-panel', 'data-document-links': '', 'aria-label': '双向链接' },
     element('header', { class: 'document-links-header' },
       element('h3', {}, '双向链接'),
@@ -2644,7 +2673,7 @@ async function refreshNoteShares() {
 function renderShares() {
   return element('section', { class: 'shares-page', 'aria-label': '已分享笔记' },
     element('div', { class: 'section-heading shares-heading' },
-      element('div', {}, element('h2', {}, '分享空间'), element('p', {}, '管理本机生成的只读链接，或将别人分享的内容复制到你的笔记工作区。')),
+      element('div', {}, element('p', {}, '管理本机生成的只读链接，或将别人分享的内容复制到笔记工作区。')),
       element('div', { class: 'shares-heading-actions' },
         actionButton('从分享导入', openImportNoteShare, 'primary small'),
         actionButton('刷新', () => { void refreshNoteShares() }, 'ghost small'),
@@ -4385,19 +4414,15 @@ function renderArtifacts() {
   const items = view.items.filter(item => !query
     || `${item.display || ''} ${item.path || ''} ${item.mediaType || ''} ${item.extension || ''} ${item.source || ''}`.toLocaleLowerCase().includes(query))
   return element('section', { class: 'artifacts-page', 'aria-label': '制品文件' },
-    element('div', { class: 'section-heading' },
-      element('div', {},
-        element('h2', {}, '制品文件'),
-        element('p', {}, `自动归档的原始文件，共 ${view.items.length} 个。可预览、下载，或打开对应知识文档进行编辑、调整分组与移动。`)),
-      element('div', { class: 'artifact-toolbar' },
-        element('input', {
-          class: 'input', type: 'search', value: view.query, placeholder: '搜索文件名、类型或来源',
-          'aria-label': '搜索制品文件',
-          onChange: event => { view.query = event.target.value; renderShell() },
-        }),
-        actionButton('导入文件夹', () => openFolderImportDialog(), 'small'),
-        actionButton('刷新', () => { void navigate('files') }, 'ghost small'),
-      ),
+    element('div', { class: 'artifact-toolbar' },
+      element('input', {
+        class: 'input', type: 'search', value: view.query, placeholder: '搜索文件名、类型或来源',
+        'aria-label': '搜索制品文件',
+        onChange: event => { view.query = event.target.value; renderShell() },
+      }),
+      element('span', { class: 'artifact-count' }, `${items.length} 个文件`),
+      actionButton('导入文件夹', () => openFolderImportDialog(), 'small'),
+      actionButton('刷新', () => { void navigate('files') }, 'ghost small'),
     ),
     view.error
       ? element('div', { class: 'panel' }, element('div', { class: 'panel-body' },
@@ -4431,10 +4456,10 @@ function renderBackgroundIndicator() {
   else if ((writeback?.queued ?? 0) > 0) details.push(`知识回写排队 ${writeback.queued}`)
   if (activeWorklog) details.push('工作日报整理中')
   if (details.length === 0 && recent) details.push(`已归档 ${archive.last.captured + archive.last.updated} 个文件`)
-  if (details.length === 0) details.push(status === null ? '正在连接后台状态…' : state.background.error ? '后台状态暂不可用' : '知识归档 · 回写 · 日报')
+  if (details.length === 0) details.push(status === null ? '正在连接…' : state.background.error ? '状态暂不可用' : '')
   const clickable = activeArchive || activeWriteback || activeWorklog || queued > 0
   return element('aside', {
-    class: `background-indicator${active ? ' is-active' : ' is-idle'}${recent ? ' is-recent' : ''}`,
+    class: `background-indicator${active ? ' is-active' : recent ? ' is-recent' : ' is-idle'}`,
     'data-background-status': '', role: 'status', 'aria-live': 'polite',
     title: active ? '点击查看后台任务' : '后台自动整理已开启',
     onClick: clickable ? () => {
@@ -4443,8 +4468,8 @@ function renderBackgroundIndicator() {
   },
   element('span', { class: active ? 'background-spinner' : 'background-dot', 'aria-hidden': 'true' }),
   element('span', { class: 'background-copy' },
-    element('strong', {}, active ? '后台整理中' : recent ? '后台整理完成' : '后台自动整理'),
-    element('span', {}, details.join(' · '))),
+    element('strong', {}, active ? '后台整理中' : recent ? '整理完成' : '自动整理'),
+    details.join(' ').length > 0 ? element('span', {}, details.join(' · ')) : null),
   active && archive?.total > 0
     ? element('span', { class: 'background-meter', 'aria-hidden': 'true' }, element('span', { style: `width:${Math.round(archive.done / Math.max(1, archive.total) * 100)}%` }))
     : null)
@@ -4487,32 +4512,29 @@ function renderLinkGraph() {
   const groups = new Map()
   for (const node of data?.nodes ?? []) groups.set(node.group, (groups.get(node.group) ?? 0) + 1)
   return element('section', { class: 'graph-page', 'aria-label': '思维链接图' },
-    element('div', { class: 'section-heading graph-heading' },
-      element('div', {},
-        element('h2', {}, '思维链接图'),
-        element('p', {}, '把知识文档之间的双向链接画成一张可交互的关系图：拖动节点、滚轮缩放，点击节点打开文档。')),
-      element('div', { class: 'graph-toolbar' },
-        bases.length > 0
-          ? element('label', { class: 'graph-base-select' }, element('span', {}, '知识库'),
-            element('select', {
-              class: 'select', 'aria-label': '选择知识库',
-              onChange: event => {
-                state.graph.baseId = event.target.value
-                state.graph.data = null
-                void loadKnowledgeGraph().then(() => renderShell())
-              },
-            }, bases.map(base => element('option', { value: base.id, selected: base.id === state.graph.baseId }, base.name))))
-          : null,
-        actionButton('重新计算', () => {
-          state.graph.data = null
-          void loadKnowledgeGraph().then(() => renderShell())
-        }, 'ghost small'))),
+    element('div', { class: 'graph-toolbar graph-toolbar-top' },
+      bases.length > 0
+        ? element('label', { class: 'graph-base-select' }, element('span', {}, '知识库'),
+          element('select', {
+            class: 'select', 'aria-label': '选择知识库',
+            onChange: event => {
+              state.graph.baseId = event.target.value
+              state.graph.data = null
+              void loadKnowledgeGraph().then(() => renderShell())
+            },
+          }, bases.map(base => element('option', { value: base.id, selected: base.id === state.graph.baseId }, base.name))))
+        : null,
+      actionButton('重新计算', () => {
+        state.graph.data = null
+        void loadKnowledgeGraph().then(() => renderShell())
+      }, 'ghost small'),
+      data ? element('span', { class: 'graph-count' }, `${data.nodes.length} 个节点 · ${data.edges.length} 条链接`) : null),
     state.graph.error
       ? element('div', { class: 'panel' }, element('div', { class: 'panel-body' }, element('p', { role: 'alert' }, state.graph.error)))
       : null,
     element('div', { class: 'panel graph-panel' }, element('div', { class: 'panel-body' },
       element('div', { class: 'graph-meta' },
-        element('span', {}, data ? `${data.nodes.length} 个文档节点 · ${data.edges.length} 条链接` : state.graph.loading ? '正在计算链接…' : '暂无数据'),
+        data ? null : element('span', {}, state.graph.loading ? '正在计算链接…' : '暂无数据'),
         data?.truncated ? element('span', { class: 'graph-truncated' }, '仅展示最近更新的前 80 篇文档') : null,
         element('div', { class: 'graph-legend' }, [...groups.entries()].sort((a, b) => b[1] - a[1]).slice(0, 8).map(([group, count]) =>
           element('span', { class: 'graph-legend-item' },

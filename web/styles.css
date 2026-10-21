@@ -2438,3 +2438,105 @@ button, input, select, textarea, .button, .nav-button, .note-tree-base, .note-tr
 .folder-picker-row:hover { background: var(--surface-hover); }
 .folder-picker-icon { width: 14px; height: 11px; flex: none; border: 1.4px solid var(--text-tertiary); border-radius: 2px; position: relative; }
 .folder-picker-icon::before { content: ""; position: absolute; left: 1px; top: -4px; width: 6px; height: 4px; border: 1.4px solid var(--text-tertiary); border-bottom: 0; border-radius: 2px 2px 0 0; }
+
+/* Zen pass: one quiet reading surface, fewer chrome layers, more air. */
+:root {
+  --zen-radius: 12px;
+  --zen-gap: 14px;
+}
+
+.page { padding: 22px clamp(18px, 2.4vw, 34px) 48px; }
+.app-shell[data-view="entries"] .page { padding: 12px clamp(14px, 2vw, 24px) 20px; }
+
+/* Sidebar: fewer groups, softer selected state, no compact dashboard card. */
+.sidebar { padding: 16px 11px 11px; border-radius: 14px; }
+.brand { min-height: 48px; margin-bottom: 6px; padding: 2px 9px 10px; }
+.brand-copy > span { display: none; }
+.brand strong { margin-top: 0; font-size: 16.5px; font-weight: 650; }
+.nav { gap: 0; }
+.nav-group { gap: 1px; }
+.nav-group + .nav-group { margin-top: 14px; }
+.nav-group-label { padding: 0 11px 5px; font-size: 9.5px; font-weight: 600; letter-spacing: .09em; opacity: .62; }
+.nav-button { min-height: 36px; padding: 7px 11px; border-radius: 9px; font-size: 13.5px; }
+.nav-button[aria-current="page"] { background: color-mix(in srgb, var(--text) 7%, transparent); box-shadow: none; font-weight: 600; }
+.nav-button[aria-current="page"]::before { top: 8px; bottom: 8px; left: 1px; width: 2px; background: var(--accent); opacity: .75; }
+.nav-count { min-width: 20px; background: transparent; color: var(--text-tertiary); font-size: 10.5px; }
+.sidebar-footer { border: 0; border-top: 1px solid var(--separator); border-radius: 0; padding: 10px 11px 0; background: transparent; box-shadow: none; }
+.connection { min-height: 22px; font-size: 10.5px; }
+
+/* Top bar: title and one contextual action; no index kicker. */
+.topbar { min-height: 62px; padding: 9px clamp(18px, 2.4vw, 28px); gap: 12px; }
+.topbar h1, .app-shell[data-view="entries"] .topbar h1 { font-size: 19px; font-weight: 650; letter-spacing: -.022em; }
+.topbar p { margin-top: 2px; font-size: 12.5px; line-height: 1.45; }
+.pane-toggle-button { border-color: transparent; }
+.pane-toggle-button[aria-pressed="true"] { background: color-mix(in srgb, var(--text) 6%, transparent); box-shadow: none; }
+
+/* Background indicator: idle is a quiet caption, active becomes a compact pill. */
+.topbar > .background-indicator { max-width: min(320px, 40vw); padding: 5px 7px; border: 0; background: transparent; box-shadow: none; gap: 7px; }
+.topbar > .background-indicator.is-idle { opacity: .62; }
+.topbar > .background-indicator.is-active, .topbar > .background-indicator.is-recent { padding: 6px 10px; background: color-mix(in srgb, var(--text) 4%, transparent); opacity: 1; }
+.background-copy { gap: 0; }
+.background-copy strong { font-size: 11.5px; font-weight: 600; }
+.background-copy span { max-width: 230px; font-size: 10.5px; }
+
+/* Reading surface: opaque paper, fewer nested cards, comfortable measure. */
+.note-editor-scroll { background: var(--surface); }
+.note-paper { max-width: 1120px; padding-top: clamp(34px, 4.4vw, 54px); padding-bottom: 56px; }
+.note-paper [data-duplicate-title="true"] { display: none !important; }
+.document-links-panel {
+  width: 100%;
+  max-width: 1120px;
+  margin: 0 auto;
+  padding: 18px clamp(28px, 6cqi, 62px) 24px;
+  border: 0;
+  border-top: 1px solid var(--separator);
+  border-radius: 0;
+  background: var(--surface);
+}
+.document-links-header h3 { font-size: 12px; font-weight: 600; letter-spacing: .01em; text-transform: none; }
+.document-link-label { font-size: 11.5px; color: var(--text-tertiary); }
+.document-link-chip { border-color: color-mix(in srgb, var(--border) 78%, transparent); border-radius: 8px; padding: 5px 9px; background: transparent; font-size: 12.5px; }
+.document-link-chip:hover { background: color-mix(in srgb, var(--text) 4%, transparent); }
+.document-reference-bar { background: var(--surface); border-top: 1px solid var(--separator); }
+.note-inspector { background: var(--surface); border-top: 1px solid var(--separator); }
+.document-finalized-banner { box-shadow: none; }
+
+/* Flat cards and compact page toolbars, so actions read before decoration. */
+.panel, .metric, .base-card, .artifact-row { box-shadow: none; }
+.panel { border-color: color-mix(in srgb, var(--border) 78%, transparent); }
+.artifacts-page { gap: 12px; }
+.artifact-toolbar { justify-content: flex-start; }
+.artifact-toolbar .input { flex: 1 1 260px; min-width: 0; max-width: 460px; }
+.artifact-count { color: var(--text-tertiary); font-size: 11.5px; white-space: nowrap; }
+.graph-page { display: grid; gap: 12px; }
+.graph-toolbar-top { min-height: 36px; }
+.graph-count { margin-left: auto; color: var(--text-tertiary); font-size: 11.5px; white-space: nowrap; }
+.graph-panel { border: 0; background: transparent; }
+.graph-panel > .panel-body { padding: 0; }
+.graph-stage { margin-top: 0; border-radius: 14px; }
+.graph-controls { gap: 4px; }
+.graph-controls .button { min-height: 30px; padding: 4px 8px; font-size: 11.5px; }
+.graph-hint { font-size: 10.5px; opacity: .8; }
+
+@media (max-width: 900px) {
+  .topbar h1, .app-shell[data-view="entries"] .topbar h1 { font-size: 17px; }
+  .topbar p { display: none; }
+  .note-paper { max-width: none; }
+  .document-links-panel { padding-inline: 20px; }
+  .graph-count { margin-left: 0; width: 100%; }
+}
+
+/* Let the paper grow with its content instead of letting a flex child overflow
+   beneath the relation/reference cards. */
+.note-paper { display: block; }
+.knowledge-live-editor { display: block; flex: none; min-height: 0; }
+.knowledge-live-editor .notes-live-editor-surface { min-height: 380px; height: auto; }
+
+/* The workspace needs a real height so the editor scroll owns the page; without
+   it the paper collapses and later cards paint over overflowing content. */
+.app-shell[data-view="entries"] .note-workspace { height: calc(100dvh - 148px); min-height: 520px; }
+@media (max-width: 1120px) {
+  .app-shell[data-view="entries"] .note-workspace { height: calc(100dvh - 96px); min-height: 420px; }
+}
+.note-editor-scroll { grid-auto-rows: max-content; align-content: start; }
+.note-paper { min-height: 0; }
