@@ -162,7 +162,7 @@ test('partial and merge prompts preserve original identity validation', async ()
   let request
   const llm = { async *stream(input) { request = input; yield { type: 'text-delta', text: '成果 [依据:a]' } } }
   const output = await generate(llm, { route: {}, records: [{ id: 'a' }], material: [{ ids: ['a'], text: '事实' }], partial: true }, new AbortController().signal)
-  assert.equal(output, '成果 [依据:a]'); assert.equal(request.maxTokens, 2200)
+  assert.equal(output, '成果 [依据:a]'); assert.equal(request.maxTokens, 4000); assert.equal(request.reasoningEffort, 'off')
   assert.match(request.system, /分批整理/); assert.match(request.messages[0].content[0].text, /事实/)
   await assert.rejects(generate(llm, { route: {}, records: [{ id: 'b' }], material: [] }, new AbortController().signal), /引用校验/)
 })
