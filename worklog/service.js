@@ -1,4 +1,5 @@
 import { capture, settings, fail } from './domain.js'
+import { knowledgeRecord, prepareWorklog } from './knowledge.js'
 import { createCentral, pick, captureKeys, sharedKeys, sharedRevision } from './central.js'
 import { Outbox } from './outbox.js'
 import { destination, requestCentral } from './remote.js'
@@ -19,6 +20,28 @@ export class JournalService {
     if (!record) return
     if (connection.backend === 'remote') this.outbox.capture(record, connection)
     else this.store.insert({ ...record, sourceId: this.store.originId() })
+  }
+  /**
+   * Record one automatic knowledge write as worklog source material.
+   *
+   * First use provisions the journal for the affected project (capture enabled,
+   * project added, daily generation enabled) so no manual setup is required.
+   * Remote clients queue the record through the existing outbox.
+   */
+  recordKnowledge(event, now = Date.now()) {
+    if (!event || typeof event.id !== 'string' || event.id.length === 0) return null
+    const project = typeof event.project === 'string' ? event.project.trim() : ''
+    if (!project) return null
+    const config = prepareWorklog(this.store, project, now)
+    if (!config.enabled) return null
+    if (config.scope === 'selected' && !config.projects.includes(project)) return null
+    if (typeof event.sessionId === 'string' && config.excludedSessions.includes(event.sessionId)) return null
+    this.store.observe(project)
+    const record = knowledgeRecord(event, config, this.store.originId(), now)
+    const connection = { ...this.current() }
+    if (connection.backend === 'remote') this.outbox.capture(record, connection)
+    else this.store.insert(record)
+    return { day: record.day, remote: connection.backend === 'remote' }
   }
   async serveCentral(method, path, data, query) {
     if (this.current().paused) throw fail('知识库连接正在切换，请稍后重试', 409)

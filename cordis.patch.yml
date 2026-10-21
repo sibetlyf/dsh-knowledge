@@ -5,8 +5,8 @@
       name: 'dsh-knowledge'
       config:
         backend: local
-        databasePath: !!js dshHomePath('knowledge/knowledge.sqlite')
-        connectionPath: !!js dshHomePath('knowledge/connection.json')
+        # 数据目录由插件选择：优先非系统盘（例如 G:\dsh-knowledge），
+        # 也可用环境变量 DSH_KNOWLEDGE_HOME 指定；不再默认写到 C 盘用户目录。
         exposeApi: false
         exposeWeb: true
         extractionEnabled: true

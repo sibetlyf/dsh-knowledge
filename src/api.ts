@@ -7,6 +7,8 @@ import {
 import { LocalKnowledgeProvider } from './local-provider.js'
 import { normalizeFinalizationChange } from './document-lifecycle.js'
 import { normalizeDocumentGroup } from './document-groups.js'
+import { resolveDocumentLinks } from './document-links.js'
+import { resolveKnowledgeGraph } from './document-graph.js'
 import type { RuntimeContextLike } from './runtime.js'
 import { isNoteId, type NoteReference, type NoteListRequest } from './notes/domain.js'
 import { renderNoteSharePage } from './notes/share-page.js'
@@ -480,6 +482,14 @@ async function dispatch(
     }
   }
 
+  if (segments[0] === 'graph' && segments.length === 1) {
+    if (method !== 'GET') throw httpError(405, '知识链接图只支持读取。')
+    requirePermission(actor.permissions, 'read')
+    const knowledgeBaseId = url.searchParams.get('knowledgeBaseId')?.trim()
+    if (!knowledgeBaseId) throw httpError(400, 'knowledgeBaseId is required')
+    return sendJson(res, 200, await resolveKnowledgeGraph(provider, knowledgeBaseId, integerParam(url, 'limit', 80, 2, 100)))
+  }
+
   if (segments[0] === 'documents') {
     if (method === 'GET' && segments.length === 1) {
       requirePermission(actor.permissions, 'read')
@@ -550,6 +560,12 @@ async function dispatch(
     if (id !== undefined && method === 'GET' && segments[2] === 'versions' && segments.length === 3) {
       requirePermission(actor.permissions, 'read')
       return sendJson(res, 200, await provider.versions(id))
+    }
+    if (id !== undefined && method === 'GET' && segments[2] === 'links' && segments.length === 3) {
+      requirePermission(actor.permissions, 'read')
+      const links = await resolveDocumentLinks(provider, id)
+      if (links === undefined) throw httpError(404, `knowledge entry "${id}" was not found`)
+      return sendJson(res, 200, links)
     }
     if (id !== undefined && method === 'GET' && segments[2] === 'revision' && segments.length === 3) {
       requirePermission(actor.permissions, 'read')

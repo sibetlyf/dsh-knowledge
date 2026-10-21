@@ -63,6 +63,9 @@ let fieldSequence = 0
 const { openConfirm, openSheet, openModal } = dialogModule.createDialogPresenter({ element, actionButton, interfaceIcon, showToast, friendlyError, createDialogSteps: stepsModule.createDialogSteps })
 selectModule.installSelectControls()
 const savedDocumentLayout = readDocumentLayout()
+const BACKGROUND_POLL_MS = 3000
+let backgroundPollTimer = 0
+let backgroundPollRunning = false
 
 function createDocumentViewState(overrides = {}) {
   return {
@@ -94,6 +97,8 @@ const state = {
   },
   entries: [],
   nextCursor: null,
+  background: { status: null, error: '', updatedAt: 0 },
+  graph: { baseId: '', loading: false, error: '', data: null, request: 0, renderer: null },
   entryFilters: { query: '', type: '', status: 'active', projectId: '', knowledgeBaseId: '' },
   documents: [],
   documentView: createDocumentViewState({
@@ -118,6 +123,7 @@ const state = {
   modelCatalog: null,
   settingsSaving: false,
   tokens: [],
+  artifacts: { items: [], error: '', query: '', selectedId: '', previewKind: '', previewText: '', previewUrl: '', loading: false },
   notes: {
     children: new Map(), loadedFolders: new Set(), expandedFolders: new Set(),
     selectedId: initialNoteId, selectedNode: null, currentFolderId: null, breadcrumbs: [],
@@ -163,13 +169,16 @@ let routeFeedbackTimer = 0
 function readDocumentLayout() {
   const fallback = {
     sidebarHidden: false,
-    sidebarWidth: 214,
+    sidebarWidth: 196,
   }
   try {
     const value = JSON.parse(localStorage.getItem(DOCUMENT_LAYOUT_KEY) || '{}')
     return {
       sidebarHidden: value.sidebarHidden === true,
-      sidebarWidth: clampNumber(value.sidebarWidth, 190, 340, fallback.sidebarWidth),
+      // Older builds defaulted to 214px; move that legacy default to the compact rail width.
+      sidebarWidth: clampNumber(value.sidebarWidth, 176, 340, fallback.sidebarWidth) === 214
+        ? fallback.sidebarWidth
+        : clampNumber(value.sidebarWidth, 176, 340, fallback.sidebarWidth),
     }
   } catch { return fallback }
 }
@@ -235,6 +244,7 @@ const { api, binaryRequest, binaryUploadRequest } = createApiClient({
 })
 
 async function boot() {
+  startBackgroundPolling()
   if (AUTH_MODE === 'same-origin') {
     state.token = ''
     // Connection chrome must not block or remount the active workspace.
@@ -279,6 +289,7 @@ function renderLogin(message = '') {
         await api('entries?limit=1')
         sessionStorage.setItem(TOKEN_KEY, token)
         await navigate(initialView)
+        startBackgroundPolling()
       } catch (requestError) {
         state.token = ''
         error.textContent = requestError.status === 401 ? '令牌无效或已被撤销。' : '连接失败，请检查服务状态后重试。'
@@ -304,6 +315,11 @@ function renderLogin(message = '') {
 
 function signOut() {
   candidateCountController?.abort()
+  window.clearInterval(backgroundPollTimer)
+  backgroundPollTimer = 0
+  state.background = { status: null, error: '', updatedAt: 0 }
+  state.graph.renderer?.dispose?.()
+  state.graph.renderer = undefined
   candidateCountController = null
   candidateCountUpdatedAt = 0
   candidateCountAttemptAt = 0
@@ -346,6 +362,7 @@ async function navigate(view) {
   }
   state.view = view
   state.menuOpen = false
+  if (view !== 'files') releaseArtifactPreview()
   state.loading = true
   state.loadingPhase = loadingPhaseForView(view)
   state.loadingProgress = .12
@@ -360,6 +377,8 @@ async function navigate(view) {
     if (view === 'overview') await loadOverview(controller.signal)
     if (view === 'bases') await loadKnowledgeBasesPage(controller.signal)
     if (view === 'entries') await loadDocuments(controller.signal, (label, progress) => updateLoadingPhase(request, label, progress))
+    if (view === 'graph') await loadKnowledgeGraph(controller.signal)
+    if (view === 'files') await loadArtifacts(controller.signal)
     if (view === 'candidates') await loadCandidates(controller.signal)
     if (view === 'notes') await loadNotes(controller.signal, (label, progress) => updateLoadingPhase(request, label, progress))
     if (view === 'shares') await loadNoteShares(controller.signal)
@@ -393,7 +412,7 @@ function cancelPendingSearches() {
 
 function loadingPhaseForView(view) {
   return ({
-    overview: '正在汇总知识活动', bases: '正在读取知识库配置', entries: '正在读取知识目录',
+    overview: '正在汇总知识活动', bases: '正在读取知识库配置', entries: '正在读取知识目录', graph: '正在计算知识链接图', files: '正在读取制品文件',
     notes: '正在读取笔记目录', shares: '正在读取分享列表', candidates: '正在准备审核队列', tokens: '正在读取访问权限',
   })[view] || '正在准备工作区'
 }
@@ -821,10 +840,21 @@ async function loadDocumentEditor(workspace, id, signal) {
   workspace.view.loadRevision = revision
   const references = api(`entries/${encodeURIComponent(id)}/note-references`, { signal })
     .then(value => ({ value }), error => ({ error }))
+  const linksRequest = api(`entries/${encodeURIComponent(id)}/links`, { signal })
+    .then(value => ({ value }), error => ({ error }))
   const entry = await api(`entries/${encodeURIComponent(id)}`, { signal })
+  const linksResult = await linksRequest
   if (entry.documentState !== 'open' || documentWorkspaceReadOnly(workspace)) await loadMarkdownPreview()
   if (workspace.view.loadRevision !== revision || workspace.view.documentId !== id) return false
   workspace.view.mode = 'preview'
+  workspace.view.links = linksResult.error
+    ? { documentId: id, loading: false, error: friendlyError(linksResult.error), related: [], backlinks: [], references: [] }
+    : {
+      documentId: id, loading: false, error: '',
+      related: linksResult.value?.related ?? [],
+      backlinks: linksResult.value?.backlinks ?? [],
+      references: linksResult.value?.references ?? [],
+    }
   workspace.view.editor = {
     ...entry,
     noteReferences: [], referencesLoading: true,
@@ -958,6 +988,7 @@ async function saveDocumentEditor(workspace = activeDocumentWorkspace()) {
     workspace.view.documentId = saved.id
     updateEditorSaveState(editor.saveState)
     await reloadDocumentWorkspace(workspace)
+    void refreshDocumentLinks(workspace, editor)
     return !editor.dirty
   } catch (error) {
     editor.saveState = '保存失败'
@@ -1151,11 +1182,17 @@ function renderShell() {
   writebackWorkspace = undefined
   closeDocumentMenus()
   releaseNoteEditors()
+  if (state.view !== 'graph') {
+    state.graph.renderer?.dispose?.()
+    state.graph.renderer = undefined
+  }
   captureScrollPosition()
   const titles = {
     overview: ['概览', '知识库运行状态与最近活动'],
     bases: ['知识库与挂载', '管理知识目录，并限定项目与会话的召回和写入范围'],
     entries: ['知识文档', '在知识目录中阅读、整理和维护 Markdown 文档'],
+    graph: ['思维链接', '以动态关系图查看知识文档之间的双向链接'],
+    files: ['制品文件', '浏览、预览、下载自动归档的制品文件，并可打开对应知识文档编辑或移动'],
     notes: ['笔记文档', '像本地目录一样整理笔记和资料，并按需关联到知识文档'],
     shares: ['已分享', '管理只读分享链接，也可以导入别人分享的笔记和目录'],
     candidates: ['待审核', '确认 AI 提取结果后再写入知识文档'],
@@ -1164,7 +1201,7 @@ function renderShell() {
     tokens: ['访问管理', '管理其他客户端连接中央知识库的权限'],
   }
   const [title, subtitle] = titles[state.view]
-  const viewIndexes = { overview: '00', notes: '01', shares: '02', entries: '03', candidates: '04', writeback: '05', bases: '06', worklog: '07', tokens: '08' }
+  const viewIndexes = { overview: '00', notes: '01', shares: '02', entries: '03', graph: '04', files: '05', candidates: '06', writeback: '07', bases: '08', worklog: '09', tokens: '10' }
   const nextShell = element('div', {
     class: 'app-shell', 'data-menu-open': String(state.menuOpen),
     'data-view': state.view, 'data-loading': String(state.loading),
@@ -1194,6 +1231,7 @@ function renderShell() {
             element('h1', {}, title),
             element('p', {}, subtitle)),
         ),
+        renderBackgroundIndicator(),
       ),
       element('div', { class: 'page', 'data-scroll-key': 'page' }, element('div', { class: 'view-stage', 'data-view-stage': state.view, 'aria-busy': String(state.loading) }, renderCurrentView())),
     ),
@@ -1202,6 +1240,7 @@ function renderShell() {
   if (navigationHadFocus) [...shell.querySelectorAll('[data-nav-view]')].find(button => button.dataset.navView === state.view)?.focus({ preventScroll: true })
   applySidebarVisibility(shell, state.documentView.sidebarHidden)
   restoreScrollPosition(currentScrollState())
+  if (state.view === 'graph') mountKnowledgeGraph(shell)
   renderDocumentSyncNotice()
   if (state.loading) showPendingNavigation()
   else disposeInfiniteScroll = infiniteModule.connectInfiniteScroll(shell)
@@ -1366,11 +1405,10 @@ function renderSidebar() {
   const pending = state.candidateCounts?.pending
   const navGroups = [
     ['笔记工作区', [['notes', '笔记文档'], ['shares', '已分享']]],
-    ['知识工作区', [['entries', '知识文档'], ['candidates', '待审核'], ['writeback', '回写任务'], ['bases', '知识库与挂载']]],
+    ['知识工作区', [['entries', '知识文档'], ['graph', '思维链接'], ['files', '制品文件'], ['candidates', '待审核'], ['writeback', '回写任务'], ['bases', '知识库与挂载']]],
     ['工作记录', [['worklog', '工作日报']]],
     ['连接', [['tokens', '访问管理']].filter(([id]) => id !== 'tokens' || !state.service.remote)],
   ].filter(([, items]) => items.length)
-  let navIndex = 0
   return element('aside', { class: 'sidebar', 'aria-label': '知识库导航' },
     element('div', { class: 'brand' },
       element('span', { class: 'brand-emblem', 'aria-hidden': 'true' }, element('span', {})),
@@ -1381,7 +1419,7 @@ function renderSidebar() {
       items.map(([id, label]) => element('button', {
         type: 'button', class: 'nav-button', 'data-nav-view': id, 'aria-current': state.view === id ? 'page' : undefined,
         onClick: () => navigate(id),
-      }, element('span', { class: 'nav-index', 'aria-hidden': 'true' }, String(++navIndex).padStart(2, '0')), element('span', { class: 'nav-label' }, label),
+      }, element('span', { class: 'nav-label' }, label),
       id === 'candidates' ? element('span', { class: 'nav-count', 'data-review-pending-count': '', hidden: pending === undefined, 'aria-label': `${pending ?? 0} 条待审核` }, pending ?? '') : null))))),
     element('div', { class: 'sidebar-footer' },
       element('div', { class: 'connection' }, element('span', { class: 'status-dot', 'aria-hidden': 'true' }), state.service.remote ? '中央知识库已连接' : '本地知识库已连接'),
@@ -1405,6 +1443,8 @@ function renderCurrentView() {
   if (state.view === 'overview') return renderOverview()
   if (state.view === 'bases') return renderKnowledgeBases()
   if (state.view === 'entries') return renderEntries()
+  if (state.view === 'graph') return renderLinkGraph()
+  if (state.view === 'files') return renderArtifacts()
   if (state.view === 'notes') return renderNotes()
   if (state.view === 'shares') return renderShares()
   if (state.view === 'candidates') return renderCandidates()
@@ -1968,8 +2008,10 @@ function renderDocumentWorkspace(workspace, options = {}) {
   },
     element('aside', { class: 'note-tree-panel', 'aria-label': '知识目录' },
       element('header', { class: 'note-tree-header' },
-        element('div', {}, element('h2', { id: `${workspace.kind}-documents-heading` }, options.heading || '知识目录'), element('span', {}, query ? `${view.searchTotal} 条搜索结果` : `${workspaceDocuments.length} 篇已加载`)),
-        !readOnly ? actionButton('+', () => { void startBlankDocument(workspace, view.knowledgeBaseId || activeBases[0]?.id) }, 'ghost note-add-button', { 'aria-label': '新建文档', title: '新建文档' }) : null,
+        element('div', { class: 'note-tree-heading' }, element('h2', { id: `${workspace.kind}-documents-heading` }, options.heading || '知识目录'), element('span', {}, query ? `${view.searchTotal} 条搜索结果` : `${workspaceDocuments.length} 篇已加载`)),
+        element('div', { class: 'note-tree-actions' },
+          !readOnly ? actionButton('+', () => { void startBlankDocument(workspace, view.knowledgeBaseId || activeBases[0]?.id) }, 'ghost note-add-button', { 'aria-label': '新建文档', title: '新建文档' }) : null,
+          actionButton(interfaceIcon('close'), () => { view.treeOpen = false; renderShell() }, 'ghost note-tree-close', { 'aria-label': '关闭知识目录', title: '关闭知识目录' })),
       ),
       element('div', {}, element('div', { class: 'note-tree-search-wrap' }, interfaceIcon('search', 'search-symbol'), search),
         !readOnly && view.knowledgeBaseId ? actionButton('整理分组', () => { const baseId = view.knowledgeBaseId; void openDocumentGroupOrganizer({ element, api, openSheet, baseId, onApply: (ids, group) => applyDocumentGroup(workspace, baseId, ids, group) }) }, 'ghost small document-groups-manage') : null),
@@ -1993,7 +2035,9 @@ function renderNoteEditor(workspace, editor, base) {
       element('span', { class: 'empty-document-mark', 'aria-hidden': 'true' }),
       element('h3', {}, '选择或新建一篇文档'),
       element('p', {}, readOnly ? '这个知识库已归档，当前只能阅读已有文档。' : '文档保存后会立即参与当前知识库的搜索与召回。'),
-      !readOnly ? actionButton('新建文档', () => { void startBlankDocument(workspace, view.knowledgeBaseId || state.knowledgeBases.find(item => item.status === 'active')?.id) }, 'primary') : null,
+      element('div', { class: 'note-empty-actions' },
+        actionButton('浏览知识目录', () => { view.treeOpen = true; renderShell() }, readOnly ? 'primary' : 'small'),
+        !readOnly ? actionButton('新建文档', () => { void startBlankDocument(workspace, view.knowledgeBaseId || state.knowledgeBases.find(item => item.status === 'active')?.id) }, 'primary') : null),
     ))
   const saveShortcut = event => {
     if ((event.metaKey || event.ctrlKey) && event.key.toLocaleLowerCase() === 's') {
@@ -2016,7 +2060,13 @@ function renderNoteEditor(workspace, editor, base) {
   const body = editable
     ? element('div', { class: 'notes-live-editor knowledge-live-editor', role: 'status', 'aria-label': '正在打开知识文档正文' },
       element('div', { class: 'notes-editor-loading' }, '正在打开文档…'))
-    : renderMarkdownPreview(editor.body)
+    : renderMarkdownPreview(editor.body, {
+      wikiLinks: documentWikiLinkMap(workspace),
+      onWikiLink: documentId => {
+        const reference = (workspace.view.links?.references ?? []).find(item => item.documentId === documentId)
+        void openLinkedKnowledgeDocument({ id: documentId, knowledgeBaseId: reference?.knowledgeBaseId ?? editor.knowledgeBaseId })
+      },
+    })
   if (editable) mountMarkdownEditor(body, {
     markdown: editor.body,
     label: '编辑知识文档正文',
@@ -2060,6 +2110,7 @@ function renderNoteEditor(workspace, editor, base) {
         editable ? title : element('h1', { class: 'note-preview-title' }, editor.title || '无标题文档'),
         body,
       ),
+      renderDocumentLinksPanel(workspace, editor),
     ),
     renderDocumentReferenceBar(workspace, editor, editable),
     element('footer', { class: 'note-inspector' },
@@ -2181,7 +2232,7 @@ async function removeDocumentNoteReference(workspace, editor, reference) {
   } catch (error) { showToast(friendlyError(error), 'error') }
 }
 
-function renderMarkdownPreview(markdown) {
+function renderMarkdownPreview(markdown, options = {}) {
   if (!markdown.trim()) return element('div', { class: 'markdown-preview is-empty', role: 'document' }, '暂无正文')
   const preview = element('div', { class: 'markdown-preview', role: 'document' })
   preview.innerHTML = window.DshKnowledgeMarkdown.renderMarkdown(markdown)
@@ -2205,7 +2256,137 @@ function renderMarkdownPreview(markdown) {
     link.addEventListener('click', open)
     link.addEventListener('keydown', open)
   })
+  if (options.wikiLinks instanceof Map && options.wikiLinks.size > 0 && typeof options.onWikiLink === 'function') {
+    applyKnowledgeWikiLinks(preview, options.wikiLinks, options.onWikiLink)
+  }
   return preview
+}
+
+/** Turn `[[Title]]` text into clickable in-page links without touching code blocks. */
+function applyKnowledgeWikiLinks(preview, wikiLinks, onWikiLink) {
+  const pattern = /\[\[([^\]|#]+)(?:#[^\]|]*)?(?:\|([^\]]+))?\]\]/g
+  const walker = document.createTreeWalker(preview, NodeFilter.SHOW_TEXT, {
+    acceptNode(node) {
+      if (!node.nodeValue || !node.nodeValue.includes('[[')) return NodeFilter.FILTER_REJECT
+      if (node.parentElement?.closest('code, pre, a')) return NodeFilter.FILTER_REJECT
+      return NodeFilter.FILTER_ACCEPT
+    },
+  })
+  const nodes = []
+  while (walker.nextNode()) nodes.push(walker.currentNode)
+  for (const node of nodes) {
+    const text = node.nodeValue
+    let match, last = 0
+    const fragment = document.createDocumentFragment()
+    let replaced = false
+    pattern.lastIndex = 0
+    while ((match = pattern.exec(text)) !== null) {
+      const documentId = wikiLinks.get(normalizeWikiTitle(match[1]))
+      if (!documentId) continue
+      if (match.index > last) fragment.append(document.createTextNode(text.slice(last, match.index)))
+      fragment.append(element('a', {
+        class: 'knowledge-wiki-link',
+        href: `#wikilink-${encodeURIComponent(documentId)}`,
+        title: '打开关联知识文档',
+      }, (match[2] ?? match[1]).trim()))
+      last = pattern.lastIndex
+      replaced = true
+    }
+    if (!replaced) continue
+    if (last < text.length) fragment.append(document.createTextNode(text.slice(last)))
+    node.replaceWith(fragment)
+  }
+  preview.addEventListener('click', event => {
+    const anchor = event.target.closest?.('a[href^="#wikilink-"]')
+    if (!anchor) return
+    event.preventDefault()
+    const documentId = decodeURIComponent(anchor.getAttribute('href').slice('#wikilink-'.length))
+    onWikiLink(documentId)
+  })
+}
+
+function normalizeWikiTitle(value) {
+  return String(value).normalize('NFKC').trim().replace(/\s+/g, ' ').toLocaleLowerCase()
+}
+
+function documentWikiLinkMap(workspace) {
+  const map = new Map()
+  for (const reference of workspace.view.links?.references ?? []) {
+    map.set(normalizeWikiTitle(reference.title), reference.documentId)
+  }
+  return map
+}
+
+function renderDocumentLinksPanel(workspace, editor) {
+  const links = workspace.view.links
+  if (!links || links.documentId !== editor.id || editor.isNew) {
+    return element('section', { class: 'document-links-panel', 'data-document-links': '', hidden: true })
+  }
+  return element('section', { class: 'document-links-panel', 'data-document-links': '', 'aria-label': '双向链接' },
+    element('header', { class: 'document-links-header' },
+      element('h3', {}, '双向链接'),
+      element('div', { class: 'document-links-actions' },
+        links.loading ? element('span', { class: 'document-links-status' }, '正在加载…') : null,
+        actionButton('关系图', () => {
+          state.graph.baseId = editor.knowledgeBaseId
+          state.graph.data = null
+          void navigate('graph')
+        }, 'ghost small'))),
+    links.error ? element('p', { class: 'document-links-error', role: 'alert' }, links.error) : null,
+    renderDocumentLinkGroup('关联文档', links.related),
+    renderDocumentLinkGroup('反向链接', links.backlinks),
+    !links.loading && !links.error && links.related.length === 0 && links.backlinks.length === 0
+      ? element('p', { class: 'document-links-empty' }, '暂无关联文档')
+      : null,
+  )
+}
+
+function renderDocumentLinkGroup(title, items) {
+  if (!Array.isArray(items) || items.length === 0) return null
+  return element('div', { class: 'document-link-group' },
+    element('span', { class: 'document-link-label' }, title),
+    element('div', { class: 'document-link-chips' }, items.map(link => element('button', {
+      type: 'button', class: 'document-link-chip', title: documentLinkReasonLabel(link.reason),
+      onClick: () => { void openLinkedKnowledgeDocument(link) },
+    }, link.title))))
+}
+
+function documentLinkReasonLabel(reason) {
+  if (reason === 'explicit') return '正文引用'
+  if (reason === 'backlink') return '引用了本文档'
+  if (reason === 'tag') return '共同标签或关键词'
+  if (reason === 'group') return '同一分组'
+  return '主题相关'
+}
+
+async function openLinkedKnowledgeDocument(link) {
+  const workspace = activeDocumentWorkspace()
+  if (workspace && workspace.view.knowledgeBaseId === link.knowledgeBaseId) {
+    await selectDocument(workspace, link.id)
+    return
+  }
+  state.documentView.knowledgeBaseId = link.knowledgeBaseId
+  state.documentView.documentId = link.id
+  await navigate('entries')
+}
+
+async function refreshDocumentLinks(workspace, editor) {
+  if (!editor?.id) return
+  const current = workspace.view.links
+  if (current?.documentId === editor.id) current.loading = true
+  try {
+    const value = await api(`entries/${encodeURIComponent(editor.id)}/links`)
+    if (workspace.view.editor !== editor) return
+    workspace.view.links = {
+      documentId: editor.id, loading: false, error: '',
+      related: value.related ?? [], backlinks: value.backlinks ?? [], references: value.references ?? [],
+    }
+  } catch (error) {
+    if (workspace.view.editor !== editor) return
+    workspace.view.links = { documentId: editor.id, loading: false, error: friendlyError(error), related: [], backlinks: [], references: [] }
+  }
+  const panel = document.querySelector('[data-document-links]')
+  if (panel && workspace.view.editor === editor) panel.replaceWith(renderDocumentLinksPanel(workspace, editor))
 }
 
 async function openNoteReference(id) {
@@ -4008,6 +4189,724 @@ function formatBytes(value) {
   if (value < 1024) return `${value} B`
   if (value < 1024 * 1024) return `${(value / 1024).toFixed(value < 10 * 1024 ? 1 : 0)} KiB`
   return `${(value / 1024 / 1024).toFixed(value < 10 * 1024 * 1024 ? 1 : 0)} MiB`
+}
+
+async function loadArtifacts(signal) {
+  state.artifacts.error = ''
+  try {
+    const payload = await fetchArtifactJson('', signal)
+    state.artifacts.items = Array.isArray(payload?.artifacts) ? payload.artifacts : []
+    if (state.artifacts.selectedId && !state.artifacts.items.some(item => item.id === state.artifacts.selectedId)) {
+      state.artifacts.selectedId = ''
+      releaseArtifactPreview()
+    }
+  } catch (error) {
+    if (error.name === 'AbortError') return
+    state.artifacts.items = []
+    state.artifacts.error = friendlyError(error)
+  }
+}
+
+async function fetchArtifactJson(suffix, signal) {
+  const response = await fetch(`/knowledge-control/v1/artifacts${suffix}`, {
+    credentials: 'same-origin',
+    headers: { 'x-dsh-knowledge-client': 'management-web' },
+    signal: signal ? AbortSignal.any([signal, AbortSignal.timeout(15000)]) : AbortSignal.timeout(15000),
+  })
+  const data = await response.json().catch(() => ({}))
+  if (!response.ok) throw Object.assign(new Error(data.error || `读取制品文件失败（${response.status}）`), { status: response.status })
+  return data
+}
+
+async function fetchArtifactBlob(item, signal) {
+  const response = await fetch(`/knowledge-control/v1/artifacts/${encodeURIComponent(item.id)}`, {
+    credentials: 'same-origin',
+    headers: { 'x-dsh-knowledge-client': 'management-web', accept: item.mediaType || 'application/octet-stream' },
+    signal: signal ? AbortSignal.any([signal, AbortSignal.timeout(60000)]) : AbortSignal.timeout(60000),
+  })
+  if (!response.ok) {
+    const data = await response.json().catch(() => ({}))
+    throw Object.assign(new Error(data.error || `读取制品文件失败（${response.status}）`), { status: response.status })
+  }
+  return response.blob()
+}
+
+function renderArtifacts() {
+  const view = state.artifacts
+  const query = view.query.trim().toLocaleLowerCase()
+  const items = view.items.filter(item => !query
+    || `${item.display || ''} ${item.path || ''} ${item.mediaType || ''} ${item.extension || ''} ${item.source || ''}`.toLocaleLowerCase().includes(query))
+  return element('section', { class: 'artifacts-page', 'aria-label': '制品文件' },
+    element('div', { class: 'section-heading' },
+      element('div', {},
+        element('h2', {}, '制品文件'),
+        element('p', {}, `自动归档的原始文件，共 ${view.items.length} 个。可预览、下载，或打开对应知识文档进行编辑、调整分组与移动。`)),
+      element('div', { class: 'artifact-toolbar' },
+        element('input', {
+          class: 'input', type: 'search', value: view.query, placeholder: '搜索文件名、类型或来源',
+          'aria-label': '搜索制品文件',
+          onChange: event => { view.query = event.target.value; renderShell() },
+        }),
+        actionButton('刷新', () => { void navigate('files') }, 'ghost small'),
+      ),
+    ),
+    view.error
+      ? element('div', { class: 'panel' }, element('div', { class: 'panel-body' },
+        element('p', { role: 'alert' }, view.error),
+        actionButton('重试', () => { void navigate('files') }, 'small'),
+      ))
+      : null,
+    element('div', { class: 'panel artifacts-panel' }, element('div', { class: 'panel-body' },
+      items.length
+        ? element('div', { class: 'artifact-list' }, items.map(renderArtifactRow))
+        : compactEmpty(query ? '没有匹配的制品文件' : '还没有归档的制品文件；Agent 交付、文件工具写入或你上传的文件会自动出现在这里'),
+    )),
+  )
+}
+
+function renderBackgroundIndicator() {
+  const status = state.background.status
+  const archive = status?.archive
+  const writeback = status?.writeback
+  const activeArchive = Boolean(archive?.active)
+  const activeWriteback = (writeback?.running ?? 0) > 0
+  const activeWorklog = status?.worklog?.running === true
+  const queued = (archive?.queued ?? 0) + (writeback?.queued ?? 0)
+  const recent = archive?.last !== undefined && Date.now() - archive.last.at < 12_000
+    && archive.last.captured + archive.last.updated > 0
+  const active = activeArchive || activeWriteback || activeWorklog || queued > 0
+  const details = []
+  if (activeArchive) details.push(`自动归档 ${archive.done}/${archive.total}${archive.current ? ` · ${shortFileName(archive.current)}` : ''}`)
+  else if ((archive?.queued ?? 0) > 0) details.push(`自动归档排队 ${archive.queued} 批`)
+  if (activeWriteback) details.push(`知识回写处理中 ${writeback.running}`)
+  else if ((writeback?.queued ?? 0) > 0) details.push(`知识回写排队 ${writeback.queued}`)
+  if (activeWorklog) details.push('工作日报整理中')
+  if (details.length === 0 && recent) details.push(`已归档 ${archive.last.captured + archive.last.updated} 个文件`)
+  if (details.length === 0) details.push(status === null ? '正在连接后台状态…' : state.background.error ? '后台状态暂不可用' : '知识归档 · 回写 · 日报')
+  const clickable = activeArchive || activeWriteback || activeWorklog || queued > 0
+  return element('aside', {
+    class: `background-indicator${active ? ' is-active' : ' is-idle'}${recent ? ' is-recent' : ''}`,
+    'data-background-status': '', role: 'status', 'aria-live': 'polite',
+    title: active ? '点击查看后台任务' : '后台自动整理已开启',
+    onClick: clickable ? () => {
+      void navigate(activeArchive || (archive?.queued ?? 0) > 0 ? 'files' : activeWriteback || (writeback?.queued ?? 0) > 0 ? 'writeback' : 'worklog')
+    } : undefined,
+  },
+  element('span', { class: active ? 'background-spinner' : 'background-dot', 'aria-hidden': 'true' }),
+  element('span', { class: 'background-copy' },
+    element('strong', {}, active ? '后台整理中' : recent ? '后台整理完成' : '后台自动整理'),
+    element('span', {}, details.join(' · '))),
+  active && archive?.total > 0
+    ? element('span', { class: 'background-meter', 'aria-hidden': 'true' }, element('span', { style: `width:${Math.round(archive.done / Math.max(1, archive.total) * 100)}%` }))
+    : null)
+}
+
+function shortFileName(path) {
+  const parts = String(path).split(/[\\/]/u)
+  return parts[parts.length - 1] || String(path)
+}
+
+function startBackgroundPolling() {
+  if (backgroundPollTimer) return
+  void pollBackgroundStatus()
+  backgroundPollTimer = window.setInterval(() => { void pollBackgroundStatus() }, BACKGROUND_POLL_MS)
+}
+
+async function pollBackgroundStatus() {
+  if (backgroundPollRunning) return
+  backgroundPollRunning = true
+  try {
+    const response = await fetch('/knowledge-control/v1/background-status', {
+      headers: { 'x-dsh-knowledge-client': 'management-web' }, cache: 'no-store', credentials: 'same-origin',
+    })
+    if (!response.ok) throw new Error(`HTTP ${response.status}`)
+    state.background.status = await response.json()
+    state.background.error = ''
+    state.background.updatedAt = Date.now()
+  } catch (error) {
+    state.background.error = friendlyError(error)
+  } finally {
+    backgroundPollRunning = false
+    const current = document.querySelector('[data-background-status]')
+    if (current) current.replaceWith(renderBackgroundIndicator())
+  }
+}
+
+function renderLinkGraph() {
+  const data = state.graph.data
+  const bases = state.knowledgeBases.filter(base => base.status === 'active')
+  const groups = new Map()
+  for (const node of data?.nodes ?? []) groups.set(node.group, (groups.get(node.group) ?? 0) + 1)
+  return element('section', { class: 'graph-page', 'aria-label': '思维链接图' },
+    element('div', { class: 'section-heading graph-heading' },
+      element('div', {},
+        element('h2', {}, '思维链接图'),
+        element('p', {}, '把知识文档之间的双向链接画成一张可交互的关系图：拖动节点、滚轮缩放，点击节点打开文档。')),
+      element('div', { class: 'graph-toolbar' },
+        bases.length > 0
+          ? element('label', { class: 'graph-base-select' }, element('span', {}, '知识库'),
+            element('select', {
+              class: 'select', 'aria-label': '选择知识库',
+              onChange: event => {
+                state.graph.baseId = event.target.value
+                state.graph.data = null
+                void loadKnowledgeGraph().then(() => renderShell())
+              },
+            }, bases.map(base => element('option', { value: base.id, selected: base.id === state.graph.baseId }, base.name))))
+          : null,
+        actionButton('重新计算', () => {
+          state.graph.data = null
+          void loadKnowledgeGraph().then(() => renderShell())
+        }, 'ghost small'))),
+    state.graph.error
+      ? element('div', { class: 'panel' }, element('div', { class: 'panel-body' }, element('p', { role: 'alert' }, state.graph.error)))
+      : null,
+    element('div', { class: 'panel graph-panel' }, element('div', { class: 'panel-body' },
+      element('div', { class: 'graph-meta' },
+        element('span', {}, data ? `${data.nodes.length} 个文档节点 · ${data.edges.length} 条链接` : state.graph.loading ? '正在计算链接…' : '暂无数据'),
+        data?.truncated ? element('span', { class: 'graph-truncated' }, '仅展示最近更新的前 80 篇文档') : null,
+        element('div', { class: 'graph-legend' }, [...groups.entries()].sort((a, b) => b[1] - a[1]).slice(0, 8).map(([group, count]) =>
+          element('span', { class: 'graph-legend-item' },
+            element('i', { style: `background:${graphGroupColor(group)}`, 'aria-hidden': 'true' }), `${group} ${count}`)))),
+      data && data.nodes.length > 0
+        ? element('div', { class: 'graph-stage', 'data-graph-stage': '' },
+          element('canvas', {
+            class: 'graph-canvas', 'data-graph-canvas': '', role: 'img',
+            'aria-label': `${data.knowledgeBase.name} 的知识链接图，共 ${data.nodes.length} 个文档、${data.edges.length} 条链接`,
+          }),
+          element('div', { class: 'graph-controls' },
+            actionButton('＋', () => state.graph.renderer?.zoomIn(), 'ghost small', { 'aria-label': '放大链接图' }),
+            actionButton('－', () => state.graph.renderer?.zoomOut(), 'ghost small', { 'aria-label': '缩小链接图' }),
+            actionButton('适应', () => state.graph.renderer?.fit(), 'ghost small', { 'aria-label': '适应窗口' }),
+            actionButton('导出图片', () => downloadGraphImage(), 'ghost small', { 'aria-label': '导出链接图图片' })),
+          element('p', { class: 'graph-hint' }, '拖动节点 · 滚轮缩放 · 点击打开文档'))
+        : compactEmpty(state.graph.loading ? '正在生成思维链接图' : '这个知识库还没有可绘制的文档'),
+      data && data.nodes.length > 0
+        ? element('div', { class: 'graph-node-list', 'aria-label': '链接图节点列表' }, data.nodes
+          .slice()
+          .sort((a, b) => b.degree - a.degree)
+          .slice(0, 36)
+          .map(node => element('button', {
+            type: 'button', class: 'graph-node-chip', onClick: () => openGraphNode(node),
+            title: node.group,
+          }, element('i', { style: `background:${graphGroupColor(node.group)}`, 'aria-hidden': 'true' }), node.title,
+          node.degree > 0 ? element('small', {}, String(node.degree)) : null)))
+        : null)))
+}
+
+async function loadKnowledgeGraph(signal) {
+  const request = ++state.graph.request
+  state.graph.loading = true
+  state.graph.error = ''
+  try {
+    if (state.knowledgeBases.length === 0) state.knowledgeBases = await api('knowledge-bases', { signal })
+    const active = state.knowledgeBases.filter(base => base.status === 'active')
+    const selected = active.find(base => base.id === state.graph.baseId) ?? active[0]
+    if (!selected) throw new Error('暂无可用知识库。')
+    state.graph.baseId = selected.id
+    const data = await api(`graph?knowledgeBaseId=${encodeURIComponent(selected.id)}&limit=80`, { signal })
+    if (state.graph.request !== request || signal?.aborted) return
+    state.graph.data = data
+  } catch (error) {
+    if (signal?.aborted) return
+    if (error.status === 401 && AUTH_MODE === 'bearer') return signOut()
+    state.graph.error = friendlyError(error)
+  } finally {
+    if (state.graph.request === request) state.graph.loading = false
+  }
+}
+
+function openGraphNode(node) {
+  const baseId = state.graph.data?.knowledgeBase?.id
+  if (!baseId) return
+  state.documentView.knowledgeBaseId = baseId
+  state.documentView.documentId = node.id
+  void navigate('entries')
+}
+
+function downloadGraphImage() {
+  const url = state.graph.renderer?.snapshot?.()
+  if (!url) return
+  const name = state.graph.data?.knowledgeBase?.name || '知识库'
+  const link = document.createElement('a')
+  link.href = url
+  link.download = `${name}-思维链接图.png`
+  document.body.append(link)
+  link.click()
+  link.remove()
+}
+
+const GRAPH_PALETTE = ['#6ea8ff', '#7ce7c4', '#f6c177', '#f28fad', '#b79bff', '#7fd1e8', '#e8d46e', '#9ee493']
+
+function graphGroupColor(group) {
+  let hash = 0
+  for (const char of String(group || '未分组')) hash = (hash * 31 + char.codePointAt(0)) >>> 0
+  return GRAPH_PALETTE[hash % GRAPH_PALETTE.length]
+}
+
+function mountKnowledgeGraph(shell) {
+  state.graph.renderer?.dispose?.()
+  state.graph.renderer = undefined
+  const canvas = shell.querySelector('[data-graph-canvas]')
+  if (!canvas || !state.graph.data) return
+  state.graph.renderer = createKnowledgeGraphRenderer(canvas, state.graph.data, { onOpen: openGraphNode })
+}
+
+function createKnowledgeGraphRenderer(canvas, data, options) {
+  const context = canvas.getContext('2d')
+  if (!context) return { dispose() {}, zoomIn() {}, zoomOut() {}, fit() {} }
+  const stage = canvas.parentElement
+  const reduceMotion = window.matchMedia?.('(prefers-reduced-motion: reduce)').matches === true
+  const nodes = data.nodes.map((node, index) => ({
+    ...node,
+    x: 0, y: 0, vx: 0, vy: 0,
+    r: 4.5 + Math.min(7, node.degree * 1.3),
+    color: graphGroupColor(node.group),
+    phase: index * 0.73,
+  }))
+  const byId = new Map(nodes.map(node => [node.id, node]))
+  const edges = data.edges.map((edge, index) => ({
+    ...edge,
+    a: byId.get(edge.source), b: byId.get(edge.target),
+    seed: (index * 0.6180339887) % 1,
+  })).filter(edge => edge.a !== undefined && edge.b !== undefined)
+  const neighbours = new Map(nodes.map(node => [node.id, new Set()]))
+  for (const edge of edges) {
+    neighbours.get(edge.a.id)?.add(edge.b.id)
+    neighbours.get(edge.b.id)?.add(edge.a.id)
+  }
+  let width = 0
+  let height = 0
+  let dpr = 1
+  let zoom = 1
+  let panX = 0
+  let panY = 0
+  let hover = null
+  let selected = null
+  let drag = null
+  let pan = null
+  let alpha = 1
+  let raf = 0
+  let last = performance.now()
+  let disposed = false
+  const pointer = { x: 0, y: 0 }
+
+  const resize = () => {
+    const rect = canvas.getBoundingClientRect()
+    const previousWidth = width
+    const previousHeight = height
+    width = Math.max(320, Math.round(rect.width || stage?.clientWidth || 800))
+    height = Math.max(320, Math.round(rect.height || 520))
+    dpr = Math.min(2, window.devicePixelRatio || 1)
+    canvas.width = Math.round(width * dpr)
+    canvas.height = Math.round(height * dpr)
+    if (previousWidth > 0 && previousHeight > 0) {
+      for (const node of nodes) {
+        node.x *= width / previousWidth
+        node.y *= height / previousHeight
+      }
+    } else {
+      seed()
+    }
+    alpha = Math.max(alpha, 0.6)
+  }
+
+  const seed = () => {
+    const radius = Math.min(width, height) * 0.3
+    nodes.forEach((node, index) => {
+      const angle = (index / Math.max(1, nodes.length)) * Math.PI * 2 - Math.PI / 2
+      const wobble = 0.78 + ((index * 37) % 17) / 40
+      node.x = width / 2 + Math.cos(angle) * radius * wobble
+      node.y = height / 2 + Math.sin(angle) * radius * wobble
+      node.vx = 0
+      node.vy = 0
+    })
+  }
+
+  const simulate = (step) => {
+    const k = Math.min(2.5, Math.max(0.2, step))
+    for (let i = 0; i < nodes.length; i += 1) {
+      const a = nodes[i]
+      for (let j = i + 1; j < nodes.length; j += 1) {
+        const b = nodes[j]
+        let dx = b.x - a.x
+        let dy = b.y - a.y
+        let distanceSq = dx * dx + dy * dy
+        if (distanceSq < 1) { dx = (j - i) * 0.1; dy = 0.1; distanceSq = 1 }
+        if (distanceSq > 420 * 420) continue
+        const distance = Math.sqrt(distanceSq)
+        const force = Math.min(9, 1500 / distanceSq) * k
+        const fx = dx / distance * force
+        const fy = dy / distance * force
+        a.vx -= fx
+        a.vy -= fy
+        b.vx += fx
+        b.vy += fy
+      }
+    }
+    for (const edge of edges) {
+      const dx = edge.b.x - edge.a.x
+      const dy = edge.b.y - edge.a.y
+      const distance = Math.hypot(dx, dy) || 1
+      const target = 110
+      const force = (distance - target) * 0.018 * k
+      const fx = dx / distance * force
+      const fy = dy / distance * force
+      edge.a.vx += fx
+      edge.a.vy += fy
+      edge.b.vx -= fx
+      edge.b.vy -= fy
+    }
+    for (const node of nodes) {
+      node.vx += (width / 2 - node.x) * 0.004 * k
+      node.vy += (height / 2 - node.y) * 0.004 * k
+      node.vx *= Math.pow(0.84, k)
+      node.vy *= Math.pow(0.84, k)
+      node.x = Math.max(30, Math.min(width - 30, node.x + node.vx * k))
+      node.y = Math.max(30, Math.min(height - 30, node.y + node.vy * k))
+    }
+    alpha = Math.max(0.015, alpha * Math.pow(0.985, k))
+  }
+
+  const draw = (time) => {
+    context.setTransform(dpr, 0, 0, dpr, 0, 0)
+    context.clearRect(0, 0, width, height)
+    context.fillStyle = '#0b1120'
+    context.fillRect(0, 0, width, height)
+    const background = context.createRadialGradient(width * 0.5, height * 0.42, 20, width * 0.5, height * 0.5, Math.max(width, height) * 0.7)
+    background.addColorStop(0, 'rgba(88, 128, 255, 0.16)')
+    background.addColorStop(0.55, 'rgba(20, 28, 58, 0.10)')
+    background.addColorStop(1, 'rgba(8, 12, 24, 0)')
+    context.fillStyle = background
+    context.fillRect(0, 0, width, height)
+    context.strokeStyle = 'rgba(140, 165, 220, 0.07)'
+    context.lineWidth = 1
+    for (let x = 0; x < width; x += 44) {
+      context.beginPath(); context.moveTo(x, 0); context.lineTo(x, height); context.stroke()
+    }
+    for (let y = 0; y < height; y += 44) {
+      context.beginPath(); context.moveTo(0, y); context.lineTo(width, y); context.stroke()
+    }
+    context.save()
+    context.translate(width / 2 + panX, height / 2 + panY)
+    context.scale(zoom, zoom)
+    context.translate(-width / 2, -height / 2)
+    const highlighted = selected ?? hover
+    const highlightNeighbours = highlighted ? neighbours.get(highlighted.id) : undefined
+    for (const edge of edges) {
+      const active = highlighted !== null && (edge.a.id === highlighted.id || edge.b.id === highlighted.id)
+      const muted = highlighted !== null && !active
+      const dx = edge.b.x - edge.a.x
+      const dy = edge.b.y - edge.a.y
+      const length = Math.hypot(dx, dy) || 1
+      const bend = Math.min(70, length * 0.12) * (edge.seed > 0.5 ? 1 : -1)
+      const cx = (edge.a.x + edge.b.x) / 2 + (-dy / length) * bend
+      const cy = (edge.a.y + edge.b.y) / 2 + (dx / length) * bend
+      context.beginPath()
+      context.moveTo(edge.a.x, edge.a.y)
+      context.quadraticCurveTo(cx, cy, edge.b.x, edge.b.y)
+      context.strokeStyle = active ? 'rgba(150, 196, 255, 0.85)' : muted ? 'rgba(130, 150, 190, 0.06)' : 'rgba(130, 160, 215, 0.22)'
+      context.lineWidth = active ? 1.6 : 1
+      context.stroke()
+      if ((active || (!highlighted && edge.seed > 0.55)) && !reduceMotion) {
+        const t = (time * 0.16 + edge.seed) % 1
+        const mt = 1 - t
+        const px = mt * mt * edge.a.x + 2 * mt * t * cx + t * t * edge.b.x
+        const py = mt * mt * edge.a.y + 2 * mt * t * cy + t * t * edge.b.y
+        context.beginPath()
+        context.arc(px, py, active ? 2.2 : 1.5, 0, Math.PI * 2)
+        context.fillStyle = active ? 'rgba(190, 220, 255, 0.95)' : 'rgba(150, 190, 255, 0.55)'
+        context.fill()
+      }
+    }
+    for (const node of nodes) {
+      const isSelected = selected?.id === node.id
+      const isHover = hover?.id === node.id
+      const isNeighbour = highlightNeighbours?.has(node.id)
+      const muted = highlighted !== null && !isSelected && !isHover && !isNeighbour
+      const radius = node.r * (isSelected ? 1.35 : isHover ? 1.2 : 1)
+      if (!muted) {
+        const glow = context.createRadialGradient(node.x, node.y, radius * 0.4, node.x, node.y, radius * 3.6)
+        glow.addColorStop(0, `${node.color}66`)
+        glow.addColorStop(1, `${node.color}00`)
+        context.beginPath()
+        context.arc(node.x, node.y, radius * 3.6, 0, Math.PI * 2)
+        context.fillStyle = glow
+        context.fill()
+      }
+      context.beginPath()
+      context.arc(node.x, node.y, radius, 0, Math.PI * 2)
+      context.fillStyle = muted ? 'rgba(120, 140, 180, 0.35)' : node.color
+      context.fill()
+      if (isSelected || isHover) {
+        context.beginPath()
+        context.arc(node.x, node.y, radius + 4, 0, Math.PI * 2)
+        context.strokeStyle = 'rgba(230, 242, 255, 0.9)'
+        context.lineWidth = 1.4
+        context.stroke()
+      }
+      const showLabel = isSelected || isHover || (!highlighted && (zoom > 1.05 || node.degree >= 5)) || isNeighbour
+      if (showLabel) {
+        context.font = `${isSelected ? 600 : 500} ${11 / Math.max(0.8, zoom)}px "Segoe UI", "PingFang SC", sans-serif`
+        context.textAlign = 'center'
+        context.textBaseline = 'top'
+        const label = node.title.length > 26 ? `${node.title.slice(0, 25)}…` : node.title
+        context.lineWidth = 3
+        context.strokeStyle = 'rgba(8, 12, 22, 0.82)'
+        context.strokeText(label, node.x, node.y + radius + 6)
+        context.fillStyle = muted ? 'rgba(180, 195, 220, 0.6)' : 'rgba(235, 243, 255, 0.96)'
+        context.fillText(label, node.x, node.y + radius + 6)
+      }
+    }
+    context.restore()
+  }
+
+  const toWorld = (clientX, clientY) => {
+    const rect = canvas.getBoundingClientRect()
+    const x = (clientX - rect.left - (width / 2 + panX)) / zoom + width / 2
+    const y = (clientY - rect.top - (height / 2 + panY)) / zoom + height / 2
+    return { x, y }
+  }
+  const redraw = () => { if (reduceMotion) draw(performance.now() / 1000) }
+  const hitTest = (clientX, clientY) => {
+    const point = toWorld(clientX, clientY)
+    for (let index = nodes.length - 1; index >= 0; index -= 1) {
+      const node = nodes[index]
+      if (Math.hypot(node.x - point.x, node.y - point.y) <= node.r + 9) return node
+    }
+    return null
+  }
+
+  const onPointerDown = (event) => {
+    const node = hitTest(event.clientX, event.clientY)
+    if (node !== null) {
+      drag = { node, startX: event.clientX, startY: event.clientY, moved: false }
+      selected = node
+    } else {
+      pan = { startX: event.clientX, startY: event.clientY, panX, panY }
+    }
+    canvas.setPointerCapture?.(event.pointerId)
+  }
+  const onPointerMove = (event) => {
+    pointer.x = event.clientX
+    pointer.y = event.clientY
+    if (drag !== null) {
+      if (Math.hypot(event.clientX - drag.startX, event.clientY - drag.startY) > 4) drag.moved = true
+      const point = toWorld(event.clientX, event.clientY)
+      drag.node.x = point.x
+      drag.node.y = point.y
+      drag.node.vx = 0
+      drag.node.vy = 0
+      alpha = Math.max(alpha, 0.3)
+      redraw()
+      return
+    }
+    if (pan !== null) {
+      panX = pan.panX + event.clientX - pan.startX
+      panY = pan.panY + event.clientY - pan.startY
+      redraw()
+      return
+    }
+    hover = hitTest(event.clientX, event.clientY)
+    canvas.style.cursor = hover !== null ? 'pointer' : 'grab'
+    redraw()
+  }
+  const onPointerUp = (event) => {
+    if (event.type === 'pointerup' && drag !== null && !drag.moved) options.onOpen(drag.node)
+    drag = null
+    pan = null
+    canvas.releasePointerCapture?.(event.pointerId)
+    redraw()
+  }
+  const onWheel = (event) => {
+    event.preventDefault()
+    zoom = Math.max(0.45, Math.min(2.6, zoom * (event.deltaY > 0 ? 0.9 : 1.1)))
+    redraw()
+  }
+  const onLeave = () => { hover = null; redraw() }
+
+  const fit = () => {
+    if (nodes.length === 0) return
+    const xs = nodes.map(node => node.x)
+    const ys = nodes.map(node => node.y)
+    const minX = Math.min(...xs)
+    const maxX = Math.max(...xs)
+    const minY = Math.min(...ys)
+    const maxY = Math.max(...ys)
+    zoom = Math.max(0.45, Math.min(2.2, Math.min((width - 120) / Math.max(60, maxX - minX), (height - 120) / Math.max(60, maxY - minY))))
+    panX = -((minX + maxX) / 2 - width / 2) * zoom
+    panY = -((minY + maxY) / 2 - height / 2) * zoom
+    redraw()
+  }
+  const zoomIn = () => { zoom = Math.min(2.6, zoom * 1.18); redraw() }
+  const zoomOut = () => { zoom = Math.max(0.45, zoom / 1.18); redraw() }
+
+  const frame = (now) => {
+    if (disposed) return
+    const step = Math.min(48, now - last) / 16.67
+    last = now
+    if (!reduceMotion) simulate(step)
+    draw(now / 1000)
+    if (!reduceMotion) raf = requestAnimationFrame(frame)
+  }
+
+  canvas.addEventListener('pointerdown', onPointerDown)
+  canvas.addEventListener('pointermove', onPointerMove)
+  canvas.addEventListener('pointerup', onPointerUp)
+  canvas.addEventListener('pointercancel', onPointerUp)
+  canvas.addEventListener('pointerleave', onLeave)
+  canvas.addEventListener('wheel', onWheel, { passive: false })
+  const observer = typeof ResizeObserver === 'function' ? new ResizeObserver(() => { resize(); if (reduceMotion) draw(performance.now() / 1000) }) : null
+  observer?.observe(stage ?? canvas)
+  resize()
+  if (reduceMotion) {
+    for (let index = 0; index < 240; index += 1) simulate(1)
+    draw(performance.now() / 1000)
+  } else {
+    raf = requestAnimationFrame(frame)
+  }
+  return {
+    zoomIn, zoomOut, fit,
+    snapshot: () => canvas.toDataURL('image/png'),
+    dispose() {
+      disposed = true
+      cancelAnimationFrame(raf)
+      observer?.disconnect()
+      canvas.removeEventListener('pointerdown', onPointerDown)
+      canvas.removeEventListener('pointermove', onPointerMove)
+      canvas.removeEventListener('pointerup', onPointerUp)
+      canvas.removeEventListener('pointercancel', onPointerUp)
+      canvas.removeEventListener('pointerleave', onLeave)
+      canvas.removeEventListener('wheel', onWheel)
+    },
+  }
+}
+
+function renderArtifactRow(item) {
+  const view = state.artifacts
+  const open = view.selectedId === item.id
+  return element('article', { class: 'artifact-row', 'data-open': String(open) },
+    element('div', { class: 'artifact-main' },
+      element('button', {
+        type: 'button', class: 'artifact-open', 'aria-expanded': String(open),
+        onClick: () => { void openArtifactPreview(item) },
+      },
+      element('span', { class: 'artifact-name' }, item.display || item.path || item.id),
+      element('small', {}, `${formatBytes(item.size)} · ${artifactKindLabel(item)} · ${artifactSourceLabel(item.source)} · ${formatDate(item.updatedAt)}`)),
+      element('div', { class: 'artifact-actions' },
+        actionButton(open ? '收起预览' : '预览', () => { void openArtifactPreview(item) }, 'ghost small'),
+        actionButton('下载', () => { void downloadArtifact(item) }, 'small'),
+        item.entryId ? actionButton('打开知识文档', () => { void openArtifactDocument(item) }, 'ghost small') : null,
+      ),
+    ),
+    open ? renderArtifactPreview(item) : null,
+  )
+}
+
+function artifactKindLabel(item) {
+  const extension = (item.extension || '').toUpperCase()
+  const base = extension ? extension : '未知格式'
+  return item.mediaType && item.mediaType !== 'application/octet-stream' ? `${base} · ${item.mediaType}` : base
+}
+
+function artifactSourceLabel(source) {
+  if (source === 'upload') return '用户上传'
+  if (source === 'presented') return '制品声明'
+  return '文件写入'
+}
+
+function artifactPreviewKind(item) {
+  const mediaType = item.mediaType || ''
+  const extension = item.extension || ''
+  if (mediaType.startsWith('image/')) return 'image'
+  if (mediaType === 'application/pdf') return 'pdf'
+  if (mediaType.startsWith('audio/')) return 'audio'
+  if (mediaType.startsWith('video/')) return 'video'
+  if (mediaType.startsWith('text/') || ['application/json', 'application/xml', 'application/yaml'].includes(mediaType)
+    || ['md', 'markdown', 'txt', 'csv', 'tsv', 'json', 'jsonl', 'yaml', 'yml', 'xml', 'html', 'htm', 'log', 'js', 'ts', 'css', 'svg'].includes(extension)) return 'text'
+  return 'binary'
+}
+
+async function openArtifactPreview(item) {
+  const view = state.artifacts
+  if (view.selectedId === item.id) {
+    view.selectedId = ''
+    releaseArtifactPreview()
+    renderShell()
+    return
+  }
+  view.selectedId = item.id
+  view.loading = true
+  releaseArtifactPreview()
+  renderShell()
+  try {
+    const blob = await fetchArtifactBlob(item)
+    if (view.selectedId !== item.id) return
+    const kind = artifactPreviewKind(item)
+    if (kind === 'text') {
+      view.previewText = await blob.text()
+      view.previewKind = 'text'
+    } else if (kind === 'binary') {
+      view.previewKind = 'binary'
+      view.previewText = '该格式无法在浏览器中直接预览，请下载后使用本地应用打开。'
+    } else {
+      view.previewUrl = URL.createObjectURL(blob)
+      view.previewKind = kind
+    }
+  } catch (error) {
+    if (view.selectedId === item.id) {
+      view.previewKind = 'binary'
+      view.previewText = friendlyError(error)
+    }
+  } finally {
+    if (view.selectedId === item.id) view.loading = false
+  }
+  renderShell()
+}
+
+function renderArtifactPreview(item) {
+  const view = state.artifacts
+  return element('div', { class: 'artifact-preview', 'data-kind': view.previewKind },
+    view.loading
+      ? element('p', {}, '正在读取文件…')
+      : view.previewKind === 'image'
+        ? element('img', { class: 'artifact-image', src: view.previewUrl, alt: item.display || item.path || '制品图片' })
+        : view.previewKind === 'pdf'
+          ? element('iframe', { class: 'artifact-frame', src: view.previewUrl, title: item.display || 'PDF 预览' })
+          : view.previewKind === 'audio'
+            ? element('audio', { src: view.previewUrl, controls: true })
+            : view.previewKind === 'video'
+              ? element('video', { class: 'artifact-video', src: view.previewUrl, controls: true })
+              : element('pre', { class: 'artifact-text' }, view.previewText || '没有可预览的内容。'),
+  )
+}
+
+function releaseArtifactPreview() {
+  if (state.artifacts.previewUrl) URL.revokeObjectURL(state.artifacts.previewUrl)
+  state.artifacts.previewUrl = ''
+  state.artifacts.previewKind = ''
+  state.artifacts.previewText = ''
+}
+
+async function downloadArtifact(item) {
+  try {
+    const blob = await fetchArtifactBlob(item)
+    const url = URL.createObjectURL(blob)
+    const anchor = element('a', { href: url, download: item.display || item.path || 'artifact', hidden: true })
+    document.body.append(anchor)
+    anchor.click()
+    anchor.remove()
+    window.setTimeout(() => URL.revokeObjectURL(url), 1000)
+    showToast(`已下载 ${item.display || item.path}。`)
+  } catch (error) {
+    showToast(`下载失败：${friendlyError(error)}`, 'error')
+  }
+}
+
+async function openArtifactDocument(item) {
+  state.documentView.knowledgeBaseId = item.knowledgeBaseId
+  state.documentView.documentId = item.entryId
+  await navigate('entries')
 }
 
 function renderCandidates() {

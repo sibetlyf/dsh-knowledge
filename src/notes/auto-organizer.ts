@@ -173,7 +173,7 @@ export class NoteAutoOrganizer {
       if (headingText.length > 0) title = headingText
     }
 
-    // 7. 存入待审阅草案
+    // 7. 存入待审阅草案；未关闭自动批准时直接落盘，不再等待人工确认
     const proposal = this.proposalStore.createProposal({
       title,
       kind: 'auto_summary',
@@ -182,6 +182,16 @@ export class NoteAutoOrganizer {
       mindmapJson: JSON.stringify(mindmapTree),
       sourceNoteIds,
     })
+    if (this.config.noteOrganizeAutoApprove) {
+      const approved = await this.proposalStore.approveProposal(proposal.id, this.noteStore)
+      return {
+        organized: true,
+        proposal: approved.proposal,
+        mindmapTree,
+        scannedCount: candidateNodes.length,
+        pdfCount,
+      }
+    }
 
     return {
       organized: true,

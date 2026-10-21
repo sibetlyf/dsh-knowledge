@@ -2,6 +2,7 @@ import Schema from '@deepseek-ai/schemastery'
 import { Store } from './store.js'
 import { Worker } from './worker.js'
 import { JournalService } from './service.js'
+import { createRefreshScheduler } from './knowledge.js'
 import { handler } from './http.js'
 import { readFileSync } from 'node:fs'
 
@@ -13,6 +14,7 @@ export function apply(ctx, config) {
   const models = async () => Promise.all(ctx.llm.listProviders().map(async p => ({ id: p.id, name: p.name, models: (await ctx.llm.listModels(p.id)).map(m => ({ id: m.id, name: m.name })) })))
   // DSH's SessionController uses the Host process cwd when neither workspace nor cwd is specified.
   const service = new JournalService(store, worker, models, config.current, undefined, process.cwd())
+  const refresher = createRefreshScheduler(store, config.current, ctx.logger)
   ctx.on('agent/turn-stopping', ({ agent, turn }) => {
     try {
       service.collect(agent.session, turn)
@@ -32,6 +34,20 @@ export function apply(ctx, config) {
     }
   })
   service.start()
-  ctx.effect(() => async () => { await service.close(); store.close(); config.onDispose?.() }, 'worklog.close')
-  return { dispatch: (...args) => service.serveCentral(...args), isRunning: () => !!worker.active }
+  ctx.effect(() => async () => { refresher.dispose(); await service.close(); store.close(); config.onDispose?.() }, 'worklog.close')
+  return {
+    dispatch: (...args) => service.serveCentral(...args),
+    isRunning: () => !!worker.active,
+    recordKnowledge: (event) => {
+      try {
+        const result = service.recordKnowledge(event)
+        if (!result) return false
+        refresher.schedule(result.day)
+        return true
+      } catch (error) {
+        ctx.logger.warn(`worklog: 记录知识库更新失败：${error instanceof Error ? error.message : String(error)}`)
+        return false
+      }
+    },
+  }
 }

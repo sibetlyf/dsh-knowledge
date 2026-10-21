@@ -120,6 +120,16 @@ export class WritebackQueue {
     return this.status(key)!
   }
 
+  /** Counts for the background activity indicator; never exposes payloads. */
+  counts(): { queued: number; running: number; failed: number } {
+    const rows = this.db.prepare("SELECT status, count(*) AS count FROM queue_jobs WHERE status IN ('queued','running','failed') GROUP BY status").all() as Array<{ status: string; count: number }>
+    const counts = { queued: 0, running: 0, failed: 0 }
+    for (const row of rows) {
+      if (row.status === 'queued' || row.status === 'running' || row.status === 'failed') counts[row.status] = row.count
+    }
+    return counts
+  }
+
   list(sessionId = '', offset = 0, limit = 50, status?: WritebackStatus['status']) {
     const args = sessionId ? [sessionId] : []
     const conditions = sessionId ? ['session_id=?'] : []

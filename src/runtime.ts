@@ -2,10 +2,23 @@ import { randomUUID } from 'node:crypto'
 
 export interface TextBlockLike { type: string; text?: string }
 
+/** Durable attachment reference carried by an uploaded prompt block. */
+export interface AttachmentRefLike {
+  attachmentId: string
+  name?: string
+  bytes?: number
+  mediaType?: string
+}
+
+/** Prompt content block; `file`/`image` blocks carry an uploaded attachment. */
+export interface ContentBlockLike extends TextBlockLike {
+  attachment?: AttachmentRefLike
+}
+
 export interface MessageLike {
   id: string
   role: string
-  content: TextBlockLike[]
+  content: ContentBlockLike[]
   source: { kind: string; provider?: string; model?: string; plugin?: string; form?: string; summary?: string }
 }
 

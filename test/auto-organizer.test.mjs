@@ -176,13 +176,26 @@ test('NoteAutoOrganizer：结合碎片笔记与 PDF 自动提炼工作内容与�
     assert.equal(result.organized, true)
     assert.ok(result.proposal)
     assert.equal(result.proposal.title, '知识库架构整理')
-    assert.equal(result.proposal.status, 'pending')
+    assert.equal(result.proposal.status, 'approved', '默认直接落盘，不再等待人工批准')
     assert.equal(result.pdfCount, 1)
+    const approvedNodes = noteStore.list({ recursive: true })
+    assert.equal(approvedNodes.some(node => node.kind === 'document' && node.name === '知识库架构整理.md'), true)
 
     // 检查解析出的思维树
     assert.ok(result.mindmapTree)
     assert.equal(result.mindmapTree.length, 1)
     assert.equal(result.mindmapTree[0].title, '知识库架构整理')
+
+    // 关闭自动批准后仍保留草案审核路径
+    const reviewConfig = resolveConfig({
+      backend: 'local', databasePath: join(tempDir, 'knowledge.sqlite'),
+      noteOrganizeEnabled: true, noteOrganizeTargetFolder: '知识归档', noteOrganizeMinNotes: 2,
+      noteOrganizeAutoApprove: false,
+    })
+    const reviewOrganizer = new NoteAutoOrganizer(mockCtx, reviewConfig, noteStore, proposalStore, () => ({ provider: 'test', model: 'test' }))
+    const reviewed = await reviewOrganizer.organize()
+    assert.equal(reviewed.organized, true)
+    assert.equal(reviewed.proposal.status, 'pending')
   } finally {
     try { rmSync(tempDir, { recursive: true, force: true }) } catch {}
   }
