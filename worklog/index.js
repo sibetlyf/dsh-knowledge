@@ -14,7 +14,7 @@ export function apply(ctx, config) {
   const models = async () => Promise.all(ctx.llm.listProviders().map(async p => ({ id: p.id, name: p.name, models: (await ctx.llm.listModels(p.id)).map(m => ({ id: m.id, name: m.name })) })))
   // DSH's SessionController uses the Host process cwd when neither workspace nor cwd is specified.
   const service = new JournalService(store, worker, models, config.current, undefined, process.cwd())
-  const refresher = createRefreshScheduler(store, config.current, ctx.logger)
+  const refresher = createRefreshScheduler(store, config.current, ctx.logger, undefined, config.autoUpdate)
   ctx.on('agent/turn-stopping', ({ agent, turn }) => {
     try {
       service.collect(agent.session, turn)

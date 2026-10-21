@@ -158,7 +158,15 @@ export function apply(ctx: Context, config: KnowledgeConfig): void {
     if (!base) return
     const legacy = join(dirname(dirname(base)), 'worklog', 'worklog.sqlite')
     const databasePath = base === ':memory:' ? ':memory:' : existsSync(legacy) ? legacy : `${base}.worklog.sqlite`
-    journalRuntime = registerWorklog(journal, { databasePath, current: () => ({ ...activeConnection, paused: connectionChanging }), onDispose: () => { journalRuntime = undefined } })
+    journalRuntime = registerWorklog(journal, {
+      databasePath,
+      current: () => ({ ...activeConnection, paused: connectionChanging }),
+      autoUpdate: {
+        trigger: resolved.worklogAutoUpdateTrigger,
+        intervalMinutes: resolved.worklogAutoUpdateIntervalMinutes,
+      },
+      onDispose: () => { journalRuntime = undefined },
+    })
   })
   const journalDispatch = (method: string, path: string, data: Record<string, unknown>, query: URLSearchParams): Promise<unknown> => {
     if (!journalRuntime) throw connectionError(503, '中央日报服务尚未就绪')
@@ -201,6 +209,28 @@ export function apply(ctx: Context, config: KnowledgeConfig): void {
     if (job?.status === 'running') throw new WritebackDeferred('上一次远端回写租约尚未释放，等待恢复')
     throw new Error(job?.lastError ?? '未能确认远端回写状态，请重试')
   }, message => runtime.logger.warn(message)) : undefined
+  const pendingOrganize: WritebackWork[] = []
+  const flushOrganize = (): void => {
+    if (writebackQueue === undefined) return
+    for (const work of pendingOrganize.splice(0)) {
+      try { writebackQueue.enqueue(work) } catch (error) {
+        runtime.logger.warn(`dsh-knowledge: 定时知识整理入队失败: ${error instanceof Error ? error.message : String(error)}`)
+      }
+    }
+  }
+  const queueOrganize = (work: WritebackWork, key: string): void => {
+    if (resolved.autoOrganizeTrigger === 'interval') {
+      pendingOrganize.push(work)
+      if (pendingOrganize.length > 200) {
+        pendingOrganize.shift()
+        runtime.logger.warn('dsh-knowledge: 待整理快照超过 200 条，已丢弃最旧的一条')
+      }
+      return
+    }
+    writebackQueue?.enqueue(work)
+    writebackStatuses.delete(key)
+    writebackSources.delete(key)
+  }
   const handleCodec = new KnowledgeHandleCodec(randomBytes(32))
   const noteHandleCodec = new KnowledgeNoteHandleCodec(randomBytes(32))
   const managementEmbedToken = randomBytes(32).toString('base64url')
@@ -829,7 +859,7 @@ export function apply(ctx: Context, config: KnowledgeConfig): void {
       try {
         const snapshot = coordinator.capture(agent.session, turn)
         if (snapshot) work = { snapshot, destination: destination() }
-        if (work) writebackQueue!.enqueue(work)
+        if (work) queueOrganize(work, key)
         else writebackQueue!.completeEmpty(key, agent.session.id)
         writebackStatuses.delete(key)
         writebackSources.delete(key)
@@ -844,6 +874,11 @@ export function apply(ctx: Context, config: KnowledgeConfig): void {
       }
     })
     writebackQueue?.start()
+    if (resolved.autoOrganizeTrigger === 'interval' && writebackQueue) {
+      const timer = setInterval(flushOrganize, Math.max(1, resolved.autoOrganizeIntervalMinutes) * 60_000)
+      timer.unref()
+      runtime.effect(() => () => clearInterval(timer), 'dsh-knowledge.auto-organize-interval')
+    }
   }
 
   runtime.effect(() => async () => {

@@ -96,11 +96,17 @@ autoCreateKnowledgeBases: true         # 现有栏目都不适合时自动新建
 autoCreateKnowledgeBasesMaxPerDay: 3   # 每天自动新建知识库上限；0 只复用现有库
 autoApprovePendingEnabled: true        # 自动批准非冲突待审候选，取消人工审核
 autoApprovePendingIntervalMinutes: 2   # 自动批准轮询间隔（分钟）
-noteOrganizeAutoApprove: true          # 笔记整理草案直接落盘
+autoOrganizeTrigger: turn              # turn 每轮对话 / interval 按分钟批量整理
+autoOrganizeIntervalMinutes: 30        # interval 模式的整理间隔
 worklogAutoUpdateEnabled: true         # 知识库更新后自动记录素材并刷新当天日报
+worklogAutoUpdateTrigger: turn         # turn 每轮 / interval 按分钟批量刷新日报
+worklogAutoUpdateIntervalMinutes: 30   # interval 模式的日报刷新间隔
+tokenSavingEnabled: true               # 限制提取输入/输出、召回条数与上下文字符，节省 token
 ```
 
 数据默认存放在非系统盘（Windows 下优先插件所在盘，如 `G:\dsh-knowledge`），可用 `DSH_KNOWLEDGE_HOME` 覆盖；首次启动会把旧 C 盘用户目录的知识库与归档复制到新目录，旧目录保留为备份。
+
+自动审核默认开启：非冲突、非凭据类的待审候选会在每轮结束和后台轮询中自动批准；提取刚完成时也会立即触发一次审核，减少等待。真实冲突与凭据类内容仍保留人工确认。`tokenSavingEnabled: true` 时提取输入默认上限 12000 字符、输出 3072 tokens，自动召回最多 2 条、上下文字符上限 3000；需要更高精度时可关闭该开关或单独调高参数。
 
 ---
 

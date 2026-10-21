@@ -59,8 +59,11 @@ export function prepareWorklog(store, project, now = Date.now()) {
  * several documents) must not trigger one model call per write. Manual report
  * edits keep precedence: an edited report is never replaced automatically.
  */
-export function createRefreshScheduler(store, current, logger, delayMs = 8000) {
+export function createRefreshScheduler(store, current, logger, delayMs = 8000, options = {}) {
+  const trigger = options?.trigger === 'interval' ? 'interval' : 'turn'
+  const intervalMs = Math.max(60_000, Math.min(1440, Math.trunc(options?.intervalMinutes ?? 30)) * 60_000)
   let timer
+  let scheduledDay
   const pending = (day) => {
     const detail = store.detail(day)
     return detail.records.some(record => !record.excluded && !detail.report.covered.includes(record.id))
@@ -87,8 +90,20 @@ export function createRefreshScheduler(store, current, logger, delayMs = 8000) {
   }
   const schedule = (day) => {
     if (!day || current().backend !== 'local') return
+    scheduledDay = day
+    if (trigger === 'interval') {
+      if (timer !== undefined) return
+      timer = setTimeout(() => {
+        timer = undefined
+        const target = scheduledDay
+        scheduledDay = undefined
+        generate(target, 6)
+      }, intervalMs)
+      timer.unref?.()
+      return
+    }
     clearTimeout(timer)
-    timer = setTimeout(() => generate(day, 6), delayMs)
+    timer = setTimeout(() => generate(scheduledDay, 6), delayMs)
     timer.unref?.()
   }
   const dispose = () => clearTimeout(timer)

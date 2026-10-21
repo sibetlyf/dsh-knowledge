@@ -72,10 +72,15 @@ export interface Config {
   autoWritableMountWriteMode: 'direct' | 'audit'
   autoCreateKnowledgeBases: boolean
   autoCreateKnowledgeBasesMaxPerDay: number
+  autoOrganizeTrigger: 'turn' | 'interval'
+  autoOrganizeIntervalMinutes: number
   autoApprovePendingEnabled: boolean
   autoApprovePendingIntervalMinutes: number
   noteOrganizeAutoApprove: boolean
   worklogAutoUpdateEnabled: boolean
+  worklogAutoUpdateTrigger: 'turn' | 'interval'
+  worklogAutoUpdateIntervalMinutes: number
+  tokenSavingEnabled: boolean
 }
 
 export const Config: Schema<Config> = Schema.object({
@@ -123,10 +128,15 @@ export const Config: Schema<Config> = Schema.object({
   autoWritableMountWriteMode: Schema.union(['direct', 'audit']).default('direct').description('自动挂载默认知识库时使用的写入模式：direct 直接写入，audit 进入待审核'),
   autoCreateKnowledgeBases: Schema.boolean().default(true).description('提取时若现有知识库都不适合，允许模型自动新建一个知识栏目（知识库）并直接写入'),
   autoCreateKnowledgeBasesMaxPerDay: Schema.number().min(0).max(20).default(3).description('每天最多自动新建多少个知识库（0 表示只复用现有知识库），避免知识库爆炸'),
+  autoOrganizeTrigger: Schema.union(['turn', 'interval']).default('turn').description('自动组织知识：turn 每轮对话后触发；interval 按下面的分钟间隔批量触发'),
+  autoOrganizeIntervalMinutes: Schema.number().min(1).max(1440).default(30).description('自动组织知识的间隔分钟数（仅 interval 模式）'),
   autoApprovePendingEnabled: Schema.boolean().default(true).description('自动批准待审核的非冲突候选，取消人工审核；包含凭据等敏感内容的候选仍保留人工处理'),
   autoApprovePendingIntervalMinutes: Schema.number().min(1).max(60).default(2).description('自动批准待审核候选的轮询间隔（分钟）'),
   noteOrganizeAutoApprove: Schema.boolean().default(true).description('笔记自动整理生成的草案直接落盘，不再等待人工批准'),
   worklogAutoUpdateEnabled: Schema.boolean().default(true).description('知识库更新后自动记录工作素材并在后台实时刷新当日工作日报；首次使用会自动为当前项目开启日报采集与每日生成'),
+  worklogAutoUpdateTrigger: Schema.union(['turn', 'interval']).default('turn').description('自动工作纪要触发方式：turn 每轮对话/知识更新后；interval 按分钟间隔批量刷新'),
+  worklogAutoUpdateIntervalMinutes: Schema.number().min(1).max(1440).default(30).description('自动工作纪要的间隔分钟数（仅 interval 模式）'),
+  tokenSavingEnabled: Schema.boolean().default(true).description('节省知识库 token：限制提取输入/输出、降低自动召回条数与上下文字符上限'),
 })
 
 export interface ResolvedConfig extends Config {
@@ -161,15 +171,21 @@ export interface ResolvedConfig extends Config {
   autoWritableMountWriteMode: 'direct' | 'audit'
   autoCreateKnowledgeBases: boolean
   autoCreateKnowledgeBasesMaxPerDay: number
+  autoOrganizeTrigger: 'turn' | 'interval'
+  autoOrganizeIntervalMinutes: number
   autoApprovePendingEnabled: boolean
   autoApprovePendingIntervalMinutes: number
   noteOrganizeAutoApprove: boolean
   worklogAutoUpdateEnabled: boolean
+  worklogAutoUpdateTrigger: 'turn' | 'interval'
+  worklogAutoUpdateIntervalMinutes: number
+  tokenSavingEnabled: boolean
 }
 
 export function resolveConfig(config: Config): ResolvedConfig {
   const databasePath = config.databasePath ?? (config.backend === 'local' ? join(defaultKnowledgeDirectory(), 'knowledge.sqlite') : undefined)
   const connectionPath = config.connectionPath ?? deriveConnectionPath(databasePath) ?? join(defaultKnowledgeDirectory(), 'connection.json')
+  const tokenSaving = config.tokenSavingEnabled ?? true
   const resolved: ResolvedConfig = {
     ...config,
     ...databasePath === undefined ? {} : { databasePath },
@@ -180,13 +196,13 @@ export function resolveConfig(config: Config): ResolvedConfig {
     apiPrefix: normalizePrefix(config.apiPrefix ?? '/knowledge-api/v1'),
     exposeWeb: config.exposeWeb ?? true,
     webPath: normalizePrefix(config.webPath ?? '/knowledge'),
-    extractionMaxTokens: config.extractionMaxTokens ?? 4096,
+    extractionMaxTokens: Math.min(config.extractionMaxTokens ?? 4096, tokenSaving ? 3072 : Infinity),
     extractionTimeoutMs: config.extractionTimeoutMs ?? 90_000,
-    extractionMaxInputChars: config.extractionMaxInputChars ?? 30_000,
+    extractionMaxInputChars: Math.min(config.extractionMaxInputChars ?? 30_000, tokenSaving ? 12_000 : Infinity),
     defaultScope: config.defaultScope ?? 'project',
-    autoRecallLimit: config.autoRecallLimit ?? 3,
+    autoRecallLimit: Math.min(config.autoRecallLimit ?? 3, tokenSaving ? 2 : 10),
     autoRecallMinScore: config.autoRecallMinScore ?? 0.2,
-    recallMaxChars: config.recallMaxChars ?? 5000,
+    recallMaxChars: Math.min(config.recallMaxChars ?? 5000, tokenSaving ? 3000 : 20_000),
     trustedShareOrigins: normalizeTrustedShareOrigins(config.trustedShareOrigins ?? []),
     noteOrganizeEnabled: config.noteOrganizeEnabled ?? false,
     noteOrganizeTargetFolder: config.noteOrganizeTargetFolder ?? '整理归档',
@@ -208,10 +224,15 @@ export function resolveConfig(config: Config): ResolvedConfig {
     autoWritableMountWriteMode: config.autoWritableMountWriteMode ?? 'direct',
     autoCreateKnowledgeBases: config.autoCreateKnowledgeBases ?? true,
     autoCreateKnowledgeBasesMaxPerDay: config.autoCreateKnowledgeBasesMaxPerDay ?? 3,
+    autoOrganizeTrigger: config.autoOrganizeTrigger ?? 'turn',
+    autoOrganizeIntervalMinutes: config.autoOrganizeIntervalMinutes ?? 30,
     autoApprovePendingEnabled: config.autoApprovePendingEnabled ?? true,
     autoApprovePendingIntervalMinutes: config.autoApprovePendingIntervalMinutes ?? 2,
     noteOrganizeAutoApprove: config.noteOrganizeAutoApprove ?? true,
     worklogAutoUpdateEnabled: config.worklogAutoUpdateEnabled ?? true,
+    worklogAutoUpdateTrigger: config.worklogAutoUpdateTrigger ?? 'turn',
+    worklogAutoUpdateIntervalMinutes: config.worklogAutoUpdateIntervalMinutes ?? 30,
+    tokenSavingEnabled: tokenSaving,
   }
   if (resolved.backend === 'local' && (resolved.databasePath === undefined || resolved.databasePath.trim().length === 0)) {
     throw new Error('local knowledge backend requires databasePath')

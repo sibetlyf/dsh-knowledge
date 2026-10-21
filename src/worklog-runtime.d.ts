@@ -10,4 +10,9 @@ export interface JournalRuntime {
   /** Record one automatic knowledge write and refresh the day's report in the background. */
   recordKnowledge(event: KnowledgeWriteEvent): boolean
 }
-export function apply(ctx: Context, config: { databasePath: string; current(): KnowledgeConnectionSettings; onDispose(): void }): JournalRuntime
+export function apply(ctx: Context, config: {
+  databasePath: string
+  current(): KnowledgeConnectionSettings
+  onDispose(): void
+  autoUpdate?: { trigger: 'turn' | 'interval'; intervalMinutes: number }
+}): JournalRuntime

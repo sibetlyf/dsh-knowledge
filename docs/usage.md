@@ -86,7 +86,10 @@
 - 首次归档时自动创建 `artifactArchiveBaseName`（默认 `制品归档`）知识库，并以“仅召回、不参与对话回写”（`writeMode: none`）的方式挂载到当前项目，后续搜索与自动召回直接命中制品内容。已有挂载设置不会被覆盖；知识库被人工归档后停止自动归档。
 - 每轮第一个模型步骤检查项目挂载：没有任何可写挂载时，自动把「默认知识库」以 `autoWritableMountWriteMode`（默认 `direct`）挂载到项目；已有可写挂载、被显式关闭或设为仅召回的默认挂载都保持原样。可用 `autoWritableMountEnabled: false` 关闭该行为。
 - 对话知识提取优先复用已有文档分组；现有知识栏目都不适合时，`autoCreateKnowledgeBases` 允许模型自动新建一个知识栏目（知识库）并直接挂载写入；每日自动新建知识库数量由 `autoCreateKnowledgeBasesMaxPerDay`（默认 3，0 表示只复用）限制，同名栏目复用。
-- `autoApprovePendingEnabled` 开启时，后台自动批准非冲突的待审核候选（默认 2 分钟一次，且每轮结束触发），`noteOrganizeAutoApprove` 让笔记整理草案直接落盘；真实冲突与凭据类内容仍保留人工确认。
+- `autoApprovePendingEnabled` 开启时，后台自动批准非冲突的待审核候选（默认 2 分钟一次，且每轮结束触发），提取完成时也会立即补跑一次；`noteOrganizeAutoApprove` 让笔记整理草案直接落盘；真实冲突与凭据类内容仍保留人工确认。
+- 自动整理触发方式：`autoOrganizeTrigger: turn` 每轮对话后整理；`interval` 按 `autoOrganizeIntervalMinutes`（默认 30 分钟）批量整理，归档仍按轮执行，只有知识提取会合并到间隔窗口。
+- 自动工作纪要触发方式：`worklogAutoUpdateTrigger: turn` 每轮/每次知识更新后刷新；`interval` 按 `worklogAutoUpdateIntervalMinutes`（默认 30 分钟）批量刷新。日报的每日定时生成仍由工作日报自身的 `scheduleEnabled` / `scheduleTime` 控制。
+- `tokenSavingEnabled` 默认开启：提取输入上限 12000 字符、输出 3072 tokens，自动召回最多 2 条、上下文字符上限 3000；关闭后使用配置中的原始值，适合需要更高精度的场景。
 - 默认排除 `node_modules`、`.git`、`.dsh`、`.env`、证书私钥、SQLite 数据库等路径；单文件超过 `artifactArchiveMaxFileBytes` 或正文超过 `artifactArchiveMaxChars` 时跳过或截断。
 - 只读接口 `GET /knowledge-control/v1/artifacts`（最近 500 条记录）和 `GET /knowledge-control/v1/artifacts/<id>`（下载副本），与其他管理接口一样要求同源管理台请求头。
 - **选择文件夹导入**：在「制品文件」点击「导入文件夹」，可逐级浏览本机目录或直接输入路径；确认后递归扫描（默认最多 800 个文件），跳过依赖/版本库/构建目录与符号链接，进入后台归档队列，继续自动分类、论文识别、双向链接与索引。接口为 `GET /knowledge-control/v1/folders` 与 `POST /knowledge-control/v1/artifacts/import`。
