@@ -12,6 +12,7 @@ import { lastAssistantRoute } from './artifacts/collect.js'
 import { createUploadReader } from './artifacts/uploads.js'
 import { createKnowledgeWatcher } from './knowledge-watcher.js'
 import { createKnowledgeIntegration, createKnowledgeWriteBus, KNOWLEDGE_INTEGRATION_SERVICE } from './integration.js'
+import { optimizeKnowledgeDocument } from './optimize.js'
 import { migrateLegacyKnowledgeStore } from './migrate-knowledge-store.js'
 import { createWritableMountGuard } from './auto-writable.js'
 import { createPendingAutoApprover } from './auto-approve.js'
@@ -124,6 +125,21 @@ export function apply(ctx: Context, config: KnowledgeConfig): void {
     runtime.logger.warn(`dsh-knowledge: ignored invalid service settings: ${error instanceof Error ? error.message : String(error)}`)
   }
   if (resolved.backend === 'remote') { publicApiEnabled = false; clientSettings = { ...clientSettings, publicApiEnabled: false } }
+  const applyAutomationSettings = (): void => {
+    if (clientSettings.autoApprovePendingEnabled !== undefined) resolved.autoApprovePendingEnabled = clientSettings.autoApprovePendingEnabled
+    if (clientSettings.autoOrganizeTrigger !== undefined) resolved.autoOrganizeTrigger = clientSettings.autoOrganizeTrigger
+    if (clientSettings.autoOrganizeIntervalMinutes !== undefined) resolved.autoOrganizeIntervalMinutes = clientSettings.autoOrganizeIntervalMinutes
+    if (clientSettings.worklogAutoUpdateTrigger !== undefined) resolved.worklogAutoUpdateTrigger = clientSettings.worklogAutoUpdateTrigger
+    if (clientSettings.worklogAutoUpdateIntervalMinutes !== undefined) resolved.worklogAutoUpdateIntervalMinutes = clientSettings.worklogAutoUpdateIntervalMinutes
+    const saving = clientSettings.tokenSavingEnabled ?? config.tokenSavingEnabled ?? true
+    resolved.tokenSavingEnabled = saving
+    const ceiling = (value: number | undefined, fallback: number, cap: number): number => Math.min(value ?? fallback, saving ? cap : Number.POSITIVE_INFINITY)
+    resolved.extractionMaxTokens = ceiling(config.extractionMaxTokens, 4096, 3072)
+    resolved.extractionMaxInputChars = ceiling(config.extractionMaxInputChars, 30_000, 12_000)
+    resolved.autoRecallLimit = Math.min(config.autoRecallLimit ?? 3, saving ? 2 : 10)
+    resolved.recallMaxChars = Math.min(config.recallMaxChars ?? 5000, saving ? 3000 : 20_000)
+  }
+  applyAutomationSettings()
   const baseConnection = connectionSettingsBase(resolved)
   let initialConnection = baseConnection
   try {
@@ -162,8 +178,8 @@ export function apply(ctx: Context, config: KnowledgeConfig): void {
       databasePath,
       current: () => ({ ...activeConnection, paused: connectionChanging }),
       autoUpdate: {
-        trigger: resolved.worklogAutoUpdateTrigger,
-        intervalMinutes: resolved.worklogAutoUpdateIntervalMinutes,
+        get trigger() { return resolved.worklogAutoUpdateTrigger },
+        get intervalMinutes() { return resolved.worklogAutoUpdateIntervalMinutes },
       },
       onDispose: () => { journalRuntime = undefined },
     })
@@ -233,6 +249,18 @@ export function apply(ctx: Context, config: KnowledgeConfig): void {
   }
   const handleCodec = new KnowledgeHandleCodec(randomBytes(32))
   const noteHandleCodec = new KnowledgeNoteHandleCodec(randomBytes(32))
+  const optimizeDocument = async (documentId: string, signal: AbortSignal): Promise<{ id: string; version: number; title: string; body: string }> => {
+    const entry = await provider.get(documentId)
+    if (entry === undefined || entry.status !== 'active') throw connectionError(404, '知识文档不存在或已归档')
+    const route = clientSettings.writebackProvider && clientSettings.writebackModel
+      ? { provider: clientSettings.writebackProvider, model: clientSettings.writebackModel }
+      : resolved.extractionProvider && resolved.extractionModel
+        ? { provider: resolved.extractionProvider, model: resolved.extractionModel }
+        : undefined
+    if (route === undefined) throw connectionError(409, '请先在设置中选择回写模型，再优化文档')
+    const updated = await optimizeKnowledgeDocument(provider, runtime.llm, entry, route, signal)
+    return { id: updated.id, version: updated.version, title: updated.title, body: updated.body }
+  }
   const managementEmbedToken = randomBytes(32).toString('base64url')
   const artifactArchiver = resolved.artifactArchiveEnabled ? new ArtifactArchiver({
     root: resolved.artifactArchivePath ?? join(
@@ -261,11 +289,12 @@ export function apply(ctx: Context, config: KnowledgeConfig): void {
     },
     logger: runtime.logger,
   }) : undefined
-  const pendingAutoApprover = resolved.autoApprovePendingEnabled ? createPendingAutoApprover({
+  const pendingAutoApprover = createPendingAutoApprover({
     provider,
     logger: runtime.logger,
     intervalMinutes: resolved.autoApprovePendingIntervalMinutes,
-  }) : undefined
+    enabled: () => resolved.autoApprovePendingEnabled,
+  })
   if (pendingAutoApprover) {
     pendingAutoApprover.start()
     runtime.on('agent/turn-stopping', () => { void pendingAutoApprover.run() })
@@ -406,6 +435,12 @@ export function apply(ctx: Context, config: KnowledgeConfig): void {
       ...clientSettings.writebackProvider && clientSettings.writebackModel
         ? { writebackProvider: clientSettings.writebackProvider, writebackModel: clientSettings.writebackModel }
         : {},
+      autoApprovePendingEnabled: resolved.autoApprovePendingEnabled,
+      autoOrganizeTrigger: resolved.autoOrganizeTrigger,
+      autoOrganizeIntervalMinutes: resolved.autoOrganizeIntervalMinutes,
+      worklogAutoUpdateTrigger: resolved.worklogAutoUpdateTrigger,
+      worklogAutoUpdateIntervalMinutes: resolved.worklogAutoUpdateIntervalMinutes,
+      tokenSavingEnabled: resolved.tokenSavingEnabled,
     })
     const applyPublicApiRoute = (enabled: boolean): void => {
       disposePublicApi?.()
@@ -415,10 +450,21 @@ export function apply(ctx: Context, config: KnowledgeConfig): void {
         disposePublicApi = registerKnowledgeApi(httpRuntime, managementProvider, resolved.apiPrefix, {
           worklog: journalDispatch,
           shareRequestPolicy: () => ({ trustedPrivateOrigins: trustedShareOrigins }),
+          optimize: optimizeDocument,
         })
       }
     }
-    const updateClientSettings = async (patch: { publicApiEnabled?: boolean; writebackProvider?: string | null; writebackModel?: string | null }): Promise<ReturnType<typeof publicApiView>> => {
+    const updateClientSettings = async (patch: {
+      publicApiEnabled?: boolean
+      writebackProvider?: string | null
+      writebackModel?: string | null
+      autoApprovePendingEnabled?: boolean
+      autoOrganizeTrigger?: 'turn' | 'interval'
+      autoOrganizeIntervalMinutes?: number
+      worklogAutoUpdateTrigger?: 'turn' | 'interval'
+      worklogAutoUpdateIntervalMinutes?: number
+      tokenSavingEnabled?: boolean
+    }): Promise<ReturnType<typeof publicApiView>> => {
       const enabled = patch.publicApiEnabled ?? publicApiEnabled
       if (enabled && activeConnection.backend !== 'local') throw connectionError(409, '请先把知识库来源切换为本地，再开启远程 API。')
       if (persistedServicePath === undefined) throw connectionError(409, '当前插件没有配置持久化路径，无法保存远程 API 状态。')
@@ -434,14 +480,28 @@ export function apply(ctx: Context, config: KnowledgeConfig): void {
       const next: KnowledgeServiceSettings = {
         publicApiEnabled: enabled,
         ...!clearRoute && provider && model ? { writebackProvider: provider, writebackModel: model } : {},
+        ...clientSettings.autoApprovePendingEnabled === undefined ? {} : { autoApprovePendingEnabled: clientSettings.autoApprovePendingEnabled },
+        ...clientSettings.autoOrganizeTrigger === undefined ? {} : { autoOrganizeTrigger: clientSettings.autoOrganizeTrigger },
+        ...clientSettings.autoOrganizeIntervalMinutes === undefined ? {} : { autoOrganizeIntervalMinutes: clientSettings.autoOrganizeIntervalMinutes },
+        ...clientSettings.worklogAutoUpdateTrigger === undefined ? {} : { worklogAutoUpdateTrigger: clientSettings.worklogAutoUpdateTrigger },
+        ...clientSettings.worklogAutoUpdateIntervalMinutes === undefined ? {} : { worklogAutoUpdateIntervalMinutes: clientSettings.worklogAutoUpdateIntervalMinutes },
+        ...clientSettings.tokenSavingEnabled === undefined ? {} : { tokenSavingEnabled: clientSettings.tokenSavingEnabled },
+        ...patch.autoApprovePendingEnabled === undefined ? {} : { autoApprovePendingEnabled: patch.autoApprovePendingEnabled },
+        ...patch.autoOrganizeTrigger === undefined ? {} : { autoOrganizeTrigger: patch.autoOrganizeTrigger },
+        ...patch.autoOrganizeIntervalMinutes === undefined ? {} : { autoOrganizeIntervalMinutes: patch.autoOrganizeIntervalMinutes },
+        ...patch.worklogAutoUpdateTrigger === undefined ? {} : { worklogAutoUpdateTrigger: patch.worklogAutoUpdateTrigger },
+        ...patch.worklogAutoUpdateIntervalMinutes === undefined ? {} : { worklogAutoUpdateIntervalMinutes: patch.worklogAutoUpdateIntervalMinutes },
+        ...patch.tokenSavingEnabled === undefined ? {} : { tokenSavingEnabled: patch.tokenSavingEnabled },
       }
       if (enabled !== publicApiEnabled) applyPublicApiRoute(enabled)
       publicApiEnabled = enabled
       clientSettings = next
+      applyAutomationSettings()
       try {
         await storeServiceSettings(persistedServicePath, next)
       } catch (error) {
         clientSettings = previous
+        applyAutomationSettings()
         if (publicApiEnabled !== previous.publicApiEnabled) applyPublicApiRoute(previous.publicApiEnabled)
         publicApiEnabled = previous.publicApiEnabled
         throw error
@@ -468,6 +528,7 @@ export function apply(ctx: Context, config: KnowledgeConfig): void {
           authMode: 'same-origin',
           service: { current: publicApiView, update: updateClientSettings },
           shareRequestPolicy: () => ({ trustedPrivateOrigins: trustedShareOrigins }),
+          optimize: optimizeDocument,
         })
       }
     }
@@ -874,8 +935,14 @@ export function apply(ctx: Context, config: KnowledgeConfig): void {
       }
     })
     writebackQueue?.start()
-    if (resolved.autoOrganizeTrigger === 'interval' && writebackQueue) {
-      const timer = setInterval(flushOrganize, Math.max(1, resolved.autoOrganizeIntervalMinutes) * 60_000)
+    if (writebackQueue) {
+      let lastOrganizeFlush = Date.now()
+      const timer = setInterval(() => {
+        if (resolved.autoOrganizeTrigger !== 'interval') return
+        if (Date.now() - lastOrganizeFlush < Math.max(1, resolved.autoOrganizeIntervalMinutes) * 60_000) return
+        lastOrganizeFlush = Date.now()
+        flushOrganize()
+      }, 60_000)
       timer.unref()
       runtime.effect(() => () => clearInterval(timer), 'dsh-knowledge.auto-organize-interval')
     }

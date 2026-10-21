@@ -1,4 +1,5 @@
-import { capture, settings, fail } from './domain.js'
+import { capture, settings, fail, validDay } from './domain.js'
+import { optimizeReport } from './optimizer.js'
 import { knowledgeRecord, prepareWorklog } from './knowledge.js'
 import { createCentral, pick, captureKeys, sharedKeys, sharedRevision } from './central.js'
 import { Outbox } from './outbox.js'
@@ -58,6 +59,16 @@ export class JournalService {
       localHistory: this.store.db.prepare('SELECT count(*) AS n FROM records').get().n,
       localReports: this.store.db.prepare('SELECT count(*) AS n FROM reports').get().n }
   }
+  async optimize(day) {
+    const detail = this.store.detail(day)
+    if (!detail.report.markdown.trim()) throw fail('这份日报还没有正文，请先整理日报', 409)
+    if (detail.report.edited === false && detail.report.revision === 0) throw fail('这份日报还没有正文，请先整理日报', 409)
+    const config = this.store.config()
+    if (!config.provider || !config.model) throw fail('请先在采集设置中选择日报模型', 409)
+    const markdown = await optimizeReport(this.worker.llm, detail.report.markdown, { provider: config.provider, model: config.model })
+    this.store.save(day, markdown, detail.report.revision, detail.report.covered, true)
+    return this.store.detail(day)
+  }
   async browser(method, path, data = {}, query = new URLSearchParams()) {
     if (this.current().paused) throw fail('知识库连接正在切换，请稍后重试', 409)
     const connection = { ...this.current() }, target = destination(connection)
@@ -78,6 +89,7 @@ export class JournalService {
     // Browser cannot bypass migration confirmation via central ingestion routes.
     if (['/ingest', '/archive', '/identity'].includes(path)) throw fail('日报接口不存在', 404)
     if (!target) {
+      if (method === 'POST' && path === '/optimize') return this.optimize(validDay(data.day))
       if (method === 'POST' && path === '/settings') {
         if (data.sharedRevision !== undefined && data.sharedRevision !== sharedRevision(this.store.config())) throw fail('中央配置已更新，请重新打开采集设置后重试', 409)
         return this.store.configure(data)

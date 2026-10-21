@@ -90,6 +90,8 @@
 - 自动整理触发方式：`autoOrganizeTrigger: turn` 每轮对话后整理；`interval` 按 `autoOrganizeIntervalMinutes`（默认 30 分钟）批量整理，归档仍按轮执行，只有知识提取会合并到间隔窗口。
 - 自动工作纪要触发方式：`worklogAutoUpdateTrigger: turn` 每轮/每次知识更新后刷新；`interval` 按 `worklogAutoUpdateIntervalMinutes`（默认 30 分钟）批量刷新。日报的每日定时生成仍由工作日报自身的 `scheduleEnabled` / `scheduleTime` 控制。
 - `tokenSavingEnabled` 默认开启：提取输入上限 12000 字符、输出 3072 tokens，自动召回最多 2 条、上下文字符上限 3000；关闭后使用配置中的原始值，适合需要更高精度的场景。
+- 管理台「自动化」页可以图形化设置上述自动审核、两种触发模式、间隔和 token 节省；保存后立即更新运行参数。
+- 知识文档工具栏的「优化格式」和工作日报的「优化排版」调用编辑模型只改格式/表达，要求保留事实、数字、路径、链接与依据编号，并去掉重复和 AI 腔；优化结果作为新版本保存。
 - 默认排除 `node_modules`、`.git`、`.dsh`、`.env`、证书私钥、SQLite 数据库等路径；单文件超过 `artifactArchiveMaxFileBytes` 或正文超过 `artifactArchiveMaxChars` 时跳过或截断。
 - 只读接口 `GET /knowledge-control/v1/artifacts`（最近 500 条记录）和 `GET /knowledge-control/v1/artifacts/<id>`（下载副本），与其他管理接口一样要求同源管理台请求头。
 - **选择文件夹导入**：在「制品文件」点击「导入文件夹」，可逐级浏览本机目录或直接输入路径；确认后递归扫描（默认最多 800 个文件），跳过依赖/版本库/构建目录与符号链接，进入后台归档队列，继续自动分类、论文识别、双向链接与索引。接口为 `GET /knowledge-control/v1/folders` 与 `POST /knowledge-control/v1/artifacts/import`。

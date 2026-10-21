@@ -85,6 +85,7 @@ export function Workspace({ close, openSession, embedded = false, currentProject
         {!state.config.enabled && <div className="wl-notice">采集尚未开启。可先补记，或在采集设置中选择工作目录后启用。</div>}
         <div className="wl-heading"><div><span className="wl-eyebrow">工作日报</span><h2>{day}</h2><p className="wl-muted">{detail.report.updated ? `整理于 ${time(detail.report.updated)}` : '尚未整理日报'}{detail.pending > 0 && ` · ${detail.pending} 条待整理`}</p></div>
           <div className="wl-actions"><button className="wl-primary" disabled={busy || active || !detail.included} onClick={generate}>{active ? '整理中…' : detail.report.markdown ? '更新日报' : '整理日报'}</button>
+            <button disabled={busy || !detail.report.markdown} onClick={() => act('/optimize', { day })}>优化排版</button>
             <button onClick={() => { setDraft(''); setModal('note') }}>补记一条</button>
             <ActionMenu label="更多日报操作"><button disabled={!detail.report.markdown} onClick={edit}>编辑日报</button><button disabled={!detail.report.markdown} onClick={copyReport}>复制 Markdown</button><button disabled={!detail.report.markdown} onClick={exportReport}>导出 Markdown</button><button disabled={!detail.historyCount} onClick={() => setModal('history')}>历史版本</button></ActionMenu>
           </div>

@@ -7,6 +7,8 @@ export interface PendingAutoApproverOptions {
   intervalMinutes: number
   /** Candidates reviewed per batch (1-50, default 20). */
   batchLimit?: number
+  /** Live enable switch; when false a scheduled pass becomes a no-op. */
+  enabled?: () => boolean
 }
 
 export interface PendingAutoApprover {
@@ -35,7 +37,7 @@ export function createPendingAutoApprover(options: PendingAutoApproverOptions): 
   let running = false
   let stopped = false
   const run = async (): Promise<void> => {
-    if (running || stopped) return
+    if (running || stopped || options.enabled?.() === false) return
     running = true
     try {
       let approved = 0

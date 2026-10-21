@@ -22,10 +22,32 @@ export const LOCAL_MANAGEMENT_API_PREFIX = '/knowledge-local/v1'
 export interface KnowledgeApiOptions {
   worklog?: (method: string, path: string, data: Record<string, unknown>, query: URLSearchParams) => Promise<unknown>
   shareRequestPolicy?: () => NoteShareRequestPolicy
+  optimize?: (documentId: string, signal: AbortSignal) => Promise<unknown>
   authMode?: 'bearer' | 'same-origin'
   service?: {
-    current(): { publicApiEnabled: boolean; publicApiPrefix: string; writebackProvider?: string; writebackModel?: string }
-    update(patch: { publicApiEnabled?: boolean; writebackProvider?: string | null; writebackModel?: string | null }): Promise<{ publicApiEnabled: boolean; publicApiPrefix: string; writebackProvider?: string; writebackModel?: string }>
+    current(): {
+      publicApiEnabled: boolean
+      publicApiPrefix: string
+      writebackProvider?: string
+      writebackModel?: string
+      autoApprovePendingEnabled?: boolean
+      autoOrganizeTrigger?: 'turn' | 'interval'
+      autoOrganizeIntervalMinutes?: number
+      worklogAutoUpdateTrigger?: 'turn' | 'interval'
+      worklogAutoUpdateIntervalMinutes?: number
+      tokenSavingEnabled?: boolean
+    }
+    update(patch: {
+      publicApiEnabled?: boolean
+      writebackProvider?: string | null
+      writebackModel?: string | null
+      autoApprovePendingEnabled?: boolean
+      autoOrganizeTrigger?: 'turn' | 'interval'
+      autoOrganizeIntervalMinutes?: number
+      worklogAutoUpdateTrigger?: 'turn' | 'interval'
+      worklogAutoUpdateIntervalMinutes?: number
+      tokenSavingEnabled?: boolean
+    }): Promise<unknown>
   }
 }
 
@@ -277,6 +299,21 @@ async function dispatch(
     }
   }
 
+  if (method === 'POST' && segments[0] === 'optimize' && segments.length === 1 && options.optimize !== undefined) {
+    requirePermission(actor.permissions, 'write')
+    const body = await readObject(req)
+    const documentId = typeof body.documentId === 'string' ? body.documentId.trim() : ''
+    if (documentId.length === 0) throw httpError(400, 'documentId is required')
+    const controller = new AbortController()
+    const abort = (): void => controller.abort(new Error('client aborted'))
+    req.on('close', abort)
+    try {
+      return sendJson(res, 200, await options.optimize(documentId, controller.signal))
+    } finally {
+      req.off('close', abort)
+    }
+  }
+
   if (segments[0] === 'settings' && segments.length === 1) {
     requirePermission(actor.permissions, 'read')
     if (method === 'GET') return sendJson(res, 200, await provider.getSettings())
@@ -302,10 +339,32 @@ async function dispatch(
       const writebackModel = body.writebackModel
       if (writebackProvider !== undefined && writebackProvider !== null && typeof writebackProvider !== 'string') throw httpError(400, 'writebackProvider must be a string or null')
       if (writebackModel !== undefined && writebackModel !== null && typeof writebackModel !== 'string') throw httpError(400, 'writebackModel must be a string or null')
+      const autoApprovePendingEnabled = body.autoApprovePendingEnabled
+      if (autoApprovePendingEnabled !== undefined && typeof autoApprovePendingEnabled !== 'boolean') throw httpError(400, 'autoApprovePendingEnabled must be a boolean')
+      const autoOrganizeTrigger = body.autoOrganizeTrigger
+      if (autoOrganizeTrigger !== undefined && autoOrganizeTrigger !== 'turn' && autoOrganizeTrigger !== 'interval') throw httpError(400, 'autoOrganizeTrigger must be turn or interval')
+      const worklogAutoUpdateTrigger = body.worklogAutoUpdateTrigger
+      if (worklogAutoUpdateTrigger !== undefined && worklogAutoUpdateTrigger !== 'turn' && worklogAutoUpdateTrigger !== 'interval') throw httpError(400, 'worklogAutoUpdateTrigger must be turn or interval')
+      const tokenSavingEnabled = body.tokenSavingEnabled
+      if (tokenSavingEnabled !== undefined && typeof tokenSavingEnabled !== 'boolean') throw httpError(400, 'tokenSavingEnabled must be a boolean')
+      const minutes = (key: 'autoOrganizeIntervalMinutes' | 'worklogAutoUpdateIntervalMinutes'): number | undefined => {
+        const value = body[key]
+        if (value === undefined) return undefined
+        if (typeof value !== 'number' || !Number.isFinite(value) || value < 1 || value > 1440) throw httpError(400, `${key} must be between 1 and 1440`)
+        return Math.trunc(value)
+      }
+      const autoOrganizeIntervalMinutes = minutes('autoOrganizeIntervalMinutes')
+      const worklogAutoUpdateIntervalMinutes = minutes('worklogAutoUpdateIntervalMinutes')
       return sendJson(res, 200, await options.service.update({
         ...body.publicApiEnabled === undefined ? {} : { publicApiEnabled: body.publicApiEnabled },
         ...writebackProvider === undefined ? {} : { writebackProvider },
         ...writebackModel === undefined ? {} : { writebackModel },
+        ...autoApprovePendingEnabled === undefined ? {} : { autoApprovePendingEnabled },
+        ...autoOrganizeTrigger === undefined ? {} : { autoOrganizeTrigger },
+        ...autoOrganizeIntervalMinutes === undefined ? {} : { autoOrganizeIntervalMinutes },
+        ...worklogAutoUpdateTrigger === undefined ? {} : { worklogAutoUpdateTrigger },
+        ...worklogAutoUpdateIntervalMinutes === undefined ? {} : { worklogAutoUpdateIntervalMinutes },
+        ...tokenSavingEnabled === undefined ? {} : { tokenSavingEnabled },
       }))
     }
   }

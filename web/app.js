@@ -1270,6 +1270,7 @@ function renderShell() {
   const titles = {
     overview: ['概览', '知识库运行状态与最近活动'],
     bases: ['知识库与挂载', '管理知识目录，并限定项目与会话的召回和写入范围'],
+    automation: ['自动化', '设置自动审核、整理触发频率与知识库 token 节省'],
     entries: ['知识文档', '在知识目录中阅读、整理和维护 Markdown 文档'],
     graph: ['思维链接', '以动态关系图查看知识文档之间的双向链接'],
     files: ['制品文件', '浏览、预览、下载自动归档的制品文件，并可打开对应知识文档编辑或移动'],
@@ -1329,6 +1330,21 @@ function renderShell() {
  * Archived documents often repeat their title as the first Markdown heading.
  * Keep the content for editing, but do not render the same title twice.
  */
+async function optimizeDocumentEditor(workspace, editor) {
+  if (editor.dirty) {
+    const saved = await saveDocumentEditor(workspace, { silent: true })
+    if (!saved) return
+  }
+  try {
+    await api('optimize', { method: 'POST', body: { documentId: editor.id } })
+    await loadDocumentEditor(workspace, editor.id)
+    renderShell()
+    showToast('已优化格式，事实与链接保持不变。', 'success')
+  } catch (error) {
+    showToast(friendlyError(error), 'error')
+  }
+}
+
 function suppressDuplicateDocumentHeading(root) {
   const article = root.querySelector('.note-paper')
   if (!article) return
@@ -1511,7 +1527,7 @@ function renderSidebar() {
   const tokenItems = [['tokens', '访问管理']].filter(([id]) => id !== 'tokens' || !state.service.remote)
   const navGroups = [
     ['', [['entries', '知识文档'], ['notes', '笔记'], ['shares', '已分享'], ['files', '制品文件'], ['graph', '思维链接']]],
-    ['整理', [['candidates', '待审核'], ['writeback', '回写任务'], ['bases', '知识库与挂载'], ['worklog', '工作日报']]],
+    ['整理', [['automation', '自动化'], ['candidates', '待审核'], ['writeback', '回写任务'], ['bases', '知识库与挂载'], ['worklog', '工作日报']]],
     ...(tokenItems.length > 0 ? [['', tokenItems]] : []),
   ]
   return element('aside', { class: 'sidebar', 'aria-label': '知识库导航' },
@@ -1551,6 +1567,7 @@ function renderCurrentView() {
   }
   if (state.view === 'overview') return renderOverview()
   if (state.view === 'bases') return renderKnowledgeBases()
+  if (state.view === 'automation') return renderAutomation()
   if (state.view === 'entries') return renderEntries()
   if (state.view === 'graph') return renderLinkGraph()
   if (state.view === 'files') return renderArtifacts()
@@ -1586,6 +1603,66 @@ function loadingView(view = state.view, phase = '正在加载', progress = 0) {
 
 function errorView(message, retry) {
   return element('div', { class: 'error-state', role: 'alert' }, element('p', {}, message), actionButton('重试', retry, 'small'))
+}
+
+function renderAutomation() {
+  const service = state.service || {}
+  const autoApprove = element('input', { type: 'checkbox', checked: service.autoApprovePendingEnabled !== false })
+  const tokenSaving = element('input', { type: 'checkbox', checked: service.tokenSavingEnabled !== false })
+  const organizeTrigger = element('select', { class: 'select', 'aria-label': '自动整理触发方式' },
+    element('option', { value: 'turn', selected: (service.autoOrganizeTrigger || 'turn') === 'turn' }, '按对话（每轮）'),
+    element('option', { value: 'interval', selected: service.autoOrganizeTrigger === 'interval' }, '按预设频率'))
+  const organizeMinutes = element('input', { class: 'input', type: 'number', min: '1', max: '1440', value: service.autoOrganizeIntervalMinutes || 30 })
+  const worklogTrigger = element('select', { class: 'select', 'aria-label': '自动工作纪要触发方式' },
+    element('option', { value: 'turn', selected: (service.worklogAutoUpdateTrigger || 'turn') === 'turn' }, '按对话（每轮）'),
+    element('option', { value: 'interval', selected: service.worklogAutoUpdateTrigger === 'interval' }, '按预设频率'))
+  const worklogMinutes = element('input', { class: 'input', type: 'number', min: '1', max: '1440', value: service.worklogAutoUpdateIntervalMinutes || 30 })
+  const save = actionButton('保存自动化设置', async () => {
+    save.disabled = true
+    try {
+      const updated = await api('service', {
+        method: 'PUT',
+        body: {
+          autoApprovePendingEnabled: autoApprove.checked,
+          autoOrganizeTrigger: organizeTrigger.value,
+          autoOrganizeIntervalMinutes: Number(organizeMinutes.value) || 30,
+          worklogAutoUpdateTrigger: worklogTrigger.value,
+          worklogAutoUpdateIntervalMinutes: Number(worklogMinutes.value) || 30,
+          tokenSavingEnabled: tokenSaving.checked,
+        },
+      })
+      state.service = { ...state.service, ...updated }
+      showToast('自动化设置已保存。', 'success')
+      renderShell()
+    } catch (error) {
+      showToast(friendlyError(error), 'error')
+    } finally {
+      save.disabled = false
+    }
+  }, 'primary')
+  return element('section', { class: 'automation-page', 'aria-labelledby': 'automation-heading' },
+    element('div', { class: 'automation-grid' },
+      element('section', { class: 'panel' }, element('div', { class: 'panel-body automation-card' },
+        element('h3', { id: 'automation-heading' }, '自动审核'),
+        element('p', { class: 'field-hint' }, '非冲突、非凭据类的待审核候选会自动通过，减少手动确认。'),
+        element('label', { class: 'automation-switch' }, autoApprove, element('span', {}, '自动批准安全候选')))),
+      element('section', { class: 'panel' }, element('div', { class: 'panel-body automation-card' },
+        element('h3', {}, '自动整理'),
+        element('p', { class: 'field-hint' }, '按对话即时整理，或按固定间隔批量整理知识提取。'),
+        element('label', { class: 'automation-field' }, element('span', {}, '触发方式'), organizeTrigger),
+        element('label', { class: 'automation-field' }, element('span', {}, '间隔（分钟）'), organizeMinutes))),
+      element('section', { class: 'panel' }, element('div', { class: 'panel-body automation-card' },
+        element('h3', {}, '自动工作纪要'),
+        element('p', { class: 'field-hint' }, '控制知识更新后当日工作纪要的刷新时机。'),
+        element('label', { class: 'automation-field' }, element('span', {}, '触发方式'), worklogTrigger),
+        element('label', { class: 'automation-field' }, element('span', {}, '间隔（分钟）'), worklogMinutes))),
+      element('section', { class: 'panel' }, element('div', { class: 'panel-body automation-card' },
+        element('h3', {}, '知识库 token'),
+        element('p', { class: 'field-hint' }, '开启后限制提取输入/输出与自动召回量，降低知识库上下文消耗。'),
+        element('label', { class: 'automation-switch' }, tokenSaving, element('span', {}, '启用节省模式')))),
+    ),
+    element('div', { class: 'automation-actions' }, save),
+  )
 }
 
 function renderOverview() {
@@ -2196,6 +2273,7 @@ function renderNoteEditor(workspace, editor, base) {
         finalized ? badge(DOCUMENT_STATE_LABELS[editor.documentState] || '已结束', 'success') : readOnly ? badge('只读') : null,
         element('span', { class: 'editor-save-status', role: 'status' }, editor.saveState),
         finalized && !readOnly ? actionButton('重新打开', () => reopenDocument(workspace, editor), 'small') : null,
+        !readOnly && !finalized && !editor.isNew ? actionButton('优化格式', () => { void optimizeDocumentEditor(workspace, editor) }, 'ghost small') : null,
         !readOnly && !finalized ? actionButton(editor.isNew ? '创建文档' : '保存', () => { void saveDocumentEditor(workspace).then(saved => { if (saved) renderShell() }) }, 'primary small') : null,
         !readOnly && !editor.isNew ? renderDocumentMenu(editor.title || '知识文档', [
           [
