@@ -4386,7 +4386,11 @@ function openFolderImportDialog() {
         if (data.accepted === 0) { showToast('该文件夹中没有可导入的文件。', 'error'); return false }
         try { localStorage.setItem(folderKey, data.root || path) } catch { /* ignore */ }
         showToast(`已加入后台队列：${data.accepted} 个文件${data.truncated ? '（达到上限，剩余文件未导入）' : ''}`, 'success')
-        window.setTimeout(() => { if (state.view === 'files') void navigate('files') }, 2000)
+        if (typeof data.jobId === 'string') {
+          window.setTimeout(() => openFolderImportReport(data.jobId, data.accepted), 180)
+        } else {
+          window.setTimeout(() => { if (state.view === 'files') void navigate('files') }, 2000)
+        }
         return true
       } catch (error) {
         showToast(friendlyError(error), 'error')
@@ -4395,6 +4399,100 @@ function openFolderImportDialog() {
     },
   })
   void load(stored)
+}
+
+const IMPORT_ACTION_LABELS = { created: '新增', updated: '更新', unchanged: '未变', skipped: '跳过', failed: '失败' }
+
+async function fetchImportReport(jobId, signal) {
+  const response = await fetch(`/knowledge-control/v1/artifacts/imports/${encodeURIComponent(jobId)}`, {
+    credentials: 'same-origin',
+    headers: { 'x-dsh-knowledge-client': 'management-web' },
+    signal: signal ? AbortSignal.any([signal, AbortSignal.timeout(15000)]) : AbortSignal.timeout(15000),
+  })
+  const data = await response.json().catch(() => ({}))
+  if (!response.ok) throw Object.assign(new Error(data.error || `读取整理明细失败（${response.status}）`), { status: response.status })
+  return data
+}
+
+function openFolderImportReport(jobId, accepted) {
+  const root = element('div', { class: 'import-report' }, element('p', { class: 'field-hint' }, `正在整理 ${accepted} 个文件…`))
+  let timer
+  let disposed = false
+  const stop = () => { disposed = true; window.clearInterval(timer) }
+  const render = job => {
+    const counts = job.counts || {}
+    const items = Array.isArray(job.items) ? job.items : []
+    const done = job.status === 'done' || job.status === 'failed'
+    const stats = element('div', { class: 'import-report-stats' },
+      element('div', { class: 'import-report-stat' }, element('strong', {}, counts.created || 0), element('span', {}, '新增')),
+      element('div', { class: 'import-report-stat' }, element('strong', {}, counts.updated || 0), element('span', {}, '更新')),
+      element('div', { class: 'import-report-stat' }, element('strong', {}, counts.unchanged || 0), element('span', {}, '未变')),
+      element('div', { class: 'import-report-stat' }, element('strong', {}, counts.skipped || 0), element('span', {}, '跳过')),
+      element('div', { class: 'import-report-stat' }, element('strong', {}, counts.failed || 0), element('span', {}, '失败')))
+    const heading = element('div', { class: 'import-report-heading' },
+      element('h3', {}, job.status === 'failed' ? '整理中断' : done ? '整理完成' : '正在整理'),
+      element('span', {}, `${job.processed || 0} / ${job.accepted || accepted} 个文件`))
+    const parts = [stats]
+    if (job.error) parts.push(element('p', { class: 'import-report-error', role: 'alert' }, job.error))
+    if (job.truncated) parts.push(element('p', { class: 'field-hint' }, '已达到单次扫描上限，文件夹中还有文件未加入本次整理。'))
+    if (job.skippedByScan > 0) parts.push(element('p', { class: 'field-hint' }, `扫描时跳过 ${job.skippedByScan} 个目录或文件（依赖、构建目录或符号链接）。`))
+    const successful = items.filter(item => item.action === 'created' || item.action === 'updated' || item.action === 'unchanged')
+    const failed = items.filter(item => item.action === 'failed' || item.action === 'skipped')
+    const groups = new Map()
+    for (const item of successful) {
+      const key = `${item.knowledgeBaseName || '知识库'} · ${item.group || (item.action === 'unchanged' ? '既有文档' : '未分组')}`
+      if (!groups.has(key)) groups.set(key, [])
+      groups.get(key).push(item)
+    }
+    for (const [groupName, groupItems] of groups) {
+      const section = element('section', { class: 'import-report-group' },
+        element('h4', {}, groupName, element('span', {}, `${groupItems.length} 个文件`)))
+      for (const item of groupItems.slice(0, 60)) {
+        section.append(element('div', { class: 'import-report-item' },
+          element('span', { class: 'import-report-name', title: item.path || item.display }, item.display),
+          element('span', { class: 'import-report-meta' },
+            `${item.category || '文件'} · ${IMPORT_ACTION_LABELS[item.action] || item.action}${item.bytes ? ` · ${formatBytes(item.bytes)}` : ''}`),
+          item.paper ? element('small', { class: 'import-report-paper' }, `论文 · ${(item.paper.categories || []).join(' / ')} · ${item.paper.title}`) : null))
+      }
+      if (groupItems.length > 60) section.append(element('p', { class: 'field-hint' }, `还有 ${groupItems.length - 60} 个文件…`))
+      parts.push(section)
+    }
+    if (successful.length === 0 && !done) parts.push(element('p', { class: 'field-hint' }, '文件正在逐个归档…'))
+    if (failed.length > 0) {
+      const section = element('section', { class: 'import-report-group import-report-problems' },
+        element('h4', {}, '跳过或失败', element('span', {}, `${failed.length} 个`)))
+      for (const item of failed.slice(0, 60)) {
+        section.append(element('div', { class: 'import-report-item' },
+          element('span', { class: 'import-report-name', title: item.path || item.display }, item.display),
+          element('span', { class: 'import-report-meta' }, `${item.reason || '未说明原因'}`)))
+      }
+      if (failed.length > 60) section.append(element('p', { class: 'field-hint' }, `还有 ${failed.length - 60} 个…`))
+      parts.push(section)
+    }
+    if (done && successful.length === 0 && failed.length === 0) parts.push(element('p', { class: 'field-hint' }, '没有可展示的文件。'))
+    root.replaceChildren(heading, ...parts)
+    if (done) stop()
+  }
+  openSheet({
+    title: '整理报告',
+    description: '以下是你刚才选择文件夹的实际整理结果。',
+    body: root,
+    primaryLabel: '查看制品文件',
+    onPrimary: () => { void navigate('files'); return true },
+  })
+  const poll = async () => {
+    if (disposed || !root.isConnected) return stop()
+    try {
+      const job = await fetchImportReport(jobId)
+      if (disposed) return
+      render(job)
+    } catch (error) {
+      stop()
+      root.replaceChildren(element('p', { class: 'import-report-error', role: 'alert' }, friendlyError(error)))
+    }
+  }
+  timer = window.setInterval(() => { void poll() }, 800)
+  window.setTimeout(() => { void poll() }, 120)
 }
 
 

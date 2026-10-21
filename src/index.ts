@@ -6,7 +6,7 @@ import type { IncomingMessage } from 'node:http'
 import { homedir } from 'node:os'
 import { basename, dirname, join, resolve } from 'node:path'
 import { apply as registerWorklog, type JournalRuntime } from './worklog-runtime.js'
-import { ArtifactArchiver, globToRegExp } from './artifacts/archive.js'
+import { ArtifactArchiver, globToRegExp, type ArtifactIngestItem } from './artifacts/archive.js'
 import { scanFolder } from './artifacts/folder-import.js'
 import { lastAssistantRoute } from './artifacts/collect.js'
 import { createUploadReader } from './artifacts/uploads.js'
@@ -76,6 +76,21 @@ export const name = 'dsh-knowledge'
 export const inject = ['llm', 'tools']
 
 /** Mount storage, hybrid retrieval, extraction, and the optional authenticated HTTP API. */
+interface FolderImportJob {
+  id: string
+  root: string
+  status: 'running' | 'done' | 'failed'
+  accepted: number
+  processed: number
+  startedAt: string
+  finishedAt?: string
+  error?: string
+  truncated: boolean
+  skippedByScan: number
+  counts: { created: number; updated: number; unchanged: number; skipped: number; failed: number }
+  items: ArtifactIngestItem[]
+}
+
 export function apply(ctx: Context, config: KnowledgeConfig): void {
   const runtime = ctx as unknown as RuntimeContextLike
   const resolved = resolveConfig(config)
@@ -505,6 +520,7 @@ export function apply(ctx: Context, config: KnowledgeConfig): void {
     if (disposeWritebackStatus !== undefined) httpRuntime.effect(() => disposeWritebackStatus, 'dsh-knowledge.writeback-status')
     if (artifactArchiver) {
       const archive = artifactArchiver
+      const folderImportJobs = new Map<string, FolderImportJob>()
       const disposeArtifacts = httpRuntime.webServer?.register({
         kind: 'prefix',
         path: '/knowledge-control/v1/artifacts',
@@ -528,20 +544,57 @@ export function apply(ctx: Context, config: KnowledgeConfig): void {
                 excludeRoots: [archiveRoot, dirname(resolved.databasePath ?? resolved.connectionPath ?? archiveRoot)],
               })
               const candidates = scan.files.map(path => ({ path, source: 'folder' as const }))
-              if (candidates.length > 0) {
-                const context = {
-                  sessionId: `folder-${randomBytes(8).toString('hex')}`,
-                  cwd: projectId ?? scan.root,
-                  turn: 0,
-                }
-                // The archiver bounds one pass; queue several passes instead of
-                // silently dropping the tail of a large folder.
-                for (let offset = 0; offset < candidates.length; offset += 256) {
-                  archive.schedule(candidates.slice(offset, offset + 256), context)
-                }
+              if (candidates.length === 0) {
+                res.writeHead(202, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' })
+                  .end(JSON.stringify({ accepted: 0, root: scan.root, truncated: scan.truncated, skipped: scan.skipped }))
+                return
               }
+              const context = {
+                sessionId: `folder-${randomBytes(8).toString('hex')}`,
+                cwd: projectId ?? scan.root,
+                turn: 0,
+              }
+              const job: FolderImportJob = {
+                id: `folder-${randomBytes(6).toString('hex')}`,
+                root: scan.root,
+                status: 'running',
+                accepted: candidates.length,
+                processed: 0,
+                startedAt: new Date().toISOString(),
+                truncated: scan.truncated,
+                skippedByScan: scan.skipped,
+                counts: { created: 0, updated: 0, unchanged: 0, skipped: 0, failed: 0 },
+                items: [] as ArtifactIngestItem[],
+              }
+              folderImportJobs.set(job.id, job)
+              void (async () => {
+                try {
+                  for (let offset = 0; offset < candidates.length; offset += 256) {
+                    const summary = await archive.ingest(candidates.slice(offset, offset + 256), context)
+                    job.processed += summary.items.length
+                    job.counts.created += summary.captured
+                    job.counts.updated += summary.updated
+                    job.counts.unchanged += summary.unchanged
+                    job.counts.skipped += summary.skipped
+                    job.counts.failed += summary.failed
+                    job.items.push(...summary.items)
+                    if (job.items.length > 500) job.items = job.items.slice(-500)
+                  }
+                  job.status = 'done'
+                } catch (error) {
+                  job.status = 'failed'
+                  job.error = error instanceof Error ? error.message : String(error)
+                } finally {
+                  job.finishedAt = new Date().toISOString()
+                  while (folderImportJobs.size > 12) {
+                    const oldest = folderImportJobs.keys().next().value
+                    if (oldest === undefined || oldest === job.id) break
+                    folderImportJobs.delete(oldest)
+                  }
+                }
+              })()
               res.writeHead(202, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' })
-                .end(JSON.stringify({ accepted: candidates.length, root: scan.root, truncated: scan.truncated, skipped: scan.skipped }))
+                .end(JSON.stringify({ accepted: candidates.length, jobId: job.id, root: scan.root, truncated: scan.truncated, skipped: scan.skipped }))
               return
             }
             if (req.method !== 'GET') {
@@ -553,6 +606,17 @@ export function apply(ctx: Context, config: KnowledgeConfig): void {
               const artifacts = (await archive.list()).slice(0, 500)
               res.writeHead(200, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' })
                 .end(JSON.stringify({ artifacts }))
+              return
+            }
+            if (rest.startsWith('imports/')) {
+              const jobId = rest.slice('imports/'.length).replace(/\/+$/u, '')
+              const job = folderImportJobs.get(jobId)
+              if (job === undefined) {
+                res.writeHead(404, { 'content-type': 'application/json; charset=utf-8' }).end(JSON.stringify({ error: 'import job not found' }))
+                return
+              }
+              res.writeHead(200, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' })
+                .end(JSON.stringify({ ...job, items: job.items.slice(-400), itemsTruncated: job.items.length > 400 }))
               return
             }
             const id = rest.replace(/\/+$/u, '')

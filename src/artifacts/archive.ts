@@ -103,13 +103,22 @@ export interface ArtifactIngestContext {
   route?: { provider: string; model: string }
 }
 
-export type ArtifactIngestAction = 'created' | 'updated' | 'unchanged' | 'skipped'
+export type ArtifactIngestAction = 'created' | 'updated' | 'unchanged' | 'skipped' | 'failed'
 
 export interface ArtifactIngestItem {
   path: string
   display: string
   action: ArtifactIngestAction
   entryId?: string
+  /** Why a candidate was skipped or failed. */
+  reason?: string
+  bytes?: number
+  /** Display category used by the artifact browser. */
+  category?: string
+  knowledgeBaseId?: string
+  knowledgeBaseName?: string
+  group?: string
+  paper?: { title: string; categories: string[] }
 }
 
 export interface ArtifactIngestSummary {
@@ -305,10 +314,12 @@ export class ArtifactArchiver {
         if (seen.has(outcome.key)) continue
         seen.add(outcome.key)
         summary[outcome.action === 'created' ? 'captured' : outcome.action === 'updated' ? 'updated' : outcome.action === 'unchanged' ? 'unchanged' : 'skipped'] += 1
-        if (outcome.action !== 'skipped') summary.items.push(outcome.item)
+        summary.items.push(outcome.item)
       } catch (error) {
         summary.failed += 1
-        this.logger.warn(`dsh-knowledge: 制品归档失败 ${candidate.path ?? candidate.upload?.name ?? 'unknown'}: ${message(error)}`)
+        const display = candidate.path ?? candidate.upload?.name ?? 'unknown'
+        summary.items.push({ path: display, display, action: 'failed', reason: message(error) })
+        this.logger.warn(`dsh-knowledge: 制品归档失败 ${display}: ${message(error)}`)
       }
       if (this.activeBatch !== undefined) {
         this.activeBatch.done += 1
@@ -333,12 +344,12 @@ export class ArtifactArchiver {
       const upload = candidate.upload
       const display = uploadDisplay(upload.name)
       const key = `${UPLOAD_KEY}${upload.ref.attachmentId}`
-      const skipped = (): CaptureOutcome => ({ action: 'skipped', item: { path: upload.name, display, action: 'skipped' }, key })
-      if (this.options.resolveUpload === undefined) return skipped()
+      const skipped = (reason: string): CaptureOutcome => ({ action: 'skipped', item: { path: upload.name, display, action: 'skipped', reason }, key })
+      if (this.options.resolveUpload === undefined) return skipped('未提供附件读取服务')
       const resolved = await this.options.resolveUpload(upload)
-      if (resolved === undefined) return skipped()
-      if (resolved.bytes.length > this.options.maxFileBytes) return skipped()
-      if (this.patterns.some(pattern => pattern.test(display))) return skipped()
+      if (resolved === undefined) return skipped('无法读取附件')
+      if (resolved.bytes.length > this.options.maxFileBytes) return skipped('超过单文件大小上限')
+      if (this.patterns.some(pattern => pattern.test(display))) return skipped('命中排除规则')
       return this.store({
         key,
         path: upload.name,
@@ -355,19 +366,19 @@ export class ArtifactArchiver {
     const absolute = resolveCandidate(candidate.path ?? '', baseDir)
     if (absolute === undefined) {
       const display = toPosix(candidate.path ?? '')
-      return { action: 'skipped', item: { path: candidate.path ?? '', display, action: 'skipped' }, key: `\u0000invalid:${display}` }
+      return { action: 'skipped', item: { path: candidate.path ?? '', display, action: 'skipped', reason: '路径无法解析' }, key: `\u0000invalid:${display}` }
     }
     const display = this.displayPath(absolute, baseDir)
     const key = pathKey(absolute)
-    const skipped = (): CaptureOutcome => ({ action: 'skipped', item: { path: absolute, display, action: 'skipped' }, key })
-    if (this.isExcluded(absolute)) return skipped()
+    const skipped = (reason: string): CaptureOutcome => ({ action: 'skipped', item: { path: absolute, display, action: 'skipped', reason }, key })
+    if (this.isExcluded(absolute)) return skipped('命中默认排除目录')
     const extension = normalizeExtension(absolute)
     // Presented deliverables are explicit artifacts: capture any format there.
-    if (candidate.source === 'file-tool' && this.extensions !== 'all' && !this.extensions.has(extension)) return skipped()
-    if (this.patterns.some(pattern => pattern.test(display))) return skipped()
+    if (candidate.source === 'file-tool' && this.extensions !== 'all' && !this.extensions.has(extension)) return skipped('扩展名不在归档白名单')
+    if (this.patterns.some(pattern => pattern.test(display))) return skipped('命中排除规则')
     const info = await stat(absolute).catch(() => undefined)
-    if (info === undefined || !info.isFile()) return skipped()
-    if (info.size > this.options.maxFileBytes) return skipped()
+    if (info === undefined || !info.isFile()) return skipped('不是可读文件')
+    if (info.size > this.options.maxFileBytes) return skipped('超过单文件大小上限')
     const bytes = await readFile(absolute)
     return this.store({
       key,
@@ -381,15 +392,21 @@ export class ArtifactArchiver {
   }
 
   private async store(input: ArtifactInput, context: ArtifactIngestContext, projectId: string | undefined): Promise<CaptureOutcome> {
-    const item = (action: ArtifactIngestAction, entryId?: string): CaptureOutcome => ({
+    const item = (action: ArtifactIngestAction, entryId?: string, extra: Partial<ArtifactIngestItem> = {}): CaptureOutcome => ({
       action,
-      item: { path: input.path, display: input.display, action, ...entryId === undefined ? {} : { entryId } },
+      item: { path: input.path, display: input.display, action, ...entryId === undefined ? {} : { entryId }, ...extra },
       key: input.key,
     })
     const sha256 = createHash('sha256').update(input.bytes).digest('hex')
     const previous = this.records.get(input.key)
     if (previous !== undefined && previous.sha256 === sha256 && previous.size === input.bytes.length) {
-      if (await this.entryUsable(previous.entryId)) return item('unchanged', previous.entryId)
+      if (await this.entryUsable(previous.entryId)) {
+        return item('unchanged', previous.entryId, {
+          bytes: previous.size,
+          category: artifactCategory(previous.extension),
+          knowledgeBaseId: previous.knowledgeBaseId,
+        })
+      }
     }
 
     const blob = this.blobPath(sha256, input.extension)
@@ -420,7 +437,7 @@ export class ArtifactArchiver {
       if (current !== undefined && current.status === 'active' && current.documentState === 'open') {
         if (current.body === draft.body) {
           this.verifiedEntries.add(current.id)
-          return item('unchanged', current.id)
+          return item('unchanged', current.id, this.itemDetails(input, baseId, draft, paper))
         }
         entry = await this.options.provider.update(current.id, draft, undefined, current.version)
         action = 'updated'
@@ -470,7 +487,23 @@ export class ArtifactArchiver {
         ...context.route === undefined ? {} : { route: context.route },
       })
     }
-    return item(action, entry.id)
+    return item(action, entry.id, this.itemDetails(input, baseId, draft, paper))
+  }
+
+  private itemDetails(
+    input: ArtifactInput,
+    baseId: string,
+    draft: KnowledgeDraft,
+    paper: PaperMetadata | undefined,
+  ): Partial<ArtifactIngestItem> {
+    return {
+      bytes: input.bytes.length,
+      category: artifactCategory(input.extension),
+      knowledgeBaseId: baseId,
+      knowledgeBaseName: paper === undefined ? this.options.baseName : (this.options.paperBaseName ?? '论文库'),
+      ...draft.group === undefined ? {} : { group: draft.group },
+      ...paper === undefined ? {} : { paper: { title: paper.title, categories: paper.categories } },
+    }
   }
 
   private notifyArchived(event: KnowledgeWriteEvent): void {
