@@ -97,7 +97,7 @@ const state = {
   },
   entries: [],
   nextCursor: null,
-  background: { status: null, error: '', updatedAt: 0 },
+  background: { status: null, error: '', updatedAt: 0, open: false },
   graph: { baseId: '', loading: false, error: '', data: null, request: 0, renderer: null },
   entryFilters: { query: '', type: '', status: 'active', projectId: '', knowledgeBaseId: '' },
   documents: [],
@@ -616,31 +616,31 @@ async function loadDocuments(signal, onPhase = () => {}) {  onPhase('正在读�
   state.documents = state.documents.filter(document => visibleBaseIds.has(document.knowledgeBaseId))
   const workspace = sessionDocumentWorkspace()
   const view = workspace.view
-  // Resume the last opened document automatically; a plain launcher visit should
-  // still show the empty state when there is no useful history.
-  if (!view.documentId) {
-    const last = readLastDocument()
-    if (last !== undefined && visibleBaseIds.has(last.knowledgeBaseId)) {
-      view.knowledgeBaseId = last.knowledgeBaseId
-      view.documentId = last.id
-    }
-  }
-  if (!view.documentId) {
-    const predicted = await predictStartupDocument(visibleBaseIds, signal)
-    if (predicted !== undefined) {
-      view.knowledgeBaseId = predicted.knowledgeBaseId
-      view.documentId = predicted.id
-    }
-  }
   const availableBaseIds = visibleBaseIds
   if (view.knowledgeBaseId && !availableBaseIds.has(view.knowledgeBaseId)) {
     view.knowledgeBaseId = ''
     view.documentId = ''
     view.editor = null
   }
-  // Only an explicit document link/previous selection opens content. A plain
-  // launcher visit leaves every base collapsed and requests no document index.
-  if (!view.documentId) return
+  // Entering the knowledge view always starts at the directory. Previously the
+  // console auto-reopened the last document, which hid the directory and made
+  // the persistent tree feel like a modal.
+  if (!view.documentId) {
+    for (const base of documentKnowledgeBases(bases)) {
+      if (!availableBaseIds.has(base.id)) continue
+      view.expandedBases.add(base.id)
+      const stateForBase = documentPageState(workspace, base.id)
+      if (!stateForBase.loaded && !stateForBase.loading) {
+        try {
+          await loadDocumentPage(workspace, base.id, { signal })
+        } catch (error) {
+          if (error?.name === 'AbortError') throw error
+          // A broken remote library must not hide the rest of the directory.
+        }
+      }
+    }
+    return
+  }
   if (view.editor?.id === view.documentId) return
   if (view.knowledgeBaseId) {
     view.expandedBases.add(view.knowledgeBaseId)
@@ -2147,7 +2147,7 @@ function renderDocumentWorkspace(workspace, options = {}) {
         !query && page.error ? element('div', { class: 'note-tree-status is-error' },
           element('span', {}, page.error),
           actionButton('重试', () => { void loadDocumentPage(workspace, base.id, { reset: true }).then(renderShell) }, 'ghost small')) : null,
-        renderDocumentGroups({ element, documents, baseId: base.id, collapsed: view.collapsedGroups, searching: Boolean(query), onNew: readOnly ? undefined : group => { void startBlankDocument(workspace, base.id, group) }, onDrop: readOnly ? undefined : (event, group) => { void dropDocumentIntoGroup(event, workspace, base.id, group) }, renderRow: document => element('button', {
+        renderDocumentGroups({ element, documents, baseId: base.id, collapsed: view.collapsedGroups, searching: Boolean(query), onDrop: readOnly ? undefined : (event, group) => { void dropDocumentIntoGroup(event, workspace, base.id, group) }, renderRow: document => element('button', {
           type: 'button', class: 'note-tree-document', 'aria-current': document.id === view.documentId ? 'page' : undefined,
           draggable: canOrganize && movingDocumentId !== document.id ? 'true' : undefined,
           'aria-busy': movingDocumentId === document.id ? 'true' : undefined,
@@ -2170,8 +2170,6 @@ function renderDocumentWorkspace(workspace, options = {}) {
           onClick: () => { void loadMoreDocumentPage(workspace, base.id) },
         }, page.loading ? '正在加载…' : `继续加载（已显示 ${documents.length} / ${page.total}）`) : null,
         !query && page.loaded && documents.length === 0 ? element('div', { class: 'note-tree-status' }, '这个知识库还没有文档。') : null,
-        !query && !readOnly ? element('button', { type: 'button', class: 'note-tree-new', onClick: () => { void startBlankDocument(workspace, base.id) } },
-          element('span', { 'aria-hidden': 'true' }, '+'), '新建文档') : null,
       ) : null,
     )
   })
@@ -2196,7 +2194,6 @@ function renderDocumentWorkspace(workspace, options = {}) {
       element('header', { class: 'note-tree-header' },
         element('div', { class: 'note-tree-heading' }, element('h2', { id: `${workspace.kind}-documents-heading` }, options.heading || '知识目录'), element('span', {}, query ? `${view.searchTotal} 条搜索结果` : `${workspaceDocuments.length} 篇已加载`)),
         element('div', { class: 'note-tree-actions' },
-          !readOnly ? actionButton('+', () => { void startBlankDocument(workspace, view.knowledgeBaseId || activeBases[0]?.id) }, 'ghost note-add-button', { 'aria-label': '新建文档', title: '新建文档' }) : null,
           actionButton(interfaceIcon('close'), () => { view.treeOpen = false; renderShell() }, 'ghost note-tree-close', { 'aria-label': '关闭知识目录', title: '关闭知识目录' })),
       ),
       element('div', {}, element('div', { class: 'note-tree-search-wrap' }, interfaceIcon('search', 'search-symbol'), search),
@@ -2212,19 +2209,79 @@ function renderDocumentWorkspace(workspace, options = {}) {
   )
 }
 
+function renderDocumentDirectory(workspace, base, readOnly) {
+  const view = workspace.view
+  const managing = documentWorkspaceBases(workspace)
+  const documents = documentWorkspaceDocuments(workspace)
+  const searching = view.query.trim().length > 0
+  const groups = new Map()
+  for (const document of documents) {
+    const list = groups.get(document.knowledgeBaseId) ?? []
+    list.push(document)
+    groups.set(document.knowledgeBaseId, list)
+  }
+  const open = document => {
+    view.knowledgeBaseId = document.knowledgeBaseId
+    void selectDocument(workspace, document.id)
+  }
+  const baseSections = [...groups.entries()].map(([baseId, entries]) => {
+    const currentBase = managing.find(item => item.id === baseId)
+    const rows = entries.map(document => element('button', {
+      type: 'button', class: 'note-directory-row', 'data-document-id': document.id,
+      onClick: () => open(document),
+    },
+      element('span', { class: 'note-directory-icon', 'aria-hidden': 'true' }),
+      element('span', { class: 'note-directory-copy' },
+        element('strong', { title: document.title }, document.title),
+        element('small', { title: document.relPath }, document.relPath)),
+      document.group ? element('span', { class: 'note-directory-group' }, document.group) : null,
+      document.documentState && document.documentState !== 'open' ? badge(DOCUMENT_STATE_LABELS[document.documentState] || '已结束', 'success') : null,
+      element('span', { class: 'note-directory-date' }, formatDate(document.updatedAt)),
+    ))
+    const page = documentPageState(workspace, baseId)
+    return element('section', { class: 'note-directory-base', 'data-base-id': baseId },
+      element('header', { class: 'note-directory-base-header' },
+        element('h3', {}, currentBase?.name || '知识库'),
+        element('span', {}, `${entries.length}${page?.total > entries.length ? ` / ${page.total}` : ''} 篇`)),
+      element('div', { class: 'note-directory-list' }, rows),
+      page?.nextCursor ? element('div', { class: 'note-directory-more' },
+        actionButton(page.loading ? '正在加载…' : `继续加载（${entries.length} / ${page.total}）`, () => {
+          void loadMoreDocumentPage(workspace, baseId).then(() => renderShell())
+        }, 'ghost small')) : null,
+    )
+  })
+  const empty = element('div', { class: 'note-directory-empty' },
+    element('h3', {}, searching ? '没有匹配的文档' : '还没有文档'),
+    element('p', {}, searching ? '换个关键词，或在左侧目录中展开知识库。' : '新建文档后会自动参与搜索、召回与思维链接。'),
+    !readOnly && !searching ? actionButton('新建第一篇文档', () => { void startBlankDocument(workspace, managing[0]?.id) }, 'primary') : null)
+  return element('main', { class: 'note-editor note-directory-page', 'aria-label': '知识目录' },
+    element('header', { class: 'note-editor-toolbar note-directory-toolbar' },
+      element('div', { class: 'note-directory-heading' },
+        element('h2', {}, '知识目录'),
+        element('p', {}, searching ? `${documents.length} 条匹配文档` : `${documents.length} 篇文档 · ${managing.length} 个知识库`)),
+      element('div', { class: 'note-editor-actions' },
+        actionButton('刷新', () => { void navigate('entries') }, 'ghost small'),
+        !readOnly ? actionButton('新建文档', () => { void startBlankDocument(workspace, view.knowledgeBaseId || managing[0]?.id) }, 'primary small') : null)),
+    element('div', { class: 'note-editor-scroll note-directory-scroll', 'data-scroll-key': 'note-directory' },
+      documents.length === 0 ? empty : baseSections))
+}
+
+async function backToDocumentDirectory(workspace) {
+  if (workspace.view.editor?.dirty) {
+    const saved = await saveDocumentEditor(workspace)
+    if (!saved) return
+  }
+  workspace.view.documentId = ''
+  workspace.view.editor = null
+  workspace.view.editorLoading = false
+  renderShell()
+}
+
 function renderNoteEditor(workspace, editor, base) {
   const view = workspace.view
   const readOnly = documentWorkspaceReadOnly(workspace)
   if (view.editorLoading) return renderDocumentEditorLoading(base)
-  if (!editor) return element('main', { class: 'note-editor note-editor-empty' },
-    element('div', { class: 'note-empty-content' },
-      element('span', { class: 'empty-document-mark', 'aria-hidden': 'true' }),
-      element('h3', {}, '选择或新建一篇文档'),
-      element('p', {}, readOnly ? '这个知识库已归档，当前只能阅读已有文档。' : '文档保存后会立即参与当前知识库的搜索与召回。'),
-      element('div', { class: 'note-empty-actions' },
-        actionButton('浏览知识目录', () => { view.treeOpen = true; renderShell() }, readOnly ? 'primary' : 'small'),
-        !readOnly ? actionButton('新建文档', () => { void startBlankDocument(workspace, view.knowledgeBaseId || state.knowledgeBases.find(item => item.status === 'active')?.id) }, 'primary') : null),
-    ))
+  if (!editor) return renderDocumentDirectory(workspace, base, readOnly)
   const saveShortcut = event => {
     if ((event.metaKey || event.ctrlKey) && event.key.toLocaleLowerCase() === 's') {
       event.preventDefault()
@@ -2270,6 +2327,7 @@ function renderNoteEditor(workspace, editor, base) {
           element('span', {}, editor.isNew ? '尚未保存' : `更新于 ${formatDate(editor.updatedAt)}`),
           element('span', {}, editor.scope.kind === 'global' ? '全局知识' : `项目 ${editor.scope.id}`))),
       element('div', { class: 'note-editor-actions' },
+        actionButton('返回目录', () => { void backToDocumentDirectory(workspace) }, 'ghost small'),
         finalized ? badge(DOCUMENT_STATE_LABELS[editor.documentState] || '已结束', 'success') : readOnly ? badge('只读') : null,
         element('span', { class: 'editor-save-status', role: 'status' }, editor.saveState),
         finalized && !readOnly ? actionButton('重新打开', () => reopenDocument(workspace, editor), 'small') : null,
@@ -4702,33 +4760,63 @@ function renderBackgroundIndicator() {
   const activeWriteback = (writeback?.running ?? 0) > 0
   const activeWorklog = status?.worklog?.running === true
   const queued = (archive?.queued ?? 0) + (writeback?.queued ?? 0)
+  const failed = (writeback?.failed ?? 0) + (archive?.last?.failed ?? 0)
   const recent = archive?.last !== undefined && Date.now() - archive.last.at < 12_000
     && archive.last.captured + archive.last.updated > 0
   const active = activeArchive || activeWriteback || activeWorklog || queued > 0
+  const open = state.background.open === true
   const details = []
   if (activeArchive) details.push(`自动归档 ${archive.done}/${archive.total}${archive.current ? ` · ${shortFileName(archive.current)}` : ''}`)
   else if ((archive?.queued ?? 0) > 0) details.push(`自动归档排队 ${archive.queued} 批`)
   if (activeWriteback) details.push(`知识回写处理中 ${writeback.running}`)
   else if ((writeback?.queued ?? 0) > 0) details.push(`知识回写排队 ${writeback.queued}`)
   if (activeWorklog) details.push('工作日报整理中')
+  if (failed > 0) details.push(`${failed} 项失败`)
   if (details.length === 0 && recent) details.push(`已归档 ${archive.last.captured + archive.last.updated} 个文件`)
-  if (details.length === 0) details.push(status === null ? '正在连接…' : state.background.error ? '状态暂不可用' : '')
-  const clickable = activeArchive || activeWriteback || activeWorklog || queued > 0
+  if (details.length === 0) details.push(status === null ? '正在连接…' : state.background.error ? '状态暂不可用' : '一切正常')
+  const percent = archive?.total > 0 ? archive.done / archive.total : 0
+  const toggle = event => {
+    event?.stopPropagation()
+    state.background.open = !open
+    const node = document.querySelector('[data-background-status]')
+    if (node) node.replaceWith(renderBackgroundIndicator())
+  }
+  const task = (title, stateText, detail, progress, isActive, tone, view) => element('div', { class: `background-task${tone ? ` is-${tone}` : ''}`, onClick: event => event.stopPropagation() },
+    taskRing(progress, isActive, tone),
+    element('div', { class: 'background-task-copy' },
+      element('strong', {}, title),
+      element('span', {}, stateText),
+      detail ? element('small', {}, detail) : null),
+    view ? actionButton('查看', () => { state.background.open = false; void navigate(view) }, 'ghost small') : null)
   return element('aside', {
-    class: `background-indicator${active ? ' is-active' : recent ? ' is-recent' : ' is-idle'}`,
-    'data-background-status': '', role: 'status', 'aria-live': 'polite',
-    title: active ? '点击查看后台任务' : '后台自动整理已开启',
-    onClick: clickable ? () => {
-      void navigate(activeArchive || (archive?.queued ?? 0) > 0 ? 'files' : activeWriteback || (writeback?.queued ?? 0) > 0 ? 'writeback' : 'worklog')
-    } : undefined,
+    class: `background-indicator${active ? ' is-active' : recent ? ' is-recent' : ' is-idle'}${open ? ' is-open' : ''}`,
+    'data-background-status': '', role: 'status', 'aria-live': 'polite', 'aria-expanded': String(open),
+    title: '点击查看后台任务详情',
+    onClick: toggle,
   },
   element('span', { class: active ? 'background-spinner' : 'background-dot', 'aria-hidden': 'true' }),
   element('span', { class: 'background-copy' },
     element('strong', {}, active ? '后台整理中' : recent ? '整理完成' : '自动整理'),
-    details.join(' ').length > 0 ? element('span', {}, details.join(' · ')) : null),
+    element('span', {}, details.join(' · '))),
   active && archive?.total > 0
-    ? element('span', { class: 'background-meter', 'aria-hidden': 'true' }, element('span', { style: `width:${Math.round(archive.done / Math.max(1, archive.total) * 100)}%` }))
-    : null)
+    ? element('span', { class: 'background-meter', 'aria-hidden': 'true' }, element('span', { style: `width:${Math.round(percent * 100)}%` }))
+    : null,
+  open ? element('div', { class: 'background-popover', role: 'dialog', 'aria-label': '后台任务详情', onClick: event => event.stopPropagation() },
+    element('header', { class: 'background-popover-header' },
+      element('div', {}, element('strong', {}, '后台任务'), element('span', {}, state.background.error || '每 3 秒自动刷新')),
+      actionButton(interfaceIcon('close'), toggle, 'ghost small', { 'aria-label': '关闭后台任务详情' })),
+    task('自动归档', activeArchive ? `正在处理 ${archive.done}/${Math.max(1, archive.total)}` : (archive?.queued ?? 0) > 0 ? `排队 ${archive.queued} 批` : '空闲', activeArchive && archive.current ? shortFileName(archive.current) : archive?.last ? `上次捕获 ${archive.last.captured} · 更新 ${archive.last.updated}${archive.last.failed ? ` · 失败 ${archive.last.failed}` : ''}` : '尚未运行', activeArchive ? percent : archive?.last ? 1 : 0, activeArchive, activeArchive ? 'active' : archive?.last?.failed ? 'danger' : 'ok', 'files'),
+    task('知识回写', activeWriteback ? `处理中 ${writeback.running}` : (writeback?.queued ?? 0) > 0 ? `排队 ${writeback.queued}` : '空闲', `失败 ${writeback?.failed ?? 0} 项`, 0, activeWriteback, (writeback?.failed ?? 0) > 0 ? 'danger' : activeWriteback ? 'active' : 'ok', 'writeback'),
+    task('工作日报', activeWorklog ? '正在整理' : '空闲', status?.enabled?.worklog ? '自动刷新已开启' : '自动刷新未开启', 0, activeWorklog, activeWorklog ? 'active' : 'ok', 'worklog'),
+    element('p', { class: 'background-popover-hint' }, failed > 0 ? '有任务失败，点「查看」进入对应页面重试。' : '所有后台任务都在这里持续更新。')) : null)
+}
+
+function taskRing(progress, active, tone) {
+  const value = Math.max(0, Math.min(1, Number(progress) || 0))
+  return element('span', {
+    class: `background-ring${active && value === 0 ? ' is-indeterminate' : ''}${tone ? ` is-${tone}` : ''}`,
+    style: `--ring-progress:${Math.round(value * 100)}%`, 'aria-hidden': 'true',
+  }, element('i', {}, `${Math.round(value * 100)}%`))
 }
 
 function shortFileName(path) {
@@ -4884,13 +4972,18 @@ function createKnowledgeGraphRenderer(canvas, data, options) {
   if (!context) return { dispose() {}, zoomIn() {}, zoomOut() {}, fit() {} }
   const stage = canvas.parentElement
   const reduceMotion = window.matchMedia?.('(prefers-reduced-motion: reduce)').matches === true
-  const nodes = data.nodes.map((node, index) => ({
-    ...node,
-    x: 0, y: 0, vx: 0, vy: 0,
-    r: 4.5 + Math.min(7, node.degree * 1.3),
-    color: graphGroupColor(node.group),
-    phase: index * 0.73,
-  }))
+  const nodes = data.nodes.map((node, index) => {
+    const degree = Number(node.degree) || 0
+    return {
+      ...node,
+      title: String(node.title || '未命名文档'),
+      degree,
+      x: 0, y: 0, vx: 0, vy: 0,
+      r: 4.5 + Math.min(7, degree * 1.3),
+      color: graphGroupColor(node.group),
+      phase: index * 0.73,
+    }
+  })
   const byId = new Map(nodes.map(node => [node.id, node]))
   const edges = data.edges.map((edge, index) => ({
     ...edge,
@@ -4915,6 +5008,7 @@ function createKnowledgeGraphRenderer(canvas, data, options) {
   let alpha = 1
   let raf = 0
   let last = performance.now()
+  let lastDraw = 0
   let disposed = false
   const pointer = { x: 0, y: 0 }
 
@@ -4939,14 +5033,36 @@ function createKnowledgeGraphRenderer(canvas, data, options) {
   }
 
   const seed = () => {
-    const radius = Math.min(width, height) * 0.3
-    nodes.forEach((node, index) => {
-      const angle = (index / Math.max(1, nodes.length)) * Math.PI * 2 - Math.PI / 2
-      const wobble = 0.78 + ((index * 37) % 17) / 40
-      node.x = width / 2 + Math.cos(angle) * radius * wobble
-      node.y = height / 2 + Math.sin(angle) * radius * wobble
-      node.vx = 0
-      node.vy = 0
+    // Keep documents of the same group together. A single ring becomes
+    // unreadable once a library has dozens of nested groups; clustered groups
+    // preserve the hierarchy visually and avoid label/node pile-ups.
+    const groups = new Map()
+    for (const node of nodes) {
+      const key = node.group || '未分组'
+      const list = groups.get(key) ?? []
+      list.push(node)
+      groups.set(key, list)
+    }
+    const entries = [...groups.entries()]
+    const centerRadius = Math.min(width, height) * 0.27
+    entries.forEach(([, list], groupIndex) => {
+      const angle = entries.length === 1 ? -Math.PI / 2 : (groupIndex / entries.length) * Math.PI * 2 - Math.PI / 2
+      const cx = width / 2 + Math.cos(angle) * centerRadius
+      const cy = height / 2 + Math.sin(angle) * centerRadius
+      const localRadius = entries.length === 1
+        ? Math.min(width, height) * (0.2 + Math.min(0.18, list.length * 0.0024))
+        : Math.min(centerRadius * 0.62, 30 + Math.sqrt(list.length) * 12)
+      list.forEach((node, index) => {
+        // Sunflower distribution avoids concentric rings collapsing into one
+        // another when a group contains dozens of files.
+        const localAngle = index * 2.399963229728653 + groupIndex * 0.37
+        const distance = localRadius * Math.sqrt((index + 0.5) / Math.max(1, list.length))
+        const wobble = 0.92 + ((index * 37 + groupIndex * 11) % 13) / 100
+        node.x = cx + Math.cos(localAngle) * distance * wobble
+        node.y = cy + Math.sin(localAngle) * distance * wobble
+        node.vx = 0
+        node.vy = 0
+      })
     })
   }
 
@@ -4969,6 +5085,14 @@ function createKnowledgeGraphRenderer(canvas, data, options) {
         a.vy -= fy
         b.vx += fx
         b.vy += fy
+        const minimum = a.r + b.r + 9
+        if (distance < minimum) {
+          const push = (minimum - distance) / distance * 0.32 * k
+          a.vx -= dx * push
+          a.vy -= dy * push
+          b.vx += dx * push
+          b.vy += dy * push
+        }
       }
     }
     for (const edge of edges) {
@@ -5172,7 +5296,12 @@ function createKnowledgeGraphRenderer(canvas, data, options) {
     if (disposed) return
     const step = Math.min(48, now - last) / 16.67
     last = now
-    if (!reduceMotion) simulate(step)
+    if (!reduceMotion && alpha > 0.02) simulate(step)
+    if (!reduceMotion && nodes.length > 55 && now - lastDraw < 32) {
+      raf = requestAnimationFrame(frame)
+      return
+    }
+    lastDraw = now
     draw(now / 1000)
     if (!reduceMotion) raf = requestAnimationFrame(frame)
   }

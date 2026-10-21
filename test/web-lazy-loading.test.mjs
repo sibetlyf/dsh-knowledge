@@ -29,21 +29,25 @@ function fixture() {
   return { view, state, calls, values }
 }
 
-test('plain workspace open only requests base metadata; no stats, index, default document or expanded base', async () => {
+test('plain workspace open starts at the directory and loads the first index page', async () => {
   const { view, calls, values } = fixture()
+  values.documentPageState = () => ({ loaded: false, loading: false })
+  values.loadDocumentPage = async (_workspace, id) => { calls.push(`index:${id}`) }
   await functions(['loadDocuments'], values).loadDocuments()
-  assert.deepEqual(calls, ['knowledge-bases'])
+  assert.deepEqual(calls, ['knowledge-bases', 'index:base'])
   assert.equal(view.documentId, '')
   assert.equal(view.editor, null)
-  assert.equal(view.expandedBases.size, 0)
+  assert.equal(view.expandedBases.has('base'), true)
 })
 
-test('workspace still resolves session scope without eagerly loading mounted documents', async () => {
+test('workspace still resolves session scope without opening a document', async () => {
   const { calls, values, state } = fixture()
   state.mountContext = { sessionId: 'session', projectId: '/project' }
   values.api = async path => { calls.push(path); return [{ knowledgeBaseId: 'base' }] }
+  values.documentPageState = () => ({ loaded: false, loading: false })
+  values.loadDocumentPage = async (_workspace, id) => { calls.push(`index:${id}`) }
   await functions(['loadDocuments'], values).loadDocuments()
-  assert.deepEqual(calls, ['knowledge-bases', 'mounts/resolve?sessionId=session&projectId=%2Fproject'])
+  assert.deepEqual(calls, ['knowledge-bases', 'mounts/resolve?sessionId=session&projectId=%2Fproject', 'index:base'])
 })
 
 test('explicit deep links still load their selected document, including links without a base id', async () => {
@@ -63,25 +67,24 @@ test('explicit deep links still load their selected document, including links wi
   }
 })
 
-test('a predicted recent document opens without requiring the directory', async () => {
+test('a predicted recent document no longer replaces the directory landing page', async () => {
   const { view, calls, values } = fixture()
   values.predictStartupDocument = async () => ({ id: 'recent', knowledgeBaseId: 'base' })
-  values.api = async path => { calls.push(path); return { id: 'recent', knowledgeBaseId: 'base' } }
-  values.documentSummary = value => value
-  values.mergeDocumentSummaries = () => {}
-  values.loadDocumentPage = async () => { calls.push('index') }
-  values.loadDocumentEditor = async (_workspace, id) => { calls.push('entry:' + id) }
+  values.documentPageState = () => ({ loaded: false, loading: false })
+  values.loadDocumentPage = async (_workspace, id) => { calls.push(`index:${id}`) }
   await functions(['loadDocuments'], values).loadDocuments()
-  assert.equal(view.documentId, 'recent')
-  assert.equal(view.knowledgeBaseId, 'base')
-  assert.ok(calls.includes('entry:recent'))
+  assert.equal(view.documentId, '')
+  assert.ok(!calls.some(call => call.startsWith('entry:')))
+  assert.ok(calls.includes('index:base'))
 })
 
-test('unmounted document links are not fetched or opened', async () => {
+test('unmounted document links are not opened and the directory still loads', async () => {
   const { view, calls, values } = fixture()
   view.documentId = 'private'; view.knowledgeBaseId = 'unmounted'
+  values.documentPageState = () => ({ loaded: false, loading: false })
+  values.loadDocumentPage = async (_workspace, id) => { calls.push(`index:${id}`) }
   await functions(['loadDocuments'], values).loadDocuments()
-  assert.deepEqual(calls, ['knowledge-bases'])
+  assert.deepEqual(calls, ['knowledge-bases', 'index:base'])
   assert.equal(view.documentId, '')
 })
 

@@ -2343,25 +2343,46 @@ body { font-size: var(--font-body); line-height: 1.55; }
 .graph-meta, .document-links-empty, .document-links-error { font-size: 13px; }
 .artifact-name { font-size: 14px; }
 
-/* The knowledge directory is a slide-over panel instead of a permanent third column. */
-.note-workspace { position: relative; grid-template-columns: minmax(0, 1fr) !important; }
+/* The knowledge directory is a permanent sidebar on desktop and a drawer on
+   narrow screens. The editor always keeps the tree visible. */
+.note-workspace {
+  position: relative;
+  grid-template-columns: clamp(240px, 23vw, 320px) minmax(0, 1fr) !important;
+}
 .note-tree-panel {
-  position: absolute; inset: 0 auto 0 0; z-index: 5;
-  width: min(88%, 360px); height: 100%;
-  transform: translateX(-104%); visibility: hidden;
-  border-right: 1px solid var(--border-strong);
-  background: var(--surface);
-  box-shadow: 24px 0 60px rgb(0 0 0 / .18);
-  transition: transform .22s var(--ease-out), visibility .22s;
+  position: relative; inset: auto; z-index: auto;
+  width: auto; height: 100%;
+  transform: none; visibility: visible;
+  border-right: 1px solid var(--border);
+  background: transparent;
+  box-shadow: none;
+  transition: none;
 }
-.note-workspace[data-tree-open="true"] .note-tree-panel { transform: translateX(0); visibility: visible; }
-.note-tree-scrim {
-  display: block; position: absolute; inset: 0; z-index: 4;
-  border: 0; padding: 0;
-  background: color-mix(in srgb, var(--text) 16%, transparent);
-  -webkit-backdrop-filter: blur(1px); backdrop-filter: blur(1px);
+.note-workspace[data-tree-open="true"] .note-tree-panel { transform: none; visibility: visible; }
+.note-tree-scrim { display: none; }
+.note-editor { grid-column: 2; }
+.note-tree-close { display: none; }
+@media (max-width: 860px) {
+  .note-workspace { grid-template-columns: minmax(0, 1fr) !important; }
+  .note-tree-panel {
+    position: absolute; inset: 0 auto 0 0; z-index: 5;
+    width: min(88%, 360px);
+    transform: translateX(-104%); visibility: hidden;
+    border-right: 1px solid var(--border-strong);
+    background: var(--surface);
+    box-shadow: 24px 0 60px rgb(0 0 0 / .18);
+    transition: transform .22s var(--ease-out), visibility .22s;
+  }
+  .note-workspace[data-tree-open="true"] .note-tree-panel { transform: translateX(0); visibility: visible; }
+  .note-tree-scrim {
+    display: block; position: absolute; inset: 0; z-index: 4;
+    border: 0; padding: 0;
+    background: color-mix(in srgb, var(--text) 16%, transparent);
+    -webkit-backdrop-filter: blur(1px); backdrop-filter: blur(1px);
+  }
+  .note-editor { grid-column: 1; }
+  .note-tree-close { display: inline-flex; }
 }
-.note-editor { grid-column: 1; }
 .app-shell[data-view="entries"] .topbar p { max-width: 72ch; }
 @media (max-width: 1280px) {
   .app-shell[data-view="entries"] .topbar p { display: none; }
@@ -2611,3 +2632,64 @@ button, input, select, textarea, .button, .nav-button, .note-tree-base, .note-tr
 .automation-switch input { width: 16px; height: 16px; accent-color: var(--accent); }
 .automation-actions { display: flex; justify-content: flex-end; }
 @media (max-width: 760px) { .automation-grid { grid-template-columns: minmax(0, 1fr); } }
+
+/* Knowledge directory landing page */
+.note-directory-page { display: grid; grid-template-rows: auto minmax(0, 1fr); min-width: 0; }
+.note-directory-toolbar { min-height: 64px; }
+.note-directory-heading { display: grid; gap: 2px; min-width: 0; }
+.note-directory-heading h2 { margin: 0; font-size: 16px; letter-spacing: -.01em; }
+.note-directory-heading p { margin: 0; color: var(--text-tertiary); font-size: 11.5px; }
+.note-directory-scroll { min-height: 0; overflow: auto; padding: clamp(16px, 2.4vw, 28px); }
+.note-directory-base { display: grid; gap: 10px; margin-bottom: 22px; }
+.note-directory-base-header { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; }
+.note-directory-base-header h3 { margin: 0; font-size: 13.5px; }
+.note-directory-base-header span { color: var(--text-tertiary); font-size: 11.5px; }
+.note-directory-list { display: grid; gap: 6px; }
+.note-directory-row { display: grid; grid-template-columns: 18px minmax(0, 1fr) auto auto auto; align-items: center; gap: 10px; width: 100%; min-height: 48px; border: 1px solid var(--border); border-radius: 10px; padding: 8px 12px; background: var(--material-control); color: var(--text); text-align: left; cursor: pointer; }
+.note-directory-row:hover { border-color: var(--border-strong); background: var(--material-control-hover); }
+.note-directory-icon { width: 14px; height: 16px; border: 1.5px solid currentColor; border-radius: 2px; opacity: .55; }
+.note-directory-copy { display: grid; gap: 2px; min-width: 0; }
+.note-directory-copy strong, .note-directory-copy small { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.note-directory-copy strong { font-size: 13px; font-weight: 550; }
+.note-directory-copy small { color: var(--text-tertiary); font-size: 11px; }
+.note-directory-group { max-width: 180px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text-secondary); font-size: 11px; }
+.note-directory-date { color: var(--text-tertiary); font-size: 10.5px; white-space: nowrap; }
+.note-directory-empty { display: grid; justify-items: start; gap: 8px; max-width: 480px; padding: 32px 8px; }
+.note-directory-empty h3 { margin: 0; font-size: 16px; }
+.note-directory-empty p { margin: 0; color: var(--text-secondary); font-size: 12.5px; line-height: 1.6; }
+@media (max-width: 720px) { .note-directory-row { grid-template-columns: 16px minmax(0, 1fr) auto; } .note-directory-group, .note-directory-date { display: none; } }
+
+/* Background task popover and circular progress */
+.background-indicator.is-open { z-index: 130; }
+.background-popover {
+  position: fixed; top: 78px; right: 18px; z-index: 140;
+  width: min(390px, calc(100vw - 24px)); display: grid; gap: 8px;
+  padding: 12px; border: 1px solid var(--border-strong); border-radius: 16px;
+  background: color-mix(in srgb, var(--material-panel) 96%, transparent);
+  box-shadow: 0 22px 60px rgba(8, 14, 28, .28); backdrop-filter: blur(18px);
+  color: var(--text); cursor: default;
+}
+.background-popover-header { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+.background-popover-header div { display: grid; gap: 2px; min-width: 0; }
+.background-popover-header strong { font-size: 12.5px; }
+.background-popover-header span { color: var(--text-tertiary); font-size: 10.5px; }
+.background-task { display: grid; grid-template-columns: auto minmax(0, 1fr) auto; align-items: center; gap: 10px; padding: 9px; border: 1px solid var(--border); border-radius: 11px; background: var(--material-control); }
+.background-task.is-danger { border-color: color-mix(in srgb, #e5484d 46%, var(--border)); }
+.background-task-copy { display: grid; gap: 1px; min-width: 0; }
+.background-task-copy strong { font-size: 12px; }
+.background-task-copy span, .background-task-copy small { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text-secondary); font-size: 10.5px; }
+.background-task-copy small { color: var(--text-tertiary); }
+.background-ring {
+  --ring-progress: 0%; width: 34px; height: 34px; flex: none; display: grid; place-items: center;
+  border-radius: 50%;
+  background: conic-gradient(var(--accent) var(--ring-progress), color-mix(in srgb, var(--border) 70%, transparent) 0);
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--border) 40%, transparent);
+}
+.background-ring i { width: 26px; height: 26px; display: grid; place-items: center; border-radius: 50%; background: var(--material-panel); color: var(--text-secondary); font-size: 8.5px; font-style: normal; letter-spacing: -.02em; }
+.background-ring.is-danger { background: conic-gradient(#e5484d var(--ring-progress), color-mix(in srgb, var(--border) 70%, transparent) 0); }
+.background-ring.is-ok { background: conic-gradient(#4cc38a var(--ring-progress), color-mix(in srgb, var(--border) 70%, transparent) 0); }
+.background-ring.is-indeterminate { background: conic-gradient(from 0deg, transparent 0 35%, var(--accent) 35% 78%, transparent 78%); animation: background-spin 1.1s linear infinite; }
+.background-ring.is-indeterminate i { color: transparent; }
+.background-popover-hint { margin: 0; padding: 2px 4px 0; color: var(--text-tertiary); font-size: 10.5px; line-height: 1.5; }
+@media (max-width: 720px) { .background-popover { top: 64px; right: 10px; } }
+.note-directory-more { display: flex; justify-content: center; padding: 2px 0 6px; }
