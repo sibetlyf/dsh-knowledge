@@ -574,8 +574,23 @@ async function loadEntries(cursor = '') {
   if (!state.stats) await refreshStats()
 }
 
-async function loadDocuments(signal, onPhase = () => {}) {
-  onPhase('正在读取可用知识库', .24)
+async function predictStartupDocument(visibleBaseIds, signal) {
+  // Predict "continue reading": open the most recently updated document in the
+  // first base that actually has content, instead of showing an empty editor.
+  for (const base of documentKnowledgeBases(state.knowledgeBases)) {
+    if (!visibleBaseIds.has(base.id)) continue
+    try {
+      const page = await api(`entries?limit=1&status=active&knowledgeBaseId=${encodeURIComponent(base.id)}`, { signal })
+      const item = Array.isArray(page?.items) ? page.items[0] : undefined
+      if (item?.id) return { id: item.id, knowledgeBaseId: item.knowledgeBaseId || base.id }
+    } catch (error) {
+      if (error.name === 'AbortError') throw error
+    }
+  }
+  return undefined
+}
+
+async function loadDocuments(signal, onPhase = () => {}) {  onPhase('正在读取可用知识库', .24)
   const options = { signal }
   const requests = [ensureKnowledgeBases(true, signal)]
   if (state.mountContext.sessionId) {
@@ -598,6 +613,13 @@ async function loadDocuments(signal, onPhase = () => {}) {
     if (last !== undefined && visibleBaseIds.has(last.knowledgeBaseId)) {
       view.knowledgeBaseId = last.knowledgeBaseId
       view.documentId = last.id
+    }
+  }
+  if (!view.documentId) {
+    const predicted = await predictStartupDocument(visibleBaseIds, signal)
+    if (predicted !== undefined) {
+      view.knowledgeBaseId = predicted.knowledgeBaseId
+      view.documentId = predicted.id
     }
   }
   const availableBaseIds = visibleBaseIds
