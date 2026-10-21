@@ -402,9 +402,10 @@ async function extractWithLlm(
   const defaultScope: KnowledgeScope = config.defaultScope === 'project' && snapshot.projectId !== undefined
     ? { kind: 'project', id: snapshot.projectId }
     : { kind: 'global' }
-  const existingBodyLimit = Math.min(4000, Math.max(1000, Math.floor(
-    Math.min(24_000, Math.max(8_000, config.extractionMaxInputChars * .6)) / Math.max(1, existing.length),
-  )))
+  // Keep existing-document context deliberately small. The model only needs
+  // identity, tags/group and a short excerpt to decide update vs. create; the
+  // full document is available on demand through knowledge_read.
+  const existingBodyLimit = Math.min(600, Math.max(240, Math.floor(6000 / Math.max(1, existing.length))))
   const framed = JSON.stringify({
     defaultScope,
     writebackPolicy,
