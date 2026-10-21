@@ -86,7 +86,6 @@ artifactArchiveMaxChars: 46000          # 开启正文入库时的正文上限
 artifactArchiveStoreContent: false      # 默认只存链接/元数据/关键词；true 才把抽取正文写入数据库
 artifactArchivePaperEnabled: true       # 识别 PDF 论文并提取摘要/关键词/分类
 artifactArchivePaperBaseName: '论文库'  # 论文知识库，首次出现论文时创建一次
-autoCreateKnowledgeBasesMaxPerDay: 3    # 每天最多自动新建知识库数量
 artifactArchiveAutoMount: true         # 自动挂载制品库到项目以参与召回
 autoWritableMountEnabled: true         # 无可写知识库挂载时自动挂载「默认知识库」
 autoWritableMountWriteMode: direct     # direct 直接写入；audit 进入待审核
