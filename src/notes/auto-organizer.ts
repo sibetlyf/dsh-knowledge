@@ -1,5 +1,6 @@
 import { randomUUID } from 'node:crypto'
 import type { ResolvedConfig } from '../config.js'
+import { knowledgeFolderName } from '../documents/path.js'
 import { extractPdfText } from '../pdf-parser.js'
 import type { MessageLike, RuntimeContextLike } from '../runtime.js'
 import type { NoteNode } from './domain.js'
@@ -24,6 +25,16 @@ export interface AutoOrganizeResult {
   scannedCount: number
   pdfCount: number
   reason?: string | undefined
+}
+
+function firstOrganizeTopic(tree: MindmapNode[]): string {
+  const queue = [...tree]
+  while (queue.length > 0) {
+    const node = queue.shift()!
+    if (node.level >= 3 && node.title.trim().length > 0) return knowledgeFolderName(node.title)
+    queue.push(...node.children)
+  }
+  return '综合'
 }
 
 export class NoteAutoOrganizer {
@@ -174,10 +185,12 @@ export class NoteAutoOrganizer {
     }
 
     // 7. 存入待审阅草案；未关闭自动批准时直接落盘，不再等待人工确认
+    const topic = firstOrganizeTopic(mindmapTree)
+    const targetPath = [targetFolder, topic].filter(Boolean).join('/')
     const proposal = this.proposalStore.createProposal({
       title,
       kind: 'auto_summary',
-      targetFolder,
+      targetFolder: targetPath,
       content: generatedMarkdown,
       mindmapJson: JSON.stringify(mindmapTree),
       sourceNoteIds,

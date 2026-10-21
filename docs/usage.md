@@ -89,6 +89,7 @@
 - 自动整理触发方式：`autoOrganizeTrigger: turn` 每轮对话后整理；`interval` 按 `autoOrganizeIntervalMinutes`（默认 30 分钟）批量整理，归档仍按轮执行，只有知识提取会合并到间隔窗口。
 - 自动工作纪要触发方式：`worklogAutoUpdateTrigger: turn` 每轮/每次知识更新后刷新；`interval` 按 `worklogAutoUpdateIntervalMinutes`（默认 30 分钟）批量刷新。日报的每日定时生成仍由工作日报自身的 `scheduleEnabled` / `scheduleTime` 控制。
 - `tokenSavingEnabled` 默认开启：提取输入上限 12000 字符、输出 3072 tokens，自动召回最多 2 条、上下文字符上限 3000；关闭后使用配置中的原始值，适合需要更高精度的场景。
+- `autoRecallAllEnabled` 默认开启：会话没有任何召回挂载时，自动检索所有生效知识库并注入当前对话；无需手工挂载，知识只在对话上下文和工具读取中展示。
 - 管理台「自动化」页可以图形化设置上述自动审核、两种触发模式、间隔和 token 节省；保存后立即更新运行参数。
 - 自动整理只读取既有文档的标题、标签、分组和约 600 字摘要；自动双向链接由本地元数据/关键词推导，不调用模型；需要完整正文时再通过 `knowledge_read` 读取，避免把整库文档塞进上下文。
 - 知识文档工具栏的「优化格式」和工作日报的「优化排版」调用编辑模型只改格式/表达，要求保留事实、数字、路径、链接与依据编号，并去掉重复和 AI 腔；优化结果作为新版本保存。
@@ -127,7 +128,7 @@
 
 ```bash
 # 固定发布标签；PowerShell 中 # 后的 ref 需要引号
-dsh plugin --profile web add "github:sibetlyf/dsh-knowledge#v2.15.1"
+dsh plugin --profile web add "github:sibetlyf/dsh-knowledge#v2.15.2"
 ```
 
 跟踪主分支：

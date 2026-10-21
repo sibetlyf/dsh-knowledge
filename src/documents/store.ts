@@ -3,11 +3,12 @@ import {
   readFile,
   readdir,
   realpath,
+  rename,
   rm,
   stat,
   unlink,
 } from 'node:fs/promises'
-import { basename, extname, join, relative, resolve, sep } from 'node:path'
+import { basename, dirname, extname, join, relative, resolve, sep } from 'node:path'
 import type { KnowledgeBase } from '../domain.js'
 import { atomicWriteFile, isWindowsReplaceError, supportsDirectorySync } from '../atomic-file.js'
 import {
@@ -16,6 +17,7 @@ import {
   renderKnowledgeBaseManifest,
   type ParsedMarkdownDocument,
 } from './markdown.js'
+import { knowledgeFolderName } from './path.js'
 import { compareNames } from '../collation.js'
 
 export const KNOWLEDGE_BASE_MANIFEST = '.knowledge-base.yml'
@@ -51,7 +53,31 @@ export class KnowledgeDocumentStore {
   }
 
   baseDirectory(base: Pick<KnowledgeBase, 'id' | 'name'>): string {
+    return join(this.root, knowledgeFolderName(base.name, `base-${shortId(base.id)}`))
+  }
+
+  /** Older builds stored every base under `base-<id>`; migrate in place once. */
+  legacyBaseDirectory(base: Pick<KnowledgeBase, 'id'>): string {
     return join(this.root, `base-${shortId(base.id)}`)
+  }
+
+  private async migrateLegacyBase(base: KnowledgeBase): Promise<void> {
+    const target = this.baseDirectory(base)
+    const legacy = this.legacyBaseDirectory(base)
+    if (target === legacy) return
+    try {
+      await stat(legacy)
+    } catch (error) {
+      if (isNodeError(error, 'ENOENT')) return
+      throw error
+    }
+    try {
+      await stat(target)
+      return
+    } catch (error) {
+      if (!isNodeError(error, 'ENOENT')) throw error
+    }
+    await rename(legacy, target)
   }
 
   async createBase(base: KnowledgeBase): Promise<string> {
@@ -64,6 +90,7 @@ export class KnowledgeDocumentStore {
 
   async ensureBase(base: KnowledgeBase): Promise<string> {
     await this.initialize()
+    await this.migrateLegacyBase(base)
     const directory = this.baseDirectory(base)
     await mkdir(directory, { recursive: true })
     await this.writeManifest(directory, base)
@@ -72,6 +99,16 @@ export class KnowledgeDocumentStore {
 
   async updateBase(directory: string, base: KnowledgeBase): Promise<void> {
     await this.assertManagedDirectory(directory)
+    const target = this.baseDirectory(base)
+    if (target !== directory) {
+      try {
+        await stat(target)
+      } catch (error) {
+        if (!isNodeError(error, 'ENOENT')) throw error
+        await rename(directory, target)
+      }
+      directory = target
+    }
     await this.writeManifest(directory, base)
   }
 
@@ -119,6 +156,7 @@ export class KnowledgeDocumentStore {
     const parsed = parseKnowledgeMarkdown(markdown)
     const relPath = await this.availableDocumentPath(root, title, parsed.metadata.id)
     const absolutePath = await this.resolveDocumentPath(root, relPath, false)
+    await mkdir(dirname(absolutePath), { recursive: true })
     await atomicWrite(absolutePath, parsed.markdown, false)
     return this.readDocument(root, relPath)
   }
@@ -127,6 +165,7 @@ export class KnowledgeDocumentStore {
     const root = await this.assertManagedDirectory(directory)
     const parsed = parseKnowledgeMarkdown(markdown)
     const absolutePath = await this.resolveDocumentPath(root, relPath, false)
+    await mkdir(dirname(absolutePath), { recursive: true })
     let replace = true
     try { await stat(absolutePath) } catch (error) {
       if (!isNodeError(error, 'ENOENT')) throw error

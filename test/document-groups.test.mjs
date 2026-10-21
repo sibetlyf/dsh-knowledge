@@ -24,7 +24,7 @@ test('new documents require a meaningful group; existing spellings are reused pe
   assert.equal(normalizeDocumentGroup(' 知识 文档 '), '知识 文档')
 })
 
-test('group changes preserve id, path, body, tags, links, finalization and search; legacy saves retain classification', async t => {
+test('group changes preserve id, body, tags, links, finalization and search while moving the folder; legacy saves retain classification', async t => {
   const { provider } = await fixture(t)
   const entry = await provider.create(draft)
   const before = await provider.getDocument(entry.id)
@@ -37,7 +37,9 @@ test('group changes preserve id, path, body, tags, links, finalization and searc
   const [moved] = await provider.assignDocumentGroup('default', [entry.id], '项目规范')
   assert.equal(moved.documentState, 'complete'); assert.equal(moved.body, updated.body); assert.deepEqual(moved.tags, updated.tags)
   const after = await provider.getDocument(entry.id)
-  assert.equal(after.relPath, before.relPath); assert.equal(after.group, '项目规范')
+  assert.notEqual(after.relPath, before.relPath)
+  assert.match(after.relPath, /^项目规范\//u)
+  assert.equal(after.group, '项目规范')
   assert.equal((await provider.listDocumentIndex({ knowledgeBaseIds: ['default'], limit: 10 })).items[0].group, '项目规范')
   assert.equal((await provider.listKnowledgeNoteReferences(entry.id))[0].note.id, note.id)
   assert.ok((await provider.search({ text: '健康状态', limit: 10 })).some(hit => hit.entry.id === entry.id))

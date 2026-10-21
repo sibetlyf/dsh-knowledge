@@ -66,7 +66,7 @@
 
 ```bash
 # 固定到当前发布标签（Windows PowerShell 需要给 # 后的 ref 加引号）
-dsh plugin --profile web add "github:sibetlyf/dsh-knowledge#v2.15.1"
+dsh plugin --profile web add "github:sibetlyf/dsh-knowledge#v2.15.2"
 ```
 
 跟踪主分支的最新提交：
@@ -139,11 +139,14 @@ worklogAutoUpdateEnabled: true         # 知识库更新后自动记录素材并
 worklogAutoUpdateTrigger: turn         # turn 每轮 / interval 按分钟批量刷新日报
 worklogAutoUpdateIntervalMinutes: 30   # interval 模式的日报刷新间隔
 tokenSavingEnabled: true               # 限制提取输入/输出、召回条数与上下文字符，节省 token
+autoRecallAllEnabled: true             # 会话没有召回挂载时自动检索所有生效知识库（零操作）
 ```
 
 数据默认存放在非系统盘（Windows 下优先插件所在盘，如 `G:\dsh-knowledge`），可用 `DSH_KNOWLEDGE_HOME` 覆盖；首次启动会把旧 C 盘用户目录的知识库与归档复制到新目录，旧目录保留为备份。
 
-自动审核默认开启：非冲突、非凭据类的待审候选会在每轮结束和后台轮询中自动批准；提取刚完成时也会立即触发一次审核，减少等待。真实冲突与凭据类内容仍保留人工确认。`tokenSavingEnabled: true` 时提取输入默认上限 12000 字符、输出 3072 tokens，自动召回最多 2 条、上下文字符上限 3000；需要更高精度时可关闭该开关或单独调高参数。
+知识文档的磁盘目录与数据库一致：一级为知识库名称，二级及以下为 `分组 · 子分组` 对应的目录；例如 `默认知识库/项目规范/部署/文档标题--id.md`。旧版 `base-<id>` 目录会在首次同步时自动迁移。
+
+自动审核默认开启：非冲突、非凭据类的待审候选会在每轮结束和后台轮询中自动批准；真实冲突与凭据类内容仍保留人工确认。`tokenSavingEnabled: true` 时提取输入默认上限 12000 字符、输出 3072 tokens，自动召回最多 2 条、上下文字符上限 3000；需要更高精度时可关闭该开关或单独调高参数。`autoRecallAllEnabled` 让没有手动挂载的会话也能直接召回所有生效知识库，实现对话内零操作使用。
 
 ---
 

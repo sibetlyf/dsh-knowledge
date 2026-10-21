@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import { mkdtemp, readFile, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { basename, join } from 'node:path'
 import test from 'node:test'
 import {
   parseKnowledgeMarkdown,
@@ -33,6 +33,11 @@ async function fixture(t) {
   t.after(() => rm(root, { recursive: true, force: true }))
   return { root, store, directory }
 }
+
+test('knowledge base folders use the database name instead of base ids', async t => {
+  const { directory } = await fixture(t)
+  assert.equal(basename(directory), base.name)
+})
 
 function markdown(body = '服务使用 Docker Compose 部署。') {
   return renderKnowledgeMarkdown({

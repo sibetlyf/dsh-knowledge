@@ -81,6 +81,7 @@ export interface Config {
   worklogAutoUpdateTrigger: 'turn' | 'interval'
   worklogAutoUpdateIntervalMinutes: number
   tokenSavingEnabled: boolean
+  autoRecallAllEnabled: boolean
 }
 
 export const Config: Schema<Config> = Schema.object({
@@ -137,6 +138,7 @@ export const Config: Schema<Config> = Schema.object({
   worklogAutoUpdateTrigger: Schema.union(['turn', 'interval']).default('turn').description('自动工作纪要触发方式：turn 每轮对话/知识更新后；interval 按分钟间隔批量刷新'),
   worklogAutoUpdateIntervalMinutes: Schema.number().min(1).max(1440).default(30).description('自动工作纪要的间隔分钟数（仅 interval 模式）'),
   tokenSavingEnabled: Schema.boolean().default(true).description('节省知识库 token：限制提取输入/输出、降低自动召回条数与上下文字符上限'),
+  autoRecallAllEnabled: Schema.boolean().default(true).description('零操作对话召回：当前会话没有任何召回挂载时，自动检索所有生效知识库'),
 })
 
 export interface ResolvedConfig extends Config {
@@ -180,6 +182,7 @@ export interface ResolvedConfig extends Config {
   worklogAutoUpdateTrigger: 'turn' | 'interval'
   worklogAutoUpdateIntervalMinutes: number
   tokenSavingEnabled: boolean
+  autoRecallAllEnabled: boolean
 }
 
 export function resolveConfig(config: Config): ResolvedConfig {
@@ -233,6 +236,7 @@ export function resolveConfig(config: Config): ResolvedConfig {
     worklogAutoUpdateTrigger: config.worklogAutoUpdateTrigger ?? 'turn',
     worklogAutoUpdateIntervalMinutes: config.worklogAutoUpdateIntervalMinutes ?? 30,
     tokenSavingEnabled: tokenSaving,
+    autoRecallAllEnabled: config.autoRecallAllEnabled ?? true,
   }
   if (resolved.backend === 'local' && (resolved.databasePath === undefined || resolved.databasePath.trim().length === 0)) {
     throw new Error('local knowledge backend requires databasePath')

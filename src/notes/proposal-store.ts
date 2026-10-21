@@ -1,5 +1,6 @@
 import { randomUUID } from 'node:crypto'
 import type { DatabaseSync } from 'node:sqlite'
+import type { NoteNode } from './domain.js'
 import type { NoteProposal } from './mindmap-domain.js'
 import type { NoteStore } from './store.js'
 
@@ -85,23 +86,27 @@ export class NoteProposalStore {
     return row ? mapProposal(row) : undefined
   }
 
+  private async ensureFolderPath(noteStore: NoteStore, target: string): Promise<string | null> {
+    const segments = target.split('/').map(part => part.trim()).filter(Boolean)
+    let parentId: string | null = null
+    for (const segment of segments) {
+      const existing: NoteNode | undefined = noteStore.list({ kind: 'folder', parentId }).find(folder => folder.name === segment)
+      if (existing) {
+        parentId = existing.id
+        continue
+      }
+      parentId = (await noteStore.createFolder(segment, parentId)).id
+    }
+    return parentId
+  }
+
   async approveProposal(id: string, noteStore: NoteStore, reviewNote?: string | undefined): Promise<{ proposal: NoteProposal; documentId: string }> {
     const proposal = this.getProposal(id)
     if (!proposal) throw new Error(`草案 ${id} 不存在`)
     if (proposal.status !== 'pending') throw new Error(`草案 ${id} 已处于 ${proposal.status} 状态，无法重复审批`)
 
-    // 1. 查找或创建目标文件夹
-    let folderId: string | null = null
-    if (proposal.targetFolder && proposal.targetFolder.trim().length > 0) {
-      const folders = noteStore.list({ kind: 'folder' })
-      const existingFolder = folders.find(f => f.name === proposal.targetFolder)
-      if (existingFolder) {
-        folderId = existingFolder.id
-      } else {
-        const createdFolder = await noteStore.createFolder(proposal.targetFolder)
-        folderId = createdFolder.id
-      }
-    }
+    // 1. 查找或创建目标文件夹（支持 `一级/二级` 层级）
+    const folderId = await this.ensureFolderPath(noteStore, proposal.targetFolder)
 
     // 2. 在目标目录创建整理后的 Markdown 笔记
     const docName = proposal.title.endsWith('.md') ? proposal.title : `${proposal.title}.md`
