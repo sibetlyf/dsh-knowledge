@@ -62,11 +62,45 @@
 
 ### 安装方式
 
+推荐使用 **GitRef** 安装，直接从 GitHub 仓库的指定 ref 构建，不依赖 npm 发布：
+
+```bash
+# 固定到当前发布标签（Windows PowerShell 需要给 # 后的 ref 加引号）
+dsh plugin --profile web add "github:sibetlyf/dsh-knowledge#v2.15.0"
+```
+
+跟踪主分支的最新提交：
+
+```bash
+dsh plugin --profile web add "github:sibetlyf/dsh-knowledge#main"
+```
+
+也可以固定到任意 commit：
+
+```bash
+dsh plugin --profile web add "github:sibetlyf/dsh-knowledge#089ca65"
+```
+
+> GitRef 安装会在安装时构建依赖；请确保本机可访问 GitHub。安装或更新后请重启对应的 DSH Profile。
+
+发布新版本时，先更新 `package.json` 的版本号，再打同名 tag 并推送；GitRef 用户即可固定到该 tag：
+
+```bash
+git tag v2.15.1
+git push origin v2.15.1
+```
+
+对应的安装命令：
+
+```bash
+dsh plugin --profile web add "github:sibetlyf/dsh-knowledge#v2.15.1"
+```
+
+仍可使用 npm 作为备用安装源（仅当当前 registry 已发布 `dsh-knowledge`）：
+
 ```bash
 dsh plugin --profile web add dsh-knowledge
 ```
-
-> 注：安装或更新后请重启对应的 DSH Profile。
 
 ### 配置说明
 

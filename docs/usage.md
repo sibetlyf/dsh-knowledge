@@ -3,8 +3,7 @@
 # 使用与配置
 
 
-[![npm](https://img.shields.io/npm/v/%40lemoncat7%2Fdsh-knowledge)](https://www.npmjs.com/package/@lemoncat7/dsh-knowledge)
-[![GitHub Release](https://img.shields.io/github/v/release/lemoncat7/dsh-knowledge)](https://github.com/lemoncat7/dsh-knowledge/releases/latest)
+[![GitHub release](https://img.shields.io/github/v/release/sibetlyf/dsh-knowledge)](https://github.com/sibetlyf/dsh-knowledge/releases/latest)
 [![awesome · DSH plugin](https://awesome-dsh-plugin.com/badge.svg)](https://awesome-dsh-plugin.com)
 
 `dsh-knowledge` 是面向 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) 的知识库插件。它不修改 DSH Agent Loop，同一个插件既能使用本地 SQLite，也能连接远程中央知识库。
@@ -124,28 +123,41 @@
 
 ## 安装
 
-从 npm 安装正式版：
+推荐使用 GitRef 安装，直接从仓库的指定 ref 获取：
 
 ```bash
-dsh plugin --profile web add @lemoncat7/dsh-knowledge
+# 固定发布标签；PowerShell 中 # 后的 ref 需要引号
+dsh plugin --profile web add "github:sibetlyf/dsh-knowledge#v2.15.0"
 ```
 
-需要固定版本时，将 `<version>` 替换为对应的发布版本：
+跟踪主分支：
 
 ```bash
-dsh plugin --profile web add @lemoncat7/dsh-knowledge@<version>
+dsh plugin --profile web add "github:sibetlyf/dsh-knowledge#main"
 ```
 
-也可以从 [GitHub Releases](https://github.com/lemoncat7/dsh-knowledge/releases) 下载对应版本的完整预构建包后安装：
+固定到某个 commit：
 
 ```bash
-dsh plugin --profile web add ./lemoncat7-dsh-knowledge-<version>.tgz
+dsh plugin --profile web add "github:sibetlyf/dsh-knowledge#089ca65"
+```
+
+也可以从 [GitHub Releases](https://github.com/sibetlyf/dsh-knowledge/releases) 下载对应版本的预构建 tgz 后安装：
+
+```bash
+dsh plugin --profile web add ./dsh-knowledge-<version>.tgz
+```
+
+npm 仍可作为备用源（仅当当前 registry 已发布 `dsh-knowledge`）：
+
+```bash
+dsh plugin --profile web add dsh-knowledge
 ```
 
 卸载：
 
 ```bash
-dsh plugin --profile web remove @lemoncat7/dsh-knowledge
+dsh plugin --profile web remove dsh-knowledge
 ```
 
 插件是标准 DSH profile bundle：`package.json` 的 `dsh.bundle.patch` 指向 `cordis.patch.yml`。安装后不需要单独运行知识库容器。
@@ -158,9 +170,9 @@ pnpm dsh web
 
 ## DSH 插件商店
 
-本仓库符合 DSH 社区目录的安装要求：声明了 `dsh.bundle`、发布了 npm 预构建包，并使用 GitHub `dsh-plugin` Topic。目录收录完成后，可在 DSH 的插件市场搜索 `dsh-knowledge` 或“知识库”，安装源为 `@lemoncat7/dsh-knowledge`。
+本仓库符合 DSH 社区目录的安装要求：声明了 `dsh.bundle`，提供 GitRef 安装入口，并使用 GitHub `dsh-plugin` Topic。目录收录完成后，可在 DSH 的插件市场搜索 `dsh-knowledge` 或“知识库”，安装源为 GitRef。
 
-插件商店的数据来自 [awesome-dsh-plugin.com](https://awesome-dsh-plugin.com)，不是单靠 npm 标签自动生成。若商店尚未刷新，可先使用上面的 npm 命令安装。
+插件商店的数据来自 [awesome-dsh-plugin.com](https://awesome-dsh-plugin.com)，不是单靠 npm 标签自动生成。若商店尚未刷新，可先使用上面的 GitRef 命令安装。
 
 ## 本地模式
 
@@ -168,7 +180,7 @@ pnpm dsh web
 
 ```yaml
 - id: knowledge
-  name: '@lemoncat7/dsh-knowledge'
+  name: 'dsh-knowledge'
   config:
     backend: local
     extractionEnabled: true
@@ -307,7 +319,7 @@ pnpm dsh web
 
 ```yaml
 - id: knowledge
-  name: '@lemoncat7/dsh-knowledge'
+  name: 'dsh-knowledge'
   config:
     backend: remote
     remoteUrl: 'https://knowledge.example.com/knowledge-api/v1'
