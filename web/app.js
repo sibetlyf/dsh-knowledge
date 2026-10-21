@@ -1508,6 +1508,10 @@ function renderSidebar() {
     element('div', { class: 'brand' },
       element('span', { class: 'brand-emblem', 'aria-hidden': 'true' }, element('span', {})),
       element('div', { class: 'brand-copy' }, element('strong', {}, '知识库')),
+      element('button', {
+        type: 'button', class: 'brand-collapse', title: '收起主导航栏', 'aria-label': '收起主导航栏',
+        onClick: () => setSidebarHidden(true),
+      }, '‹'),
     ),
     element('nav', { class: 'nav' }, navGroups.map(([group, items]) => element('div', { class: 'nav-group' },
       group.length > 0 ? element('div', { class: 'nav-group-label' }, group) : null,

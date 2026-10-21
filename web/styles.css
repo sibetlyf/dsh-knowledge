@@ -2540,3 +2540,8 @@ button, input, select, textarea, .button, .nav-button, .note-tree-base, .note-tr
 }
 .note-editor-scroll { grid-auto-rows: max-content; align-content: start; }
 .note-paper { min-height: 0; }
+
+.brand { position: relative; }
+.brand-collapse { margin-left: auto; width: 24px; height: 28px; flex: none; border: 0; border-radius: 7px; padding: 0; background: transparent; color: var(--text-tertiary); font: 18px/1 var(--font-reading); opacity: 0; cursor: pointer; transition: opacity .12s ease, background .12s ease; }
+.brand:hover .brand-collapse, .brand-collapse:focus-visible { opacity: 1; }
+.brand-collapse:hover { background: var(--surface-hover); color: var(--text); }
