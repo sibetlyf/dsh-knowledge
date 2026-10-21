@@ -2693,3 +2693,9 @@ button, input, select, textarea, .button, .nav-button, .note-tree-base, .note-tr
 .background-popover-hint { margin: 0; padding: 2px 4px 0; color: var(--text-tertiary); font-size: 10.5px; line-height: 1.5; }
 @media (max-width: 720px) { .background-popover { top: 64px; right: 10px; } }
 .note-directory-more { display: flex; justify-content: center; padding: 2px 0 6px; }
+/* Progressive group navigation */
+.graph-breadcrumb { display: flex; align-items: center; gap: 4px; flex-wrap: wrap; margin: 8px 0 0; color: var(--text-secondary); font-size: 12px; }
+.graph-crumb { display: inline-flex; align-items: center; gap: 4px; }
+.graph-crumb > span { color: var(--text-tertiary); }
+.graph-crumb button { border: 0; background: transparent; color: var(--text-secondary); padding: 2px 3px; border-radius: 5px; font: inherit; cursor: pointer; }
+.graph-crumb button:hover { color: var(--text); background: var(--material-control-hover); }

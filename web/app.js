@@ -98,7 +98,7 @@ const state = {
   entries: [],
   nextCursor: null,
   background: { status: null, error: '', updatedAt: 0, open: false },
-  graph: { baseId: '', loading: false, error: '', data: null, request: 0, renderer: null },
+  graph: { baseId: '', loading: false, error: '', data: null, request: 0, renderer: null, expandedGroups: [] },
   entryFilters: { query: '', type: '', status: 'active', projectId: '', knowledgeBaseId: '' },
   documents: [],
   documentView: createDocumentViewState({
@@ -4850,11 +4850,92 @@ async function pollBackgroundStatus() {
   }
 }
 
+function graphGroupPath(group) {
+  return String(group || '未分组')
+    .split(/\s*(?:·|\/|>|＞)\s*/u)
+    .map(part => part.trim())
+    .filter(Boolean)
+}
+
+function buildGraphGroupTree(data) {
+  const root = { label: '', path: [], children: new Map(), docs: [] }
+  for (const node of data?.nodes ?? []) {
+    let cursor = root
+    for (const segment of graphGroupPath(node.group)) {
+      let child = cursor.children.get(segment)
+      if (!child) {
+        child = { label: segment, path: [...cursor.path, segment], children: new Map(), docs: [] }
+        cursor.children.set(segment, child)
+      }
+      cursor = child
+    }
+    cursor.docs.push(node)
+  }
+  return root
+}
+
+function findGraphGroup(root, path) {
+  let cursor = root
+  for (const segment of path) {
+    cursor = cursor.children.get(segment)
+    if (!cursor) return root
+  }
+  return cursor
+}
+
+function graphGroupNode(group) {
+  return {
+    id: `group:${group.path.join('/')}`,
+    title: group.label,
+    group: group.path.join(' · '),
+    kind: 'group',
+    path: [...group.path],
+    degree: group.children.size + group.docs.length,
+    tags: [],
+  }
+}
+
+/** Show one level at a time; the path is the entire navigation state. */
+function graphVisibleData(data, path) {
+  if (!data) return undefined
+  const root = buildGraphGroupTree(data)
+  const current = findGraphGroup(root, path)
+  const nodes = []
+  if (current !== root) nodes.push(graphGroupNode(current))
+  for (const child of current.children.values()) nodes.push(graphGroupNode(child))
+  nodes.push(...current.docs.map(node => ({ ...node, kind: 'document' })))
+  const visibleIds = new Set(nodes.map(node => node.id))
+  const edges = []
+  if (current !== root) {
+    const groupId = `group:${current.path.join('/')}`
+    for (const child of current.children.values()) edges.push({ source: groupId, target: `group:${child.path.join('/')}`, reason: 'group', score: 1 })
+    for (const doc of current.docs) edges.push({ source: groupId, target: doc.id, reason: 'group', score: 1 })
+  }
+  for (const edge of data.edges ?? []) {
+    if (visibleIds.has(edge.source) && visibleIds.has(edge.target)) edges.push(edge)
+  }
+  return { ...data, nodes, edges }
+}
+
 function renderLinkGraph() {
   const data = state.graph.data
+  const visible = graphVisibleData(data, state.graph.expandedGroups)
   const bases = state.knowledgeBases.filter(base => base.status === 'active')
   const groups = new Map()
-  for (const node of data?.nodes ?? []) groups.set(node.group, (groups.get(node.group) ?? 0) + 1)
+  for (const node of visible?.nodes ?? []) {
+    const key = node.kind === 'group' ? node.title : node.group
+    groups.set(key, (groups.get(key) ?? 0) + 1)
+  }
+  const path = state.graph.expandedGroups
+  const back = () => {
+    if (path.length === 0) return
+    state.graph.expandedGroups = path.slice(0, -1)
+    renderShell()
+  }
+  const openGroup = group => {
+    state.graph.expandedGroups = [...group.path]
+    renderShell()
+  }
   return element('section', { class: 'graph-page', 'aria-label': '思维链接图' },
     element('div', { class: 'graph-toolbar graph-toolbar-top' },
       bases.length > 0
@@ -4863,16 +4944,28 @@ function renderLinkGraph() {
             class: 'select', 'aria-label': '选择知识库',
             onChange: event => {
               state.graph.baseId = event.target.value
+              state.graph.expandedGroups = []
               state.graph.data = null
               void loadKnowledgeGraph().then(() => renderShell())
             },
           }, bases.map(base => element('option', { value: base.id, selected: base.id === state.graph.baseId }, base.name))))
         : null,
+      path.length > 0 ? actionButton('← 返回上一级', back, 'ghost small', { 'aria-label': '返回上一级分组' }) : null,
       actionButton('重新计算', () => {
         state.graph.data = null
         void loadKnowledgeGraph().then(() => renderShell())
       }, 'ghost small'),
-      data ? element('span', { class: 'graph-count' }, `${data.nodes.length} 个节点 · ${data.edges.length} 条链接`) : null),
+      visible ? element('span', { class: 'graph-count' }, `${visible.nodes.length} 个节点 · ${visible.edges.length} 条链接`) : null),
+    path.length > 0
+      ? element('nav', { class: 'graph-breadcrumb', 'aria-label': '当前分组层级' },
+        actionButton('全部', () => { state.graph.expandedGroups = []; renderShell() }, 'ghost small'),
+        ...path.map((segment, index) => element('span', { class: 'graph-crumb' },
+          element('span', { 'aria-hidden': 'true' }, '/'),
+          element('button', { type: 'button', onClick: () => {
+            state.graph.expandedGroups = path.slice(0, index + 1)
+            renderShell()
+          } }, segment))))
+      : null,
     state.graph.error
       ? element('div', { class: 'panel' }, element('div', { class: 'panel-body' }, element('p', { role: 'alert' }, state.graph.error)))
       : null,
@@ -4883,29 +4976,30 @@ function renderLinkGraph() {
         element('div', { class: 'graph-legend' }, [...groups.entries()].sort((a, b) => b[1] - a[1]).slice(0, 8).map(([group, count]) =>
           element('span', { class: 'graph-legend-item' },
             element('i', { style: `background:${graphGroupColor(group)}`, 'aria-hidden': 'true' }), `${group} ${count}`)))),
-      data && data.nodes.length > 0
+      visible && visible.nodes.length > 0
         ? element('div', { class: 'graph-stage', 'data-graph-stage': '' },
           element('canvas', {
             class: 'graph-canvas', 'data-graph-canvas': '', role: 'img',
-            'aria-label': `${data.knowledgeBase.name} 的知识链接图，共 ${data.nodes.length} 个文档、${data.edges.length} 条链接`,
+            'aria-label': `${data.knowledgeBase.name} 的知识链接图，当前 ${visible.nodes.length} 个节点、${visible.edges.length} 条链接`,
           }),
           element('div', { class: 'graph-controls' },
             actionButton('＋', () => state.graph.renderer?.zoomIn(), 'ghost small', { 'aria-label': '放大链接图' }),
             actionButton('－', () => state.graph.renderer?.zoomOut(), 'ghost small', { 'aria-label': '缩小链接图' }),
             actionButton('适应', () => state.graph.renderer?.fit(), 'ghost small', { 'aria-label': '适应窗口' }),
             actionButton('导出图片', () => downloadGraphImage(), 'ghost small', { 'aria-label': '导出链接图图片' })),
-          element('p', { class: 'graph-hint' }, '拖动节点 · 滚轮缩放 · 点击打开文档'))
+          element('p', { class: 'graph-hint' }, '点击分组展开下一级 · 点击文档打开 · 拖动/滚轮缩放'))
         : compactEmpty(state.graph.loading ? '正在生成思维链接图' : '这个知识库还没有可绘制的文档'),
-      data && data.nodes.length > 0
-        ? element('div', { class: 'graph-node-list', 'aria-label': '链接图节点列表' }, data.nodes
+      visible && visible.nodes.length > 0
+        ? element('div', { class: 'graph-node-list', 'aria-label': '链接图节点列表' }, visible.nodes
           .slice()
           .sort((a, b) => b.degree - a.degree)
           .slice(0, 36)
           .map(node => element('button', {
-            type: 'button', class: 'graph-node-chip', onClick: () => openGraphNode(node),
-            title: node.group,
-          }, element('i', { style: `background:${graphGroupColor(node.group)}`, 'aria-hidden': 'true' }), node.title,
-          node.degree > 0 ? element('small', {}, String(node.degree)) : null)))
+            type: 'button', class: 'graph-node-chip',
+            onClick: () => node.kind === 'group' ? openGroup(node) : openGraphNode(node),
+            title: node.kind === 'group' ? `展开 ${node.group}` : node.group,
+          }, element('i', { style: `background:${graphGroupColor(node.kind === 'group' ? node.title : node.group)}`, 'aria-hidden': 'true' }), node.title,
+          node.kind === 'group' ? element('small', {}, '展开') : node.degree > 0 ? element('small', {}, String(node.degree)) : null)))
         : null)))
 }
 
@@ -4922,6 +5016,10 @@ async function loadKnowledgeGraph(signal) {
     const data = await api(`graph?knowledgeBaseId=${encodeURIComponent(selected.id)}&limit=80`, { signal })
     if (state.graph.request !== request || signal?.aborted) return
     state.graph.data = data
+    if (state.graph.expandedGroups.length > 0) {
+      const resolved = findGraphGroup(buildGraphGroupTree(data), state.graph.expandedGroups)
+      if (resolved.path.length === 0) state.graph.expandedGroups = []
+    }
   } catch (error) {
     if (signal?.aborted) return
     if (error.status === 401 && AUTH_MODE === 'bearer') return signOut()
@@ -4932,6 +5030,11 @@ async function loadKnowledgeGraph(signal) {
 }
 
 function openGraphNode(node) {
+  if (node.kind === 'group') {
+    state.graph.expandedGroups = [...(node.path ?? [])]
+    renderShell()
+    return
+  }
   const baseId = state.graph.data?.knowledgeBase?.id
   if (!baseId) return
   state.documentView.knowledgeBaseId = baseId
@@ -4964,7 +5067,9 @@ function mountKnowledgeGraph(shell) {
   state.graph.renderer = undefined
   const canvas = shell.querySelector('[data-graph-canvas]')
   if (!canvas || !state.graph.data) return
-  state.graph.renderer = createKnowledgeGraphRenderer(canvas, state.graph.data, { onOpen: openGraphNode })
+  const visible = graphVisibleData(state.graph.data, state.graph.expandedGroups)
+  if (!visible || visible.nodes.length === 0) return
+  state.graph.renderer = createKnowledgeGraphRenderer(canvas, visible, { onOpen: openGraphNode })
 }
 
 function createKnowledgeGraphRenderer(canvas, data, options) {

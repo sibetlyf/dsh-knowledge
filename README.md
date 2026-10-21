@@ -33,7 +33,7 @@
 - **知识库与多范围挂载**：
   - 知识库与文档分组、FTS5 全文检索、项目和会话多层级挂载，按精确权限召回与回写。
   - **全量双向链接**：每篇知识文档自动显示「关联文档 / 反向链接」，按共同标签、同一分组与标题主题计算关联；只读/定稿预览中的 `[[文档标题]]` 渲染为可点击链接并支持反向跳转，无需手工维护。
-  - **思维链接图**：管理台「思维链接」页把整库文档画成动态力导向关系图，支持拖动、缩放、悬停高亮、点击打开文档与导出 PNG，并可从任意文档的「关系图」按钮直接进入。
+  - **思维链接图**：默认只展示一级分组，点击分组逐级展开其子分组与文档，点击文档才打开正文；顶部「返回上一级」/「全部」和面包屑用于快速回到浅层，支持拖动、缩放、悬停高亮与导出 PNG。
   - **后台运行可视化**：顶栏右侧常驻后台状态卡实时显示自动归档、知识回写与日报整理的排队/进度，完成后短暂提示；空闲时显示“后台自动整理”已开启。
   - **阅读优先的布局**：正文、导航与目录字号整体放大；知识目录改为可滑出的抽屉，不再永久占用左侧第三列，文档区域默认占满宽度。
   - **自动恢复与自动保存**：再次打开知识文档会恢复上次阅读的文档，没有历史时自动打开最近更新的一篇；编辑后停止输入约 1.4 秒自动保存，减少“找文档、点保存”的重复操作。
@@ -66,7 +66,7 @@
 
 ```bash
 # 固定到当前发布标签（Windows PowerShell 需要给 # 后的 ref 加引号）
-dsh plugin --profile web add "github:sibetlyf/dsh-knowledge#v2.15.0"
+dsh plugin --profile web add "github:sibetlyf/dsh-knowledge#v2.15.1"
 ```
 
 跟踪主分支的最新提交：
@@ -86,14 +86,14 @@ dsh plugin --profile web add "github:sibetlyf/dsh-knowledge#089ca65"
 发布新版本时，先更新 `package.json` 的版本号，再打同名 tag 并推送；GitRef 用户即可固定到该 tag：
 
 ```bash
-git tag v2.15.1
-git push origin v2.15.1
+git tag v2.15.2
+git push origin v2.15.2
 ```
 
 对应的安装命令：
 
 ```bash
-dsh plugin --profile web add "github:sibetlyf/dsh-knowledge#v2.15.1"
+dsh plugin --profile web add "github:sibetlyf/dsh-knowledge#v2.15.2"
 ```
 
 仍可使用 npm 作为备用安装源（仅当当前 registry 已发布 `dsh-knowledge`）：
