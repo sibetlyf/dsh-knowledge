@@ -2422,3 +2422,9 @@ button, input, select, textarea, .button, .nav-button, .note-tree-base, .note-tr
 .topbar { flex-wrap: wrap; row-gap: 6px; }
 
 .note-preview-title + .markdown-preview { margin-top: 14px; }
+
+.topbar-title { min-width: 0; flex: 1 1 auto; }
+.topbar > .background-indicator { max-width: min(380px, 42vw); }
+@media (max-width: 1200px) {
+  .topbar > .background-indicator { display: none; }
+}
