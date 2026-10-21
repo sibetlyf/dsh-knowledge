@@ -578,7 +578,7 @@ export function apply(ctx: Context, config: KnowledgeConfig): void {
                     job.counts.skipped += summary.skipped
                     job.counts.failed += summary.failed
                     job.items.push(...summary.items)
-                    if (job.items.length > 500) job.items = job.items.slice(-500)
+                    if (job.items.length > 1000) job.items = job.items.slice(-1000)
                   }
                   job.status = 'done'
                 } catch (error) {
@@ -616,7 +616,7 @@ export function apply(ctx: Context, config: KnowledgeConfig): void {
                 return
               }
               res.writeHead(200, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' })
-                .end(JSON.stringify({ ...job, items: job.items.slice(-400), itemsTruncated: job.items.length > 400 }))
+                .end(JSON.stringify({ ...job, items: job.items, itemsTruncated: job.items.length >= 1000 }))
               return
             }
             const id = rest.replace(/\/+$/u, '')
