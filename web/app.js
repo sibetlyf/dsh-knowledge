@@ -4385,10 +4385,10 @@ function openFolderImportDialog() {
         if (!response.ok) throw Object.assign(new Error(data.error || `导入失败（${response.status}）`), { status: response.status })
         if (data.accepted === 0) { showToast('该文件夹中没有可导入的文件。', 'error'); return false }
         try { localStorage.setItem(folderKey, data.root || path) } catch { /* ignore */ }
-        showToast(`已加入后台队列：${data.accepted} 个文件${data.truncated ? '（达到上限，剩余文件未导入）' : ''}`, 'success')
         if (typeof data.jobId === 'string') {
-          window.setTimeout(() => openFolderImportReport(data.jobId, data.accepted), 180)
+          showImportBubble(data.jobId, data.accepted)
         } else {
+          showToast(`已加入后台队列：${data.accepted} 个文件${data.truncated ? '（达到上限，剩余文件未导入）' : ''}`, 'success')
           window.setTimeout(() => { if (state.view === 'files') void navigate('files') }, 2000)
         }
         return true
@@ -4412,6 +4412,71 @@ async function fetchImportReport(jobId, signal) {
   const data = await response.json().catch(() => ({}))
   if (!response.ok) throw Object.assign(new Error(data.error || `读取整理明细失败（${response.status}）`), { status: response.status })
   return data
+}
+
+let activeImportBubble
+function showImportBubble(jobId, accepted) {
+  activeImportBubble?.dispose()
+  const title = element('strong', {}, `正在整理 ${accepted} 个文件…`)
+  const detail = element('span', {}, '正在读取整理进度')
+  const more = element('small', {}, '')
+  const action = element('button', { type: 'button', class: 'import-bubble-action' }, '查看进度')
+  const close = element('button', { type: 'button', class: 'import-bubble-close', 'aria-label': '关闭整理提示' }, '×')
+  const bubble = element('aside', {
+    class: 'import-bubble', role: 'status', 'aria-live': 'polite', 'aria-label': '文件夹整理提示',
+  }, element('span', { class: 'import-bubble-mark', 'aria-hidden': 'true' }),
+  element('div', { class: 'import-bubble-copy' }, title, detail, more), action, close)
+  document.body.append(bubble)
+  let timer
+  let stopped = false
+  const dispose = () => {
+    if (stopped) return
+    stopped = true
+    window.clearInterval(timer)
+    bubble.remove()
+    if (activeImportBubble?.dispose === dispose) activeImportBubble = undefined
+  }
+  const render = job => {
+    const counts = job.counts || {}
+    const items = Array.isArray(job.items) ? job.items : []
+    const done = job.status === 'done' || job.status === 'failed'
+    title.textContent = job.status === 'failed' ? '整理中断' : done ? '整理完成' : `正在整理 ${job.processed || 0} / ${job.accepted || accepted}`
+    detail.textContent = done
+      ? `新增 ${counts.created || 0} · 更新 ${counts.updated || 0} · 未变 ${counts.unchanged || 0} · 跳过 ${counts.skipped || 0}${(counts.failed || 0) > 0 ? ` · 失败 ${counts.failed}` : ''}`
+      : `已处理 ${job.processed || 0} / ${job.accepted || accepted} · 新增 ${counts.created || 0} · 跳过 ${counts.skipped || 0}`
+    const groups = new Map()
+    for (const item of items) {
+      if (item.action !== 'created' && item.action !== 'updated' && item.action !== 'unchanged') continue
+      const key = `${item.knowledgeBaseName || '知识库'} · ${item.group || '未分组'}`
+      groups.set(key, (groups.get(key) || 0) + 1)
+    }
+    more.textContent = done
+      ? [...groups.entries()].slice(0, 2).map(([name, count]) => `${name} ${count}`).join('  ·  ')
+      : '完成后可查看逐文件明细'
+    action.textContent = done ? '查看明细' : '查看进度'
+    if (done) window.clearInterval(timer)
+  }
+  action.addEventListener('click', () => {
+    dispose()
+    openFolderImportReport(jobId, accepted)
+  })
+  close.addEventListener('click', dispose)
+  const poll = async () => {
+    if (stopped || !bubble.isConnected) return dispose()
+    try {
+      const job = await fetchImportReport(jobId)
+      if (!stopped) render(job)
+    } catch (error) {
+      if (stopped) return
+      title.textContent = '整理状态暂不可用'
+      detail.textContent = friendlyError(error)
+      action.textContent = '查看明细'
+      window.clearInterval(timer)
+    }
+  }
+  activeImportBubble = { dispose }
+  timer = window.setInterval(() => { void poll() }, 800)
+  window.setTimeout(() => { void poll() }, 120)
 }
 
 function openFolderImportReport(jobId, accepted) {
