@@ -50,7 +50,7 @@ const NOTE_MAX_FILE_SIZE = 64 * 1024 * 1024
 const pageParams = new URLSearchParams(location.search)
 const initialKnowledgeBaseId = pageParams.get('knowledgeBaseId')?.trim() || ''
 const initialDocumentId = pageParams.get('documentId')?.trim() || ''
-const initialView = ['notes', 'writeback', 'worklog'].includes(pageParams.get('view')) ? pageParams.get('view') : 'entries'
+const initialView = ['notes', 'writeback', 'worklog', 'files'].includes(pageParams.get('view')) ? pageParams.get('view') : 'entries'
 const initialNoteId = pageParams.get('noteId')?.trim() || ''
 const mountContext = {
   sessionId: pageParams.get('sessionId')?.trim() || '',
@@ -267,6 +267,13 @@ const { api, binaryRequest, binaryUploadRequest } = createApiClient({
   getToken: () => state.token,
 })
 
+let folderImportOpened = false
+function openRequestedFolderImport() {
+  if (folderImportOpened || pageParams.get('importFolder') === null) return
+  folderImportOpened = true
+  window.setTimeout(() => { if (document.querySelector('.app-shell')) openFolderImportDialog() }, 250)
+}
+
 async function boot() {
   startBackgroundPolling()
   if (AUTH_MODE === 'same-origin') {
@@ -277,6 +284,7 @@ async function boot() {
       document.querySelector('.sidebar')?.replaceWith(renderSidebar())
     }).catch(() => {})
     await navigate(initialView)
+    openRequestedFolderImport()
     return
   }
   if (!state.token) {
@@ -286,6 +294,7 @@ async function boot() {
   try {
     state.knowledgeBases = await api('knowledge-bases')
     await navigate(initialView)
+    openRequestedFolderImport()
   } catch (error) {
     sessionStorage.removeItem(TOKEN_KEY)
     state.token = ''
@@ -314,6 +323,7 @@ function renderLogin(message = '') {
         sessionStorage.setItem(TOKEN_KEY, token)
         await navigate(initialView)
         startBackgroundPolling()
+        openRequestedFolderImport()
       } catch (requestError) {
         state.token = ''
         error.textContent = requestError.status === 401 ? '令牌无效或已被撤销。' : '连接失败，请检查服务状态后重试。'

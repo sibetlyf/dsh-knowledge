@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import { WritebackStatusClient } from './writeback/status-client.js'
 import { createNoteMentionSource } from './note-mention-source.js'
 import { createKnowledgeBaseMentionSource } from './knowledge-base-mention-source.js'
+import { createFolderImportSource } from './folder-import-source.js'
 import type {} from '@deepseek-ai/dsh-client-ui-input-trigger/client'
 import { observeWritebackVisibility } from './writeback/status-visibility.js'
 import { subscribeWritebackChanges } from '../web/writeback-live.js'
@@ -23,6 +24,7 @@ import { activatePluginWorkspace, observePluginWorkspace } from './workspace-own
 import {
   IconChevronLeftOutlineRegular as IconChevronLeftOutline14,
   IconDataOutlineRegular as IconDataOutline16,
+  IconFolderOpenOutlineRegular as IconFolderOpenOutline16,
   IconPanelLeftOutlineRegular as IconPanelLeftOutline16,
 } from '@deepseek-ai/dsh-client-ui-primitives'
 import { knowledgeDesignCss } from './design-tokens.js'
@@ -71,6 +73,7 @@ export type KnowledgeDocumentTarget =
   | { view?: 'entries'; knowledgeBaseId: string; documentId: string }
   | { view: 'notes'; noteId?: string }
   | { view: 'writeback'; sessionId: string }
+  | { view: 'files'; folderImport?: number }
 
 
 const CONNECTION_CONTROL_PATH = '/knowledge-control/v1/connection'
@@ -91,6 +94,9 @@ export function apply(ctx: ClientContext): void {
     )), 'dsh-knowledge: @ note documents')
     scoped.effect(() => scoped.inputTriggers.registerSource(createKnowledgeBaseMentionSource()),
       'dsh-knowledge: @ knowledge bases')
+    scoped.effect(() => scoped.inputTriggers.registerSource(createFolderImportSource(
+      () => { window.setTimeout(() => workspace.openDocument({ view: 'files', folderImport: Date.now() }), 0) },
+    )), 'dsh-knowledge: @ folder import')
   })
   activity = createKnowledgeActivityController(ctx, {
     beforeOpen: () => { workspace.close(); if (!docked) activatePluginWorkspace(PLUGIN_ID) },
@@ -117,6 +123,11 @@ export function apply(ctx: ClientContext): void {
     name: 'conversation.chat.turnTail',
     id: 'knowledge-writeback-status',
   }, props => <KnowledgeWritebackStatus sessionId={String(props.sessionId)} turn={props.turn.turn} workspace={workspace} />))
+  ctx.slots.inject('conversation.input.left', () => ctx.slots.register({
+    name: 'conversation.input.left',
+    id: 'knowledge-folder-import',
+    order: 20,
+  }, () => <KnowledgeFolderEntry workspace={workspace} />))
 }
 
 function KnowledgeWritebackStatus({
@@ -222,6 +233,18 @@ function createKnowledgeWorkspaceController(client: ClientContext, beforeOpen: (
     },
   }
   return controller
+}
+
+function KnowledgeFolderEntry({ workspace }: { workspace: KnowledgeWorkspaceController }) {
+  return <button
+    type="button"
+    className="dsh-knowledge-folder-entry"
+    aria-label="导入文件夹到知识库"
+    title="导入文件夹"
+    onClick={() => workspace.openDocument({ view: 'files', folderImport: Date.now() })}
+  >
+    <IconFolderOpenOutline16 size={16} />
+  </button>
 }
 
 function KnowledgeConnectionCard() {
@@ -581,6 +604,9 @@ function knowledgePanelUrl(managementPath: string, sessionId?: string, projectId
     } else if (target.view === 'notes') {
       params.set('view', 'notes')
       if (target.noteId !== undefined) params.set('noteId', target.noteId)
+    } else if (target.view === 'files') {
+      params.set('view', 'files')
+      if (target.folderImport !== undefined) params.set('importFolder', String(target.folderImport))
     } else {
       params.set('knowledgeBaseId', target.knowledgeBaseId)
       params.set('documentId', target.documentId)
