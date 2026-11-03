@@ -23,6 +23,11 @@ export interface KnowledgeApiOptions {
   worklog?: (method: string, path: string, data: Record<string, unknown>, query: URLSearchParams) => Promise<unknown>
   shareRequestPolicy?: () => NoteShareRequestPolicy
   optimize?: (documentId: string, signal: AbortSignal) => Promise<unknown>
+  tencentDocs?: {
+    status(signal?: AbortSignal): Promise<unknown>
+    importDocument(input: { url: string; knowledgeBaseId?: string; title?: string; group?: string }, signal?: AbortSignal): Promise<unknown>
+    publish(documentId: string, signal?: AbortSignal): Promise<unknown>
+  }
   authMode?: 'bearer' | 'same-origin'
   service?: {
     current(): {
@@ -297,6 +302,33 @@ async function dispatch(
       provider.deleteNoteReferences(noteIds)
       return sendJson(res, 204, undefined)
     }
+  }
+
+  if (segments[0] === 'tencent-docs' && segments.length === 2 && options.tencentDocs !== undefined) {
+    if (segments[1] === 'status' && method === 'GET') {
+      requirePermission(actor.permissions, 'read')
+      return sendJson(res, 200, await options.tencentDocs.status())
+    }
+    if (segments[1] === 'import' && method === 'POST') {
+      requirePermission(actor.permissions, 'write')
+      const body = await readObject(req)
+      const url = typeof body.url === 'string' ? body.url.trim() : ''
+      if (url.length === 0) throw httpError(400, 'url is required')
+      return sendJson(res, 200, await options.tencentDocs.importDocument({
+        url,
+        ...typeof body.knowledgeBaseId === 'string' && body.knowledgeBaseId.trim() ? { knowledgeBaseId: body.knowledgeBaseId.trim() } : {},
+        ...typeof body.title === 'string' && body.title.trim() ? { title: body.title.trim() } : {},
+        ...typeof body.group === 'string' && body.group.trim() ? { group: body.group.trim() } : {},
+      }))
+    }
+    if (segments[1] === 'publish' && method === 'POST') {
+      requirePermission(actor.permissions, 'write')
+      const body = await readObject(req)
+      const documentId = typeof body.documentId === 'string' ? body.documentId.trim() : ''
+      if (documentId.length === 0) throw httpError(400, 'documentId is required')
+      return sendJson(res, 200, await options.tencentDocs.publish(documentId))
+    }
+    throw httpError(404, 'tencent docs action was not found')
   }
 
   if (method === 'POST' && segments[0] === 'optimize' && segments.length === 1 && options.optimize !== undefined) {

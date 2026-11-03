@@ -13,6 +13,7 @@ import { createUploadReader } from './artifacts/uploads.js'
 import { createKnowledgeWatcher } from './knowledge-watcher.js'
 import { createKnowledgeIntegration, createKnowledgeWriteBus, KNOWLEDGE_INTEGRATION_SERVICE } from './integration.js'
 import { optimizeKnowledgeDocument } from './optimize.js'
+import { createTencentDocsBridge } from './tencent-docs.js'
 import { migrateLegacyKnowledgeStore } from './migrate-knowledge-store.js'
 import { createWritableMountGuard } from './auto-writable.js'
 import { createPendingAutoApprover } from './auto-approve.js'
@@ -249,6 +250,7 @@ export function apply(ctx: Context, config: KnowledgeConfig): void {
   }
   const handleCodec = new KnowledgeHandleCodec(randomBytes(32))
   const noteHandleCodec = new KnowledgeNoteHandleCodec(randomBytes(32))
+  const tencentDocs = createTencentDocsBridge(runtime, provider)
   const optimizeDocument = async (documentId: string, signal: AbortSignal): Promise<{ id: string; version: number; title: string; body: string }> => {
     const entry = await provider.get(documentId)
     if (entry === undefined || entry.status !== 'active') throw connectionError(404, '知识文档不存在或已归档')
@@ -451,6 +453,7 @@ export function apply(ctx: Context, config: KnowledgeConfig): void {
           worklog: journalDispatch,
           shareRequestPolicy: () => ({ trustedPrivateOrigins: trustedShareOrigins }),
           optimize: optimizeDocument,
+          tencentDocs,
         })
       }
     }
@@ -529,6 +532,7 @@ export function apply(ctx: Context, config: KnowledgeConfig): void {
           service: { current: publicApiView, update: updateClientSettings },
           shareRequestPolicy: () => ({ trustedPrivateOrigins: trustedShareOrigins }),
           optimize: optimizeDocument,
+          tencentDocs,
         })
       }
     }

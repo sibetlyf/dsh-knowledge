@@ -2261,6 +2261,7 @@ function renderDocumentDirectory(workspace, base, readOnly) {
         element('p', {}, searching ? `${documents.length} 条匹配文档` : `${documents.length} 篇文档 · ${managing.length} 个知识库`)),
       element('div', { class: 'note-editor-actions' },
         actionButton('刷新', () => { void navigate('entries') }, 'ghost small'),
+        !readOnly ? actionButton('从腾讯文档导入', () => { void importTencentDocument(workspace) }, 'ghost small') : null,
         !readOnly ? actionButton('新建文档', () => { void startBlankDocument(workspace, view.knowledgeBaseId || managing[0]?.id) }, 'primary small') : null)),
     element('div', { class: 'note-editor-scroll note-directory-scroll', 'data-scroll-key': 'note-directory' },
       documents.length === 0 ? empty : baseSections))
@@ -2275,6 +2276,39 @@ async function backToDocumentDirectory(workspace) {
   workspace.view.editor = null
   workspace.view.editorLoading = false
   renderShell()
+}
+
+async function importTencentDocument(workspace) {
+  const url = window.prompt('粘贴腾讯文档链接（docs.qq.com/doc/...、sheet/... 或 slide/...）')
+  if (url === null || url.trim().length === 0) return
+  try {
+    const result = await api('tencent-docs/import', {
+      method: 'POST',
+      body: {
+        url: url.trim(),
+        ...workspace.view.knowledgeBaseId ? { knowledgeBaseId: workspace.view.knowledgeBaseId } : {},
+      },
+    })
+    showToast(`已导入腾讯文档：${result.title}`, 'success')
+    await loadDocuments()
+    renderShell()
+  } catch (error) {
+    showToast(friendlyError(error), 'error')
+  }
+}
+
+async function publishTencentDocument(workspace, editor) {
+  if (editor.dirty) {
+    const saved = await saveDocumentEditor(workspace, { silent: true })
+    if (!saved) return
+  }
+  try {
+    const result = await api('tencent-docs/publish', { method: 'POST', body: { documentId: editor.id } })
+    showToast(result.url ? `已发布到腾讯文档：${result.url}` : '已发布到腾讯文档。', 'success')
+    if (result.url) window.open(result.url, '_blank', 'noopener,noreferrer')
+  } catch (error) {
+    showToast(friendlyError(error), 'error')
+  }
 }
 
 function renderNoteEditor(workspace, editor, base) {
@@ -2332,6 +2366,7 @@ function renderNoteEditor(workspace, editor, base) {
         element('span', { class: 'editor-save-status', role: 'status' }, editor.saveState),
         finalized && !readOnly ? actionButton('重新打开', () => reopenDocument(workspace, editor), 'small') : null,
         !readOnly && !finalized && !editor.isNew ? actionButton('优化格式', () => { void optimizeDocumentEditor(workspace, editor) }, 'ghost small') : null,
+        !readOnly && !finalized && !editor.isNew ? actionButton('发布到腾讯文档', () => { void publishTencentDocument(workspace, editor) }, 'ghost small') : null,
         !readOnly && !finalized ? actionButton(editor.isNew ? '创建文档' : '保存', () => { void saveDocumentEditor(workspace).then(saved => { if (saved) renderShell() }) }, 'primary small') : null,
         !readOnly && !editor.isNew ? renderDocumentMenu(editor.title || '知识文档', [
           [
