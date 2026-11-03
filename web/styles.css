@@ -2699,3 +2699,6 @@ button, input, select, textarea, .button, .nav-button, .note-tree-base, .note-tr
 .graph-crumb > span { color: var(--text-tertiary); }
 .graph-crumb button { border: 0; background: transparent; color: var(--text-secondary); padding: 2px 3px; border-radius: 5px; font: inherit; cursor: pointer; }
 .graph-crumb button:hover { color: var(--text); background: var(--material-control-hover); }
+.automation-token-row { display: flex; align-items: center; gap: 6px; }
+.automation-token-row .input { flex: 1; min-width: 0; }
+.automation-tencent .field-hint { margin: 0; }

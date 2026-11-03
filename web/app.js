@@ -98,6 +98,7 @@ const state = {
   entries: [],
   nextCursor: null,
   background: { status: null, error: '', updatedAt: 0, open: false },
+  tencentDocs: { status: null, loading: false, error: '' },
   graph: { baseId: '', loading: false, error: '', data: null, request: 0, renderer: null, expandedGroups: [] },
   entryFilters: { query: '', type: '', status: 'active', projectId: '', knowledgeBaseId: '' },
   documents: [],
@@ -1605,8 +1606,81 @@ function errorView(message, retry) {
   return element('div', { class: 'error-state', role: 'alert' }, element('p', {}, message), actionButton('重试', retry, 'small'))
 }
 
+function loadTencentDocsStatus() {
+  if (state.tencentDocs.loading) return
+  state.tencentDocs.loading = true
+  void api('tencent-docs/status').then(status => {
+    state.tencentDocs.status = status
+    state.tencentDocs.error = ''
+  }).catch(error => {
+    state.tencentDocs.error = friendlyError(error)
+    state.tencentDocs.status = {
+      connected: false,
+      tools: [],
+      endpoint: '',
+      token: { configured: false, source: 'none', fingerprint: '(无)', overriddenByEnv: false },
+    }
+  }).finally(() => {
+    state.tencentDocs.loading = false
+    if (state.view === 'automation') renderShell()
+  })
+}
+
+async function saveTencentDocsTokenFromUi(input, button) {
+  const token = input.value.trim()
+  if (token.length === 0) return showToast('请输入腾讯文档 space_secret。', 'error')
+  button.disabled = true
+  try {
+    state.tencentDocs.status = await api('tencent-docs/token', { method: 'POST', body: { token } })
+    input.value = ''
+    state.tencentDocs.error = ''
+    showToast('token 已保存到本地 vault；桥插件会在约 15 秒内自动挂载。', 'success')
+    renderShell()
+  } catch (error) {
+    showToast(friendlyError(error), 'error')
+  } finally {
+    button.disabled = false
+  }
+}
+
+async function clearTencentDocsTokenFromUi(button) {
+  button.disabled = true
+  try {
+    state.tencentDocs.status = await api('tencent-docs/token', { method: 'DELETE' })
+    state.tencentDocs.error = ''
+    showToast('腾讯文档 token 已清除。', 'success')
+    renderShell()
+  } catch (error) {
+    showToast(friendlyError(error), 'error')
+  } finally {
+    button.disabled = false
+  }
+}
+
 function renderAutomation() {
   const service = state.service || {}
+  if (state.tencentDocs.status === null && !state.tencentDocs.loading) loadTencentDocsStatus()
+  const tencent = state.tencentDocs.status
+  const tencentInput = element('input', {
+    class: 'input', type: 'password', placeholder: '32 位 space_secret', autocomplete: 'off',
+    spellcheck: 'false', 'aria-label': '腾讯文档 space_secret',
+  })
+  const tencentSave = actionButton('保存 token', () => { void saveTencentDocsTokenFromUi(tencentInput, tencentSave) }, 'small')
+  const tencentClear = tencent?.token?.configured
+    ? actionButton('清除', () => { void clearTencentDocsTokenFromUi(tencentClear) }, 'ghost small')
+    : null
+  const tencentState = state.tencentDocs.error
+    ? `状态读取失败：${state.tencentDocs.error}`
+    : !tencent
+      ? '正在读取连接状态…'
+      : tencent.connected
+        ? `已连接 · ${tencent.tools.length} 个工具`
+        : tencent.token?.configured
+          ? 'token 已保存，等待桥插件重连'
+          : '未连接 · 需要登录或输入 token'
+  const tencentDetail = tencent?.token?.configured
+    ? `${tencent.token.fingerprint}${tencent.token.source === 'env' ? ' · 由环境变量覆盖' : ''}`
+    : '保存后无需重启 DSH'
   const autoApprove = element('input', { type: 'checkbox', checked: service.autoApprovePendingEnabled !== false })
   const tokenSaving = element('input', { type: 'checkbox', checked: service.tokenSavingEnabled !== false })
   const organizeTrigger = element('select', { class: 'select', 'aria-label': '自动整理触发方式' },
@@ -1660,6 +1734,13 @@ function renderAutomation() {
         element('h3', {}, '知识库 token'),
         element('p', { class: 'field-hint' }, '开启后限制提取输入/输出与自动召回量，降低知识库上下文消耗。'),
         element('label', { class: 'automation-switch' }, tokenSaving, element('span', {}, '启用节省模式')))),
+      element('section', { class: 'panel' }, element('div', { class: 'panel-body automation-card automation-tencent' },
+        element('h3', {}, '腾讯文档'),
+        element('p', { class: 'field-hint' }, tencentState),
+        element('p', { class: 'field-hint' }, tencentDetail),
+        element('div', { class: 'automation-token-row' }, tencentInput, tencentSave),
+        tencentClear ? element('div', { class: 'automation-token-row' }, tencentClear) : null,
+        element('small', { class: 'field-hint' }, 'token 只写入本地 vault，不进入知识库数据库；保存后约 15 秒自动生效。'))),
     ),
     element('div', { class: 'automation-actions' }, save),
   )

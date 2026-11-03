@@ -1,6 +1,12 @@
 import { DEFAULT_KNOWLEDGE_BASE_ID } from './domain.js'
 import type { KnowledgeProvider } from './provider.js'
 import type { RuntimeContextLike } from './runtime.js'
+import {
+  clearTencentDocsToken,
+  readTencentDocsToken,
+  saveTencentDocsToken,
+  type TencentDocsTokenStatus,
+} from './tencent-docs-token.js'
 
 interface ToolSchemaLike {
   name: string
@@ -27,6 +33,7 @@ export interface TencentDocsStatus {
   connected: boolean
   tools: string[]
   endpoint: string
+  token: TencentDocsTokenStatus
 }
 
 export interface TencentDocsImportInput {
@@ -67,11 +74,21 @@ export function createTencentDocsBridge(ctx: RuntimeContextLike, provider: Knowl
   }
   const tools = (): ToolSchemaLike[] => schemas().filter(tool => tool.name.startsWith(PREFIX))
 
-  const status = async (): Promise<TencentDocsStatus> => ({
-    connected: tools().length > 0,
-    tools: tools().map(tool => tool.name.slice(PREFIX.length)),
-    endpoint: ENDPOINT,
-  })
+  const status = async (): Promise<TencentDocsStatus> => {
+    const token = await readTencentDocsToken()
+    const available = tools()
+    return {
+      connected: available.length > 0,
+      tools: available.map(tool => tool.name.slice(PREFIX.length)),
+      endpoint: ENDPOINT,
+      token: {
+        configured: token.configured,
+        source: token.source,
+        fingerprint: token.fingerprint,
+        overriddenByEnv: token.overriddenByEnv,
+      },
+    }
+  }
 
   const find = (suffix: string): ToolSchemaLike | undefined =>
     tools().find(tool => tool.name.slice(PREFIX.length) === suffix || tool.name.slice(PREFIX.length).endsWith(`_${suffix}`))
@@ -94,6 +111,14 @@ export function createTencentDocsBridge(ctx: RuntimeContextLike, provider: Knowl
 
   return {
     status,
+    async saveToken(token: string): Promise<TencentDocsStatus> {
+      await saveTencentDocsToken(token)
+      return status()
+    },
+    async clearToken(): Promise<TencentDocsStatus> {
+      await clearTencentDocsToken()
+      return status()
+    },
     async importDocument(input: TencentDocsImportInput, signal = new AbortController().signal): Promise<TencentDocsImportResult> {
       const fileId = tencentDocsFileId(input.url)
       const tool = find('get_content')

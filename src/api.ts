@@ -25,6 +25,8 @@ export interface KnowledgeApiOptions {
   optimize?: (documentId: string, signal: AbortSignal) => Promise<unknown>
   tencentDocs?: {
     status(signal?: AbortSignal): Promise<unknown>
+    saveToken(token: string): Promise<unknown>
+    clearToken(): Promise<unknown>
     importDocument(input: { url: string; knowledgeBaseId?: string; title?: string; group?: string }, signal?: AbortSignal): Promise<unknown>
     publish(documentId: string, signal?: AbortSignal): Promise<unknown>
   }
@@ -308,6 +310,17 @@ async function dispatch(
     if (segments[1] === 'status' && method === 'GET') {
       requirePermission(actor.permissions, 'read')
       return sendJson(res, 200, await options.tencentDocs.status())
+    }
+    if (segments[1] === 'token' && method === 'POST') {
+      requirePermission(actor.permissions, 'write')
+      const body = await readObject(req)
+      const token = typeof body.token === 'string' ? body.token.trim() : ''
+      if (token.length === 0) throw httpError(400, 'token is required')
+      return sendJson(res, 200, await options.tencentDocs.saveToken(token))
+    }
+    if (segments[1] === 'token' && method === 'DELETE') {
+      requirePermission(actor.permissions, 'write')
+      return sendJson(res, 200, await options.tencentDocs.clearToken())
     }
     if (segments[1] === 'import' && method === 'POST') {
       requirePermission(actor.permissions, 'write')
