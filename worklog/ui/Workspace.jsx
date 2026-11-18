@@ -9,7 +9,6 @@ import { ActionMenu } from './ActionMenu.jsx'
 import { defaults } from '../domain.js'
 import { Sources, SourceViewer } from './Sources.jsx'
 import { History } from './History.jsx'
-import { DailyBoard } from './DailyBoard.jsx'
 
 const statuses = { queued: '等待整理', running: '正在整理', failed: '整理失败', cancelled: '已取消', done: '整理完成' }
 export function Workspace({ close, openSession, embedded = false, currentProject = '' }) {
@@ -108,7 +107,6 @@ export function Workspace({ close, openSession, embedded = false, currentProject
           {active && <button disabled={busy} onClick={() => act('/cancel', { id: detail.job.id })}>取消</button>}
           {['failed', 'cancelled'].includes(detail.job.status) && <button disabled={busy} onClick={generate}>重新整理</button>}
         </div>}
-        <DailyBoard key={day} day={day} onMessage={setMessage} />
         {detail.report.markdown ? <article className="wl-document"><Markdown text={detail.report.markdown} onEvidence={setEvidence} /></article> : <div className="wl-empty"><h3>把今天做的事，整理成一份日报</h3><p>只采集用户会话，不采集内部委派子会话；整理时才调用模型。</p></div>}
         <Sources key={day} day={day} summary={detail} version={`${version}:${dataVersion}`} busy={busy} act={act} time={time} onEvidence={setEvidence} />
       </>}

@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useRef, useState, type FormEvent } from 'react'
 import { WritebackStatusClient } from './writeback/status-client.js'
 import { createNoteMentionSource } from './note-mention-source.js'
 import { createKnowledgeBaseMentionSource } from './knowledge-base-mention-source.js'
@@ -22,6 +22,7 @@ import { activatePluginWorkspace, observePluginWorkspace } from './workspace-own
 // DSH 0.1.7 renamed size-suffixed icon exports to weight-suffixed ones;
 // aliases keep every call site (and the contract tests) on legacy names.
 import {
+  BrandWordmark,
   IconChevronLeftOutlineRegular as IconChevronLeftOutline14,
   IconDataOutlineRegular as IconDataOutline16,
   IconFolderOpenOutlineRegular as IconFolderOpenOutline16,
@@ -128,6 +129,90 @@ export function apply(ctx: ClientContext): void {
     id: 'knowledge-folder-import',
     order: 20,
   }, () => <KnowledgeFolderEntry workspace={workspace} />))
+  ctx.slots.inject('conversation.hero.brand.mark', () => ctx.slots.register({
+    name: 'conversation.hero.brand.mark',
+  }, props => <HeroMorningCard {...props} />))
+}
+
+interface MorningTodo {
+  id: string
+  text: string
+  cat: 'work' | 'life'
+  done: boolean
+  carriedFrom?: string
+}
+
+interface MorningResponse {
+  day: string
+  brief?: {
+    counts?: { total?: number; done?: number; unfinished?: number }
+    todos?: MorningTodo[]
+    yesterday?: string
+  }
+  meeting?: { available: boolean; tool?: string; summary?: string; status?: unknown; error?: string }
+}
+
+function HeroMorningCard({ size = 34, className }: { size?: number; className?: string }) {
+  const [data, setData] = useState<MorningResponse>()
+  const [error, setError] = useState('')
+  const [draft, setDraft] = useState('')
+  const [cat, setCat] = useState<'work' | 'life'>('work')
+  const load = useCallback(async () => {
+    try {
+      const response = await fetch('/knowledge-local/v1/morning', {
+        credentials: 'same-origin',
+        headers: { 'x-dsh-knowledge-client': 'management-web' },
+      })
+      if (!response.ok) throw new Error(`HTTP ${response.status}`)
+      setData(await response.json() as MorningResponse)
+      setError('')
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : String(reason))
+    }
+  }, [])
+  useEffect(() => {
+    void load()
+    const timer = window.setInterval(() => { void load() }, 60_000)
+    return () => window.clearInterval(timer)
+  }, [load])
+  const todos = data?.brief?.todos ?? []
+  const meeting = data?.meeting
+  const meetingText = !meeting?.available
+    ? '会议助手未连接'
+    : meeting.summary || '会议助手已就绪'
+  const mutate = async (body: Record<string, unknown>) => {
+    const response = await fetch('/worklog-control/v1/todos', {
+      method: 'POST',
+      credentials: 'same-origin',
+      headers: { 'content-type': 'application/json', 'x-dsh-worklog-client': 'workspace' },
+      body: JSON.stringify({ ...body, day: data?.day }),
+    })
+    if (!response.ok) throw new Error(`HTTP ${response.status}`)
+    await load()
+  }
+  const add = async (event: FormEvent) => {
+    event.preventDefault()
+    if (!draft.trim()) return
+    try { await mutate({ action: 'add', text: draft.trim(), cat }); setDraft('') } catch (reason) { setError(reason instanceof Error ? reason.message : String(reason)) }
+  }
+  return <span className="dsh-knowledge-morning-wrap">
+    <section className="dsh-knowledge-morning-card" aria-label="早晨卡片">
+      <header><strong>早安</strong><span>{data?.day || '今天'}</span></header>
+      <p className="dsh-knowledge-morning-meta">{error ? `早晨卡片暂不可用 · ${error}` : meetingText}</p>
+      {data?.brief?.counts ? <p className="dsh-knowledge-morning-counts">{data.brief.counts.unfinished ?? 0} 项待办 · {data.brief.counts.done ?? 0} 项完成</p> : null}
+      {todos.length > 0 ? <ul className="dsh-knowledge-morning-todos">
+        {todos.slice(0, 5).map(todo => <li key={todo.id} className={todo.done ? 'is-done' : ''}>
+          <label><input type="checkbox" checked={todo.done} onChange={() => { void mutate({ action: 'toggle', id: todo.id }).catch(reason => setError(String(reason))) }} /><span>{todo.text}</span></label>
+        </li>)}
+      </ul> : <p className="dsh-knowledge-morning-empty">今天还没有待办</p>}
+      <form className="dsh-knowledge-morning-add" onSubmit={e => { void add(e) }}>
+        <select value={cat} onChange={event => setCat(event.target.value === 'life' ? 'life' : 'work')} aria-label="待办分类"><option value="work">工作</option><option value="life">生活</option></select>
+        <input value={draft} onChange={event => setDraft(event.target.value)} maxLength={500} placeholder="加一件今天要做的事" aria-label="新待办" />
+        <button type="submit" disabled={!draft.trim()}>添加</button>
+      </form>
+    </section>
+    <span className="dsh-knowledge-morning-brand" aria-hidden="true"><BrandWordmark size={size} includeMark className={className} /></span>
+  </span>
 }
 
 function KnowledgeWritebackStatus({

@@ -251,6 +251,40 @@ export function apply(ctx: Context, config: KnowledgeConfig): void {
   const handleCodec = new KnowledgeHandleCodec(randomBytes(32))
   const noteHandleCodec = new KnowledgeNoteHandleCodec(randomBytes(32))
   const tencentDocs = createTencentDocsBridge(runtime, provider)
+  const meetingSnapshot = async (): Promise<{ available: boolean; tool?: string; status?: unknown; summary?: string; error?: string }> => {
+    const tools = (runtime.get('tools') ?? runtime.tools) as {
+      schemas?: () => Array<{ name: string }>
+      execute?: (input: { name: string; arguments: unknown; signal: AbortSignal; callId: never }) => Promise<{ value?: unknown; content?: unknown; isError?: boolean }>
+    } | undefined
+    if (tools?.schemas === undefined || tools.execute === undefined) return { available: false }
+    for (const name of ['meeting_agent_status', 'meeting_status']) {
+      if (!tools.schemas().some(tool => tool.name === name)) continue
+      try {
+        const result = await tools.execute({
+          name,
+          arguments: {},
+          signal: AbortSignal.timeout(5_000),
+          callId: `knowledge-morning:${Date.now()}` as never,
+        })
+        const status = result.value ?? result.content
+        return { available: true, tool: name, status, summary: describeMeeting(status) }
+      } catch (error) {
+        return { available: false, tool: name, error: error instanceof Error ? error.message : String(error) }
+      }
+    }
+    return { available: false }
+  }
+  const morningBrief = async (day?: string): Promise<unknown> => {
+    const resolvedDay = day ?? new Date().toLocaleDateString('en-CA', { timeZone: 'Asia/Shanghai' })
+    let brief: unknown
+    try {
+      if (journalRuntime) brief = await journalDispatch('GET', '/brief', {}, new URLSearchParams({ day: resolvedDay }))
+    } catch (error) {
+      runtime.logger.warn(`dsh-knowledge: morning brief failed open: ${error instanceof Error ? error.message : String(error)}`)
+    }
+    const meeting = await meetingSnapshot()
+    return { day: resolvedDay, brief, meeting }
+  }
   const optimizeDocument = async (documentId: string, signal: AbortSignal): Promise<{ id: string; version: number; title: string; body: string }> => {
     const entry = await provider.get(documentId)
     if (entry === undefined || entry.status !== 'active') throw connectionError(404, '知识文档不存在或已归档')
@@ -454,6 +488,7 @@ export function apply(ctx: Context, config: KnowledgeConfig): void {
           shareRequestPolicy: () => ({ trustedPrivateOrigins: trustedShareOrigins }),
           optimize: optimizeDocument,
           tencentDocs,
+          morning: morningBrief,
         })
       }
     }
@@ -533,6 +568,7 @@ export function apply(ctx: Context, config: KnowledgeConfig): void {
           shareRequestPolicy: () => ({ trustedPrivateOrigins: trustedShareOrigins }),
           optimize: optimizeDocument,
           tencentDocs,
+          morning: morningBrief,
         })
       }
     }
@@ -1130,4 +1166,28 @@ function sendControlError(res: { writeHead(status: number, headers?: Record<stri
     'content-type': 'application/json; charset=utf-8',
     'cache-control': 'no-store',
   }).end(JSON.stringify({ error: message }))
+}
+
+function describeMeeting(value: unknown): string {
+  if (typeof value === 'string') return value.trim().slice(0, 120) || '会议助手已就绪'
+  if (Array.isArray(value)) {
+    for (const item of value) {
+      const text = describeMeeting(item)
+      if (text.length > 0 && text !== '会议助手已就绪') return text
+    }
+    return '会议助手已就绪'
+  }
+  if (value !== null && typeof value === 'object') {
+    const record = value as Record<string, unknown>
+    if (record.listening === true || record.running === true || record.active === true || record.inMeeting === true) return '会议助手正在听'
+    const meeting = record.meeting
+    const title = typeof record.title === 'string' ? record.title
+      : meeting !== null && typeof meeting === 'object' && typeof (meeting as Record<string, unknown>).title === 'string'
+        ? String((meeting as Record<string, unknown>).title)
+        : undefined
+    if (title) return `会议助手 · ${title.slice(0, 80)}`
+    if (typeof record.state === 'string' && record.state.trim().length > 0) return `会议助手 · ${record.state.trim().slice(0, 80)}`
+    if (typeof record.summary === 'string' && record.summary.trim().length > 0) return record.summary.trim().slice(0, 120)
+  }
+  return '会议助手已就绪'
 }

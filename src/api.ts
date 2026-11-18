@@ -30,6 +30,7 @@ export interface KnowledgeApiOptions {
     importDocument(input: { url: string; knowledgeBaseId?: string; title?: string; group?: string }, signal?: AbortSignal): Promise<unknown>
     publish(documentId: string, signal?: AbortSignal): Promise<unknown>
   }
+  morning?: (day?: string, signal?: AbortSignal) => Promise<unknown>
   authMode?: 'bearer' | 'same-origin'
   service?: {
     current(): {
@@ -304,6 +305,11 @@ async function dispatch(
       provider.deleteNoteReferences(noteIds)
       return sendJson(res, 204, undefined)
     }
+  }
+
+  if (segments[0] === 'morning' && segments.length === 1 && method === 'GET' && options.morning !== undefined) {
+    requirePermission(actor.permissions, 'read')
+    return sendJson(res, 200, await options.morning(url.searchParams.get('day')?.trim() || undefined))
   }
 
   if (segments[0] === 'tencent-docs' && segments.length === 2 && options.tencentDocs !== undefined) {
