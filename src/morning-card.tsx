@@ -302,7 +302,7 @@ export function HeroMorningCard({ size = 34, className }: { size?: number; class
       <footer className="dsh-knowledge-morning-foot">
         <span>每分钟刷新</span>
         <button type="button" className="dsh-knowledge-morning-btn" onClick={() => { void load() }}>刷新</button>
-        <button type="button" className="dsh-knowledge-morning-btn primary" onClick={() => window.open('/worklog', '_blank', 'noopener,noreferrer')}>打开日报</button>
+        <button type="button" className="dsh-knowledge-morning-btn primary" onClick={() => window.open('/knowledge?view=worklog', '_blank', 'noopener,noreferrer')}>打开日报</button>
       </footer>
     </section>}
   </>
