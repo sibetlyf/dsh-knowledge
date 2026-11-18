@@ -251,7 +251,7 @@ export function apply(ctx: Context, config: KnowledgeConfig): void {
   const handleCodec = new KnowledgeHandleCodec(randomBytes(32))
   const noteHandleCodec = new KnowledgeNoteHandleCodec(randomBytes(32))
   const tencentDocs = createTencentDocsBridge(runtime, provider)
-  const meetingSnapshot = async (): Promise<{ available: boolean; tool?: string; status?: unknown; summary?: string; error?: string }> => {
+  const meetingSnapshot = async (): Promise<{ available: boolean; tool?: string; summary?: string; error?: string }> => {
     const tools = (runtime.get('tools') ?? runtime.tools) as {
       schemas?: () => Array<{ name: string }>
       execute?: (input: { name: string; arguments: unknown; signal: AbortSignal; callId: never }) => Promise<{ value?: unknown; content?: unknown; isError?: boolean }>
@@ -267,7 +267,7 @@ export function apply(ctx: Context, config: KnowledgeConfig): void {
           callId: `knowledge-morning:${Date.now()}` as never,
         })
         const status = result.value ?? result.content
-        return { available: true, tool: name, status, summary: describeMeeting(status) }
+        return { available: true, tool: name, summary: describeMeeting(status) }
       } catch (error) {
         return { available: false, tool: name, error: error instanceof Error ? error.message : String(error) }
       }

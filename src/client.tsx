@@ -28,6 +28,7 @@ import {
   IconFolderOpenOutlineRegular as IconFolderOpenOutline16,
   IconPanelLeftOutlineRegular as IconPanelLeftOutline16,
 } from '@deepseek-ai/dsh-client-ui-primitives'
+import { HeroMorningCard } from './morning-card.js'
 import { knowledgeDesignCss } from './design-tokens.js'
 import { availableActivitySession, deriveCurrentSession } from './knowledge-activity-state.js'
 import { supportsDockedPanels } from './docked-panel-compat.js'
@@ -152,7 +153,7 @@ interface MorningResponse {
   meeting?: { available: boolean; tool?: string; summary?: string; status?: unknown; error?: string }
 }
 
-function HeroMorningCard({ size = 34, className }: { size?: number; className?: string }) {
+function LegacyMorningCard({ size = 34, className }: { size?: number; className?: string }) {
   const [data, setData] = useState<MorningResponse>()
   const [error, setError] = useState('')
   const [draft, setDraft] = useState('')

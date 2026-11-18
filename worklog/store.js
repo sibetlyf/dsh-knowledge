@@ -227,6 +227,7 @@ export class Store {
     return {
       day,
       yesterday: previous,
+      summary: excerpt || '昨日没有可回顾的日报。',
       markdown: lines.join('\n').trim(),
       counts: {
         total: today.length,

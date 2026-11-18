@@ -132,7 +132,7 @@
 
 ```bash
 # 固定发布标签；PowerShell 中 # 后的 ref 需要引号
-dsh plugin --profile web add "github:sibetlyf/dsh-knowledge#v2.15.7"
+dsh plugin --profile web add "github:sibetlyf/dsh-knowledge#v2.15.8"
 ```
 
 跟踪主分支：

@@ -41,6 +41,7 @@ test('brief combines yesterday report and today todos', (t) => {
   assert.equal(brief.yesterday, '2026-09-28')
   assert.match(brief.markdown, /昨日日报/u)
   assert.match(brief.markdown, /回归测试/u)
+  assert.match(brief.summary, /昨日日报/u)
   assert.match(brief.markdown, /每日简报/u)
   assert.equal(brief.counts.total, 1)
   assert.equal(brief.counts.unfinished, 1)
