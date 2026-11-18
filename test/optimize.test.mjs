@@ -12,7 +12,7 @@ test('document optimization replaces only the body and preserves metadata', asyn
   const provider = { async update(id, draft, _checkpoint, version) { received = { id, draft, version }; return { ...entry, ...draft, version: 4 } } }
   const llm = {
     async *stream(request) {
-      assert.equal(request.reasoningEffort, 'off')
+      assert.equal(request.reasoningEffort, undefined)
       assert.equal(request.maxTokens, 4096)
       yield { type: 'text-delta', text: '## 缓存方案\n\n采用两级缓存，降低重复计算。' }
     },

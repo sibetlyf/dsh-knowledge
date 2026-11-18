@@ -8,7 +8,7 @@ const SYSTEM = `你是一名严谨的中文工作纪要编辑。只优化格式�
 export async function optimizeReport(llm, markdown, route, signal = AbortSignal.timeout(120_000)) {
   let output = ''
   for await (const chunk of llm.stream({
-    ...route, system: SYSTEM, maxTokens: 4096, temperature: 0, reasoningEffort: 'off', signal,
+    ...route, system: SYSTEM, maxTokens: 4096, temperature: 0, signal,
     messages: [{ id: 'optimize-worklog', role: 'user', source: { kind: 'plugin:dsh-worklog' }, content: [{ type: 'text', text: markdown }] }],
   })) {
     if (signal.aborted) throw signal.reason

@@ -12,7 +12,6 @@ export async function generatePeriod(llm, { route, kind, from, to, material, sig
     system: SYSTEM,
     maxTokens: 4096,
     temperature: 0,
-    reasoningEffort: 'off',
     signal,
     messages: [{
       id: randomUUID(),

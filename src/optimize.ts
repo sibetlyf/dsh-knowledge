@@ -33,7 +33,6 @@ export async function optimizeKnowledgeDocument(
     system: SYSTEM_PROMPT,
     maxTokens: 4096,
     temperature: 0,
-    reasoningEffort: 'off' as never,
     signal,
     messages: [{
       id: 'optimize-document',
