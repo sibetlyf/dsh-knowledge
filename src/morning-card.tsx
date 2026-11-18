@@ -30,10 +30,9 @@ interface CardBox {
   width: number
   maxHeight: number
   placement: 'above' | 'below'
-  arrow: number
 }
 
-const CARD_WIDTH = 440
+const CARD_WIDTH = 420
 const GAP = 12
 const EDGE = 16
 
@@ -88,27 +87,20 @@ export function HeroMorningCard({ size = 34, className }: { size?: number; class
     if (!anchor || !card) return
     const anchorRect = anchor.getBoundingClientRect()
     const width = Math.min(CARD_WIDTH, window.innerWidth - EDGE * 2)
-    const natural = card.scrollHeight || 360
+    const natural = card.scrollHeight || 380
     const above = anchorRect.top - EDGE - GAP
     const below = window.innerHeight - anchorRect.bottom - EDGE - GAP
-    const placement: 'above' | 'below' = above >= 240 || above >= below ? 'above' : 'below'
+    const placement: 'above' | 'below' = above >= 260 || above >= below ? 'above' : 'below'
     const room = placement === 'above' ? above : below
     const maxHeight = Math.max(140, Math.min(room, window.innerHeight - EDGE * 2))
     const height = Math.min(natural, maxHeight)
     const desiredTop = placement === 'above' ? anchorRect.top - height - GAP : anchorRect.bottom + GAP
     const top = Math.max(EDGE, Math.min(window.innerHeight - height - EDGE, desiredTop))
     const left = Math.max(EDGE, Math.min(window.innerWidth - width - EDGE, anchorRect.left + anchorRect.width / 2 - width / 2))
-    const next: CardBox = {
-      left,
-      top,
-      width,
-      maxHeight,
-      placement,
-      arrow: Math.max(12, Math.min(width - 12, anchorRect.left + anchorRect.width / 2 - left)),
-    }
+    const next: CardBox = { left, top, width, maxHeight, placement }
     setBox(previous => previous && previous.left === next.left && previous.top === next.top
       && previous.width === next.width && previous.maxHeight === next.maxHeight
-      && previous.placement === next.placement && previous.arrow === next.arrow ? previous : next)
+      && previous.placement === next.placement ? previous : next)
   }, [])
 
   useLayoutEffect(() => {
@@ -148,9 +140,16 @@ export function HeroMorningCard({ size = 34, className }: { size?: number; class
 
   const todos = data?.brief?.todos ?? []
   const counts = data?.brief?.counts
+  const total = counts?.total ?? 0
+  const done = counts?.done ?? 0
+  const progress = total > 0 ? Math.round(done / total * 100) : 0
+  const dayLabel = data?.day
+    ? new Intl.DateTimeFormat('zh-CN', { month: 'long', day: 'numeric', weekday: 'short' }).format(new Date(`${data.day}T00:00:00`))
+    : '今天'
   const meetingText = data?.meeting?.available
     ? data.meeting.summary || '会议助手已就绪'
     : '会议助手未连接'
+  const meetingActive = meetingText.includes('正在听')
 
   return <>
     <button
@@ -175,30 +174,39 @@ export function HeroMorningCard({ size = 34, className }: { size?: number; class
         width: box.width,
         maxHeight: box.maxHeight,
         visibility: 'visible',
-        ['--dsh-morning-arrow' as string]: `${box.arrow}px`,
       } : { visibility: 'hidden' }}
     >
       <header className="dsh-knowledge-morning-head">
         <div className="dsh-knowledge-morning-title">
-          早晨卡片
-          <small>{data?.day || '今天'}{counts?.total !== undefined ? ` · ${counts.total} 项待办` : ''}</small>
+          <h2>早晨卡片</h2>
+          <small>{dayLabel}</small>
         </div>
         <button type="button" className="dsh-knowledge-morning-x" aria-label="收起早晨卡片" onClick={() => setOpen(false)}>×</button>
       </header>
       <div className="dsh-knowledge-morning-scroll">
         {error ? <p className="dsh-knowledge-morning-note" role="status">早晨卡片暂不可用 · {error}</p> : null}
-        <p className="dsh-knowledge-morning-summary">{data?.brief?.summary || '今天还没有可回顾的日报，先在下面记几件要做的事。'}</p>
-        <div className="dsh-knowledge-morning-stats">
-          <span>{counts?.unfinished ?? 0} 项未完成</span>
-          <span>{counts?.done ?? 0} 项完成</span>
+        <div className="dsh-knowledge-morning-hero">
+          <div className="dsh-knowledge-morning-ring" style={{ ['--dsh-morning-progress' as string]: `${progress}%` }}>
+            <strong>{progress}<span>%</span></strong>
+          </div>
+          <div className="dsh-knowledge-morning-hero-copy">
+            <div className="dsh-knowledge-morning-metric"><strong>{counts?.unfinished ?? 0}</strong><span>项待办</span></div>
+            <small>{done} 项完成 · {total} 项总计</small>
+          </div>
         </div>
-        <aside className="dsh-knowledge-morning-discovery">
-          <b>会议助手：</b>{meetingText}
-        </aside>
-        <section className="dsh-knowledge-morning-todos">
-          <h4>今日待办 · {todos.length}</h4>
-          {todos.length === 0 ? <p className="dsh-knowledge-morning-empty">今天还没有待办。</p> : <ul>
-            {todos.slice(0, 8).map(todo => <li key={todo.id} className={todo.done ? 'is-done' : ''}>
+        <p className="dsh-knowledge-morning-summary">{data?.brief?.summary || '今天还没有可回顾的日报，先在下面记几件要做的事。'}</p>
+        <div className="dsh-knowledge-morning-meeting">
+          <i className={`dsh-knowledge-morning-dot${meetingActive ? ' is-active' : ''}${data?.meeting?.available ? '' : ' is-off'}`} />
+          <span>{meetingText}</span>
+        </div>
+        <div className="dsh-knowledge-morning-todo-head">
+          <h4>今日待办</h4>
+          <span>{todos.length}</span>
+        </div>
+        {todos.length === 0
+          ? <p className="dsh-knowledge-morning-empty">今天还没有待办。</p>
+          : <ul className="dsh-knowledge-morning-list">
+            {todos.map(todo => <li key={todo.id} className={todo.done ? 'is-done' : ''}>
               <label>
                 <input type="checkbox" checked={todo.done} onChange={() => { void mutate({ action: 'toggle', id: todo.id }).catch(reason => setError(String(reason))) }} />
                 <span>{todo.text}</span>
@@ -207,18 +215,17 @@ export function HeroMorningCard({ size = 34, className }: { size?: number; class
               <button type="button" className="dsh-knowledge-morning-delete" aria-label="删除待办" onClick={() => { void mutate({ action: 'delete', id: todo.id }).catch(reason => setError(String(reason))) }}>×</button>
             </li>)}
           </ul>}
-          <form className="dsh-knowledge-morning-add" onSubmit={event => { void add(event) }}>
-            <select value={cat} onChange={event => setCat(event.target.value === 'life' ? 'life' : 'work')} aria-label="待办分类">
-              <option value="work">工作</option>
-              <option value="life">生活</option>
-            </select>
-            <input value={draft} onChange={event => setDraft(event.target.value)} maxLength={500} placeholder="加一件今天要做的事" aria-label="新待办" />
-            <button type="submit" disabled={!draft.trim()}>添加</button>
-          </form>
-        </section>
+        <form className="dsh-knowledge-morning-add" onSubmit={event => { void add(event) }}>
+          <select value={cat} onChange={event => setCat(event.target.value === 'life' ? 'life' : 'work')} aria-label="待办分类">
+            <option value="work">工作</option>
+            <option value="life">生活</option>
+          </select>
+          <input value={draft} onChange={event => setDraft(event.target.value)} maxLength={500} placeholder="加一件今天要做的事" aria-label="新待办" />
+          <button type="submit" disabled={!draft.trim()}>添加</button>
+        </form>
       </div>
       <footer className="dsh-knowledge-morning-foot">
-        <span>本地简报 · 每分钟刷新</span>
+        <span>每分钟刷新</span>
         <button type="button" className="dsh-knowledge-morning-btn" onClick={() => { void load() }}>刷新</button>
         <button type="button" className="dsh-knowledge-morning-btn primary" onClick={() => window.open('/worklog', '_blank', 'noopener,noreferrer')}>打开日报</button>
       </footer>

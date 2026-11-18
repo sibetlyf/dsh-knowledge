@@ -132,7 +132,7 @@
 
 ```bash
 # 固定发布标签；PowerShell 中 # 后的 ref 需要引号
-dsh plugin --profile web add "github:sibetlyf/dsh-knowledge#v2.15.9"
+dsh plugin --profile web add "github:sibetlyf/dsh-knowledge#v2.15.10"
 ```
 
 跟踪主分支：
@@ -390,6 +390,7 @@ docker build \
 
 **欢迎页**（无会话时的鲸鱼 logo 上方）显示「早晨卡片」：
 
+- 卡片按 dsh-widgets 的卡片语言设计：白色/深色面、细边框、蓝色标题、环形完成率和大数字；
 - 今日待办按工作 / 生活列出，可直接勾选完成或快速添加一条；
 - 每分钟自动刷新，不阻塞对话；
 - 通过 DSH 公共工具接口读取会议助手状态，显示「会议助手正在听」「会议助手 · 会议标题」「会议助手已就绪」或「会议助手未连接」；
