@@ -213,6 +213,7 @@ export class Store {
     const unfinished = today.filter(todo => !todo.done)
     const completed = today.filter(todo => todo.done)
     const excerpt = String(report.markdown || '').replace(/^#+\s*/gmu, '').trim().slice(0, 900)
+    const summary = excerpt.length > 260 ? `${excerpt.slice(0, 260).trim()}…` : excerpt
     const lines = [`# ${day} 每日简报`, '', `> ${unfinished.length} 项待办 · ${completed.length} 项完成${excerpt ? ' · 昨日日报已整理' : ' · 昨日暂无日报'}`, '']
     lines.push('## 昨日回顾', '', excerpt || '昨日没有可回顾的日报。', '')
     lines.push('## 今日待办', '')
@@ -227,7 +228,7 @@ export class Store {
     return {
       day,
       yesterday: previous,
-      summary: excerpt || '昨日没有可回顾的日报。',
+      summary: summary || '昨日没有可回顾的日报。',
       markdown: lines.join('\n').trim(),
       counts: {
         total: today.length,

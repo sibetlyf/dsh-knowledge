@@ -191,11 +191,10 @@ export function HeroMorningCard({ size = 34, className }: { size?: number; class
         <div className="dsh-knowledge-morning-stats">
           <span>{counts?.unfinished ?? 0} 项未完成</span>
           <span>{counts?.done ?? 0} 项完成</span>
-          <span className="dsh-knowledge-morning-meeting">{meetingText}</span>
         </div>
-        {data?.meeting?.available ? <aside className="dsh-knowledge-morning-discovery">
+        <aside className="dsh-knowledge-morning-discovery">
           <b>会议助手：</b>{meetingText}
-        </aside> : null}
+        </aside>
         <section className="dsh-knowledge-morning-todos">
           <h4>今日待办 · {todos.length}</h4>
           {todos.length === 0 ? <p className="dsh-knowledge-morning-empty">今天还没有待办。</p> : <ul>

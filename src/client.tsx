@@ -717,7 +717,7 @@ function installStyles(): () => void {
   const style = document.createElement('style')
   style.dataset.plugin = PLUGIN_ID
   style.dataset.pluginCss = STYLE_ID
-  const scope = ':is(.dsh-knowledge-trigger, .dsh-knowledge-activity-panel, .dsh-knowledge-workspace, .dsh-knowledge-settings-card, .dsh-knowledge-writeback-notice)'
+  const scope = ':is(.dsh-knowledge-trigger, .dsh-knowledge-activity-panel, .dsh-knowledge-workspace, .dsh-knowledge-settings-card, .dsh-knowledge-writeback-notice, .dsh-knowledge-morning-card)'
   style.textContent = knowledgeDesignCss(scope, 'body[data-ds-dark-theme] ' + scope, false) + cssText + activityCss + settingsSurfaceCss
   document.head.appendChild(style)
   return () => { style.remove() }
