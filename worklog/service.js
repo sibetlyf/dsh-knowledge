@@ -1,5 +1,6 @@
 import { capture, settings, fail, validDay, dayOf } from './domain.js'
 import { optimizeReport } from './optimizer.js'
+import { generatePeriod } from './period.js'
 import { knowledgeRecord, prepareWorklog } from './knowledge.js'
 import { createCentral, pick, captureKeys, sharedKeys, sharedRevision } from './central.js'
 import { Outbox } from './outbox.js'
@@ -69,6 +70,24 @@ export class JournalService {
     this.store.save(day, markdown, detail.report.revision, detail.report.covered, true)
     return this.store.detail(day)
   }
+  async period(day, kind) {
+    const base = this.store.period(day, kind)
+    const config = this.store.config()
+    if (!config.provider || !config.model) return { ...base, generated: false }
+    try {
+      const markdown = await generatePeriod(this.worker.llm, {
+        route: { provider: config.provider, model: config.model },
+        kind,
+        from: base.from,
+        to: base.to,
+        material: base.markdown.slice(0, 50_000),
+        signal: AbortSignal.timeout(120_000),
+      })
+      return { ...base, markdown, generated: true }
+    } catch (error) {
+      return { ...base, generated: false, error: error instanceof Error ? error.message : String(error) }
+    }
+  }
   async browser(method, path, data = {}, query = new URLSearchParams()) {
     if (this.current().paused) throw fail('知识库连接正在切换，请稍后重试', 409)
     const connection = { ...this.current() }, target = destination(connection)
@@ -96,6 +115,12 @@ export class JournalService {
       if (method === 'POST' && path === '/todos') return { todos: this.store.mutateTodo(data) }
       if (method === 'GET' && path === '/brief') {
         return this.store.brief(validDay(query.get('day') || dayOf(Date.now(), this.store.config().timezone)))
+      }
+      if (method === 'GET' && path === '/period') {
+        return this.period(
+          validDay(query.get('day') || dayOf(Date.now(), this.store.config().timezone)),
+          query.get('kind') || 'week',
+        )
       }
       if (method === 'POST' && path === '/optimize') return this.optimize(validDay(data.day))
       if (method === 'POST' && path === '/settings') {

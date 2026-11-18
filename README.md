@@ -41,7 +41,7 @@
   - **对话中直接导入文件夹**：输入框工具行的文件夹按钮，或输入 `@` 选择「导入文件夹…」，都直接打开知识库文件夹浏览器；确认后递归归档、分类、论文识别并加入索引，完成后右下角弹出气泡显示新增/更新/未变/跳过/失败，点「查看明细」可逐文件查看类别、目标知识库、分组与论文分类。
   - **腾讯文档双向联动**：知识目录顶部可粘贴 `docs.qq.com` 链接直接导入为知识文档；文档工具栏「发布到腾讯文档」把本地 Markdown 发布为智能文档并返回云端链接。底层复用 dsh-tencent-docs-bridge 已挂载的官方 MCP 工具，不保存腾讯登录凭据。
   - **腾讯文档 token 配置**：管理台「自动化 → 腾讯文档」可直接输入 32 位 `space_secret`，只写入本地 vault（0600），保存后桥插件自动重连，无需重启。
-  - **每日待办与简报**：工作日报页新增工作/生活待办，可顺延昨日未完成；每日简报汇总昨日日报与今日待办，可展开查看和复制；生成日报时自动带上当天待办。
+  - **早晨卡片、每日待办与周月报**：工作日报顶部同一张卡片展示昨日回顾/今日简报和工作、生活待办；支持顺延昨日未完成。日报操作栏可生成周报/月报，默认使用 DSH 当前云端默认模型，失败时回退本地汇总。
   - **自动化设置页**：管理台「自动化」集中配置自动审核、自动整理/工作纪要的按对话或按频率触发，以及 token 节省模式；保存后即时生效。
   - **知识上下文精简**：自动整理只给模型既有文档的标题、标签、分组和约 600 字摘要；自动链接在本地用元数据/关键词推导，不调用模型，完整正文只在 `knowledge_read` 时按需读取。
   - **文档与日报优化**：知识文档工具栏「优化格式」和工作日报「优化排版」会用严谨的编辑提示做格式/表达优化，保留事实、数字、路径、链接和引用编号，去除 AI 腔。
@@ -69,7 +69,7 @@
 
 ```bash
 # 固定到当前发布标签（Windows PowerShell 需要给 # 后的 ref 加引号）
-dsh plugin --profile web add "github:sibetlyf/dsh-knowledge#v2.15.5"
+dsh plugin --profile web add "github:sibetlyf/dsh-knowledge#v2.15.6"
 ```
 
 跟踪主分支的最新提交：
@@ -89,14 +89,14 @@ dsh plugin --profile web add "github:sibetlyf/dsh-knowledge#089ca65"
 发布新版本时，先更新 `package.json` 的版本号，再打同名 tag 并推送；GitRef 用户即可固定到该 tag：
 
 ```bash
-git tag v2.15.6
-git push origin v2.15.6
+git tag v2.15.7
+git push origin v2.15.7
 ```
 
 对应的安装命令：
 
 ```bash
-dsh plugin --profile web add "github:sibetlyf/dsh-knowledge#v2.15.6"
+dsh plugin --profile web add "github:sibetlyf/dsh-knowledge#v2.15.7"
 ```
 
 仍可使用 npm 作为备用安装源（仅当当前 registry 已发布 `dsh-knowledge`）：

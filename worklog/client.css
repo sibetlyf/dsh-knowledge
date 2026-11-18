@@ -65,3 +65,8 @@ body[data-ds-dark-theme] .dsh-worklog{--wl-text:#e4e7eb;--wl-muted:#b1b8c0;--wl-
 .wl-brief{margin-top:14px;border-top:1px solid var(--wl-line);padding-top:10px}.wl-brief summary{font-weight:600}
 .wl-brief .wl-markdown{padding:8px 0}.wl-brief-actions{display:flex;align-items:center;gap:12px;margin-top:8px}
 @media(max-width:680px){.wl-todo-columns{grid-template-columns:1fr}.wl-daily-board{padding:14px}.wl-todo-add{flex-wrap:wrap}.wl-todo-add input{flex-basis:100%}}
+.wl-period-document{max-height:58vh;overflow:auto;border:1px solid var(--wl-line);border-radius:12px;padding:16px 20px;margin:10px 0;background:var(--wl-surface)}
+.wl-morning-brief{border:1px solid var(--wl-line);border-radius:12px;background:var(--wl-control);padding:12px 16px;margin:0 0 12px}
+.wl-morning-brief-head{display:flex;align-items:center;justify-content:space-between;gap:12px;margin-bottom:6px}
+.wl-morning-brief-head h4{margin:0;font-size:13px;color:var(--wl-muted)}
+.wl-morning-brief .wl-markdown{max-height:220px;overflow:auto;font-size:13px}

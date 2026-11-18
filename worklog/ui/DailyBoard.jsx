@@ -58,9 +58,15 @@ export function DailyBoard({ day, onMessage }) {
 
   return <section className="wl-daily-board">
     <header className="wl-daily-header">
-      <div><h3>每日待办</h3><p>{unfinished} 项未完成 · {todos.length - unfinished} 项完成</p></div>
+      <div><h3>早晨卡片 · 每日待办</h3><p>{unfinished} 项未完成 · {todos.length - unfinished} 项完成 · {day}</p></div>
       <button type="button" disabled={busy} onClick={() => mutate({ action: 'carry' })}>顺延昨日未完成</button>
     </header>
+    {brief ? <div className="wl-morning-brief">
+      <div className="wl-morning-brief-head"><h4>早晨简报</h4>
+        <button type="button" onClick={() => { navigator.clipboard?.writeText(brief.markdown).then(() => onMessage?.('简报已复制'), () => onMessage?.('复制失败')) }}>复制简报</button>
+      </div>
+      <Markdown text={brief.markdown} />
+    </div> : null}
     <form className="wl-todo-add" onSubmit={add}>
       <select value={cat} onChange={event => setCat(event.target.value)} aria-label="待办分类">
         <option value="work">工作</option>
@@ -76,13 +82,5 @@ export function DailyBoard({ day, onMessage }) {
         {items(category).length === 0 ? <p className="wl-muted">暂无</p> : <ul>{items(category).map(row)}</ul>}
       </div>)}
     </div>
-    {brief ? <details className="wl-brief" open={false}>
-      <summary>每日简报</summary>
-      <Markdown text={brief.markdown} />
-      <div className="wl-brief-actions">
-        <button type="button" onClick={() => { navigator.clipboard?.writeText(brief.markdown).then(() => onMessage?.('简报已复制'), () => onMessage?.('复制失败')) }}>复制简报</button>
-        <span className="wl-muted">{brief.counts?.total || 0} 项待办 · 昨日 {brief.yesterday}</span>
-      </div>
-    </details> : null}
   </section>
 }

@@ -9,8 +9,9 @@ import { recoverDay } from './recovery.js'
 
 // SQLite transactions are short and never span a model/network request.
 export class Store {
-  constructor(path) {
+  constructor(path, defaultRoute = undefined) {
     this.instance = randomUUID()
+    this.defaultRoute = defaultRoute && defaultRoute.provider && defaultRoute.model ? defaultRoute : undefined
     if (path !== ':memory:') mkdirSync(dirname(path), { recursive: true, mode: 0o700 })
     this.db = new DatabaseSync(path)
     const schema = this.db.prepare('PRAGMA user_version').get().user_version
@@ -38,7 +39,14 @@ export class Store {
       this.db.prepare("INSERT INTO jobs VALUES (?,?,'failed',0,?,?)").run(randomUUID(), last.day, last.time || Date.now(), JSON.stringify({ error: last.message, preflight: true, fingerprint: '', legacy: true }))
     }
   }
-  config() { return { ...defaults, ...JSON.parse(this.db.prepare("SELECT value FROM meta WHERE key='settings'").get()?.value || '{}') } }
+  config() {
+    const value = { ...defaults, ...JSON.parse(this.db.prepare("SELECT value FROM meta WHERE key='settings'").get()?.value || '{}') }
+    if (!value.provider && !value.model && this.defaultRoute) {
+      value.provider = this.defaultRoute.provider
+      value.model = this.defaultRoute.model
+    }
+    return value
+  }
   version() { return `${this.instance}:${this.db.prepare('SELECT total_changes() AS count').get().count}` }
   configure(value, now = Date.now()) {
     const config = settings(value), previous = this.config(), state = this.scheduleState()
@@ -230,6 +238,26 @@ export class Store {
       todos: today,
     }
   }
+  period(day, kind) {
+    validDay(day)
+    if (kind !== 'week' && kind !== 'month') throw fail('报告周期无效')
+    const { from, to } = periodRange(day, kind)
+    const days = []
+    for (let cursor = from; cursor <= to; cursor = nextDay(cursor)) {
+      const report = this.report(cursor), todos = this.todos(cursor)
+      if (report.markdown || todos.length > 0) days.push({ day: cursor, markdown: report.markdown, todos })
+    }
+    const title = kind === 'week' ? '周报' : '月报'
+    const lines = [`# ${title}（${from} ~ ${to}）`, '', `> ${days.length} 天有记录 · ${days.reduce((sum, item) => sum + item.todos.length, 0)} 项待办`, '']
+    if (days.length === 0) lines.push('本周期还没有日报或待办。')
+    for (const item of days) {
+      lines.push(`## ${item.day}`, '')
+      if (item.todos.length > 0) lines.push(item.todos.map(todo => `- [${todo.done ? 'x' : ' '}] ${todo.text}`).join('\n'), '')
+      const body = String(item.markdown || '').trim()
+      if (body) lines.push(body.length > 4000 ? `${body.slice(0, 4000)}\n\n> 本节已截断` : body, '')
+    }
+    return { kind, from, to, markdown: lines.join('\n').trim(), days }
+  }
   exclude(id, excluded) {
     if (typeof excluded !== 'boolean') throw fail('排除状态无效')
     if (!this.db.prepare('UPDATE records SET excluded=? WHERE id=?').run(+excluded, id).changes) throw fail('记录不存在', 404)
@@ -282,4 +310,24 @@ function previousDay(day) {
   const date = new Date(`${day}T00:00:00.000Z`)
   date.setUTCDate(date.getUTCDate() - 1)
   return date.toISOString().slice(0, 10)
+}
+
+function nextDay(day) {
+  const date = new Date(`${day}T00:00:00.000Z`)
+  date.setUTCDate(date.getUTCDate() + 1)
+  return date.toISOString().slice(0, 10)
+}
+
+function periodRange(day, kind) {
+  const date = new Date(`${day}T00:00:00.000Z`)
+  if (kind === 'week') {
+    const offset = (date.getUTCDay() + 6) % 7
+    date.setUTCDate(date.getUTCDate() - offset)
+    const from = date.toISOString().slice(0, 10)
+    date.setUTCDate(date.getUTCDate() + 6)
+    return { from, to: date.toISOString().slice(0, 10) }
+  }
+  const from = `${day.slice(0, 7)}-01`
+  const end = new Date(Date.UTC(date.getUTCFullYear(), date.getUTCMonth() + 1, 0))
+  return { from, to: end.toISOString().slice(0, 10) }
 }

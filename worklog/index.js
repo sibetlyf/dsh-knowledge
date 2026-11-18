@@ -10,7 +10,12 @@ export const name = 'knowledge-worklog'
 export const inject = ['llm', 'connection']
 export const Config = Schema.object({ databasePath: Schema.string().required().description('工作记录独立数据库路径') })
 export function apply(ctx, config) {
-  const store = new Store(config.databasePath), worker = new Worker(store, ctx.llm, undefined, diagnostic => ctx.logger.warn(diagnostic ? `worklog: ${JSON.stringify(diagnostic)}` : 'worklog: 整理任务存储异常，请检查磁盘。'))
+  let selection
+  try { selection = ctx.get?.('agentDefaultModel')?.currentSelection?.() } catch { /* older host */ }
+  const defaultRoute = selection && selection.provider && selection.model
+    ? { provider: selection.provider, model: selection.model }
+    : undefined
+  const store = new Store(config.databasePath, defaultRoute), worker = new Worker(store, ctx.llm, undefined, diagnostic => ctx.logger.warn(diagnostic ? `worklog: ${JSON.stringify(diagnostic)}` : 'worklog: 整理任务存储异常，请检查磁盘。'))
   const models = async () => Promise.all(ctx.llm.listProviders().map(async p => ({ id: p.id, name: p.name, models: (await ctx.llm.listModels(p.id)).map(m => ({ id: m.id, name: m.name })) })))
   // DSH's SessionController uses the Host process cwd when neither workspace nor cwd is specified.
   const service = new JournalService(store, worker, models, config.current, undefined, process.cwd())
