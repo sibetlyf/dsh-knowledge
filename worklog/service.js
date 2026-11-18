@@ -1,4 +1,4 @@
-import { capture, settings, fail, validDay } from './domain.js'
+import { capture, settings, fail, validDay, dayOf } from './domain.js'
 import { optimizeReport } from './optimizer.js'
 import { knowledgeRecord, prepareWorklog } from './knowledge.js'
 import { createCentral, pick, captureKeys, sharedKeys, sharedRevision } from './central.js'
@@ -89,6 +89,14 @@ export class JournalService {
     // Browser cannot bypass migration confirmation via central ingestion routes.
     if (['/ingest', '/archive', '/identity'].includes(path)) throw fail('日报接口不存在', 404)
     if (!target) {
+      if (method === 'GET' && path === '/todos') {
+        const day = validDay(query.get('day') || dayOf(Date.now(), this.store.config().timezone))
+        return { day, todos: this.store.todos(day) }
+      }
+      if (method === 'POST' && path === '/todos') return { todos: this.store.mutateTodo(data) }
+      if (method === 'GET' && path === '/brief') {
+        return this.store.brief(validDay(query.get('day') || dayOf(Date.now(), this.store.config().timezone)))
+      }
       if (method === 'POST' && path === '/optimize') return this.optimize(validDay(data.day))
       if (method === 'POST' && path === '/settings') {
         if (data.sharedRevision !== undefined && data.sharedRevision !== sharedRevision(this.store.config())) throw fail('中央配置已更新，请重新打开采集设置后重试', 409)
