@@ -69,7 +69,7 @@
 
 ```bash
 # 固定到当前发布标签（Windows PowerShell 需要给 # 后的 ref 加引号）
-dsh plugin --profile web add "github:sibetlyf/dsh-knowledge#v2.15.10"
+dsh plugin --profile web add "github:sibetlyf/dsh-knowledge#v2.15.11"
 ```
 
 跟踪主分支的最新提交：
@@ -89,14 +89,14 @@ dsh plugin --profile web add "github:sibetlyf/dsh-knowledge#089ca65"
 发布新版本时，先更新 `package.json` 的版本号，再打同名 tag 并推送；GitRef 用户即可固定到该 tag：
 
 ```bash
-git tag v2.15.11
-git push origin v2.15.11
+git tag v2.15.12
+git push origin v2.15.12
 ```
 
 对应的安装命令：
 
 ```bash
-dsh plugin --profile web add "github:sibetlyf/dsh-knowledge#v2.15.11"
+dsh plugin --profile web add "github:sibetlyf/dsh-knowledge#v2.15.12"
 ```
 
 仍可使用 npm 作为备用安装源（仅当当前 registry 已发布 `dsh-knowledge`）：

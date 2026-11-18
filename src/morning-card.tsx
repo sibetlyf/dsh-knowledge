@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useLayoutEffect, useRef, useState, type FormEvent } from 'react'
+import { useCallback, useEffect, useLayoutEffect, useRef, useState, type FormEvent, type PointerEvent as ReactPointerEvent } from 'react'
 import { BrandWordmark } from '@deepseek-ai/dsh-client-ui-primitives'
 
 interface MorningTodo {
@@ -32,9 +32,28 @@ interface CardBox {
   placement: 'above' | 'below'
 }
 
+interface ManualPosition {
+  left: number
+  top: number
+}
+
 const CARD_WIDTH = 420
 const GAP = 12
 const EDGE = 16
+const POSITION_KEY = 'dsh-knowledge-morning-position'
+
+function savedPosition(): ManualPosition | null {
+  try {
+    const raw = window.localStorage.getItem(POSITION_KEY)
+    if (!raw) return null
+    const value = JSON.parse(raw) as Partial<ManualPosition>
+    return typeof value.left === 'number' && typeof value.top === 'number' && Number.isFinite(value.left) && Number.isFinite(value.top)
+      ? { left: value.left, top: value.top }
+      : null
+  } catch {
+    return null
+  }
+}
 
 export function HeroMorningCard({ size = 34, className }: { size?: number; className?: string }) {
   const [open, setOpen] = useState(true)
@@ -43,8 +62,11 @@ export function HeroMorningCard({ size = 34, className }: { size?: number; class
   const [draft, setDraft] = useState('')
   const [cat, setCat] = useState<'work' | 'life'>('work')
   const [box, setBox] = useState<CardBox>()
+  const [manual, setManual] = useState<ManualPosition | null>(savedPosition)
+  const [dragging, setDragging] = useState(false)
   const anchorRef = useRef<HTMLButtonElement>(null)
   const cardRef = useRef<HTMLElement>(null)
+  const manualRef = useRef<ManualPosition | null>(manual)
 
   const load = useCallback(async () => {
     try {
@@ -88,6 +110,14 @@ export function HeroMorningCard({ size = 34, className }: { size?: number; class
     const anchorRect = anchor.getBoundingClientRect()
     const width = Math.min(CARD_WIDTH, window.innerWidth - EDGE * 2)
     const natural = card.scrollHeight || 380
+    const manualPosition = manualRef.current
+    if (manualPosition) {
+      const height = Math.min(natural, window.innerHeight - EDGE * 2)
+      const left = Math.max(EDGE, Math.min(window.innerWidth - width - EDGE, manualPosition.left))
+      const top = Math.max(EDGE, Math.min(window.innerHeight - height - EDGE, manualPosition.top))
+      setBox({ left, top, width, maxHeight: window.innerHeight - EDGE * 2, placement: 'above' })
+      return
+    }
     const above = anchorRect.top - EDGE - GAP
     const below = window.innerHeight - anchorRect.bottom - EDGE - GAP
     const placement: 'above' | 'below' = above >= 260 || above >= below ? 'above' : 'below'
@@ -138,6 +168,46 @@ export function HeroMorningCard({ size = 34, className }: { size?: number; class
     }
   }
 
+  const beginDrag = (event: ReactPointerEvent<HTMLElement>) => {
+    if ((event.target as HTMLElement).closest('button')) return
+    const card = cardRef.current
+    const current = box ? { left: box.left, top: box.top } : manualRef.current
+    if (!card || !current) return
+    event.preventDefault()
+    const startX = event.clientX, startY = event.clientY
+    const width = Math.min(CARD_WIDTH, window.innerWidth - EDGE * 2)
+    const height = Math.min(card.scrollHeight || 380, window.innerHeight - EDGE * 2)
+    setDragging(true)
+    const move = (moveEvent: PointerEvent) => {
+      const left = Math.max(EDGE, Math.min(window.innerWidth - width - EDGE, current.left + moveEvent.clientX - startX))
+      const top = Math.max(EDGE, Math.min(window.innerHeight - height - EDGE, current.top + moveEvent.clientY - startY))
+      manualRef.current = { left, top }
+      setBox(previous => previous ? { ...previous, left, top } : previous)
+      setManual({ left, top })
+    }
+    const finish = () => {
+      setDragging(false)
+      window.removeEventListener('pointermove', move)
+      window.removeEventListener('pointerup', finish)
+      window.removeEventListener('pointercancel', finish)
+      const position = manualRef.current
+      if (position) {
+        try { window.localStorage.setItem(POSITION_KEY, JSON.stringify(position)) } catch { /* storage can be unavailable */ }
+      }
+    }
+    window.addEventListener('pointermove', move)
+    window.addEventListener('pointerup', finish)
+    window.addEventListener('pointercancel', finish)
+  }
+
+  const resetPosition = () => {
+    manualRef.current = null
+    setManual(null)
+    try { window.localStorage.removeItem(POSITION_KEY) } catch { /* storage can be unavailable */ }
+    setBox(undefined)
+    window.requestAnimationFrame(place)
+  }
+
   const todos = data?.brief?.todos ?? []
   const counts = data?.brief?.counts
   const total = counts?.total ?? 0
@@ -176,7 +246,12 @@ export function HeroMorningCard({ size = 34, className }: { size?: number; class
         visibility: 'visible',
       } : { visibility: 'hidden' }}
     >
-      <header className="dsh-knowledge-morning-head">
+      <header
+        className={`dsh-knowledge-morning-head${dragging ? ' is-dragging' : ''}`}
+        onPointerDown={beginDrag}
+        onDoubleClick={resetPosition}
+        title="拖动移动卡片，双击恢复默认位置"
+      >
         <div className="dsh-knowledge-morning-title">
           <h2>早晨卡片</h2>
           <small>{dayLabel}</small>

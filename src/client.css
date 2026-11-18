@@ -736,6 +736,7 @@ body[data-ds-dark-theme] :is(
 .dsh-knowledge-morning-title { display: flex; align-items: center; gap: 6px; min-width: 0; font-size: 14px; font-weight: 600; line-height: 22px; }
 .dsh-knowledge-morning-title small { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--knowledge-text-tertiary); font-size: 12px; font-weight: 400; }
 .dsh-knowledge-morning-x { flex: none; width: 24px; height: 24px; padding: 0; border: 0; border-radius: 8px; background: transparent; color: var(--knowledge-text-tertiary); font-size: 18px; line-height: 1; cursor: pointer; }
+.dsh-knowledge-morning-head.is-dragging { cursor: grabbing; }
 .dsh-knowledge-morning-x:hover { color: var(--knowledge-text); background: var(--knowledge-hover); }
 
 .dsh-knowledge-morning-scroll { flex: 1 1 auto; min-height: 0; overflow-y: auto; overscroll-behavior: contain; scrollbar-width: thin; scrollbar-gutter: stable; padding-right: 4px; padding-top: 10px; }
@@ -796,11 +797,12 @@ body[data-ds-dark-theme] :is(
 @keyframes dsh-morning-pop { from { opacity: 0; transform: translateY(5px) scale(.98) } to { opacity: 1; transform: none } }
 @media (prefers-reduced-motion: reduce) { .dsh-knowledge-morning-card { animation: none } }
 
-.dsh-knowledge-morning-head { flex: none; display: flex; align-items: flex-start; justify-content: space-between; gap: 8px; padding-bottom: 8px; }
+.dsh-knowledge-morning-head { flex: none; display: flex; cursor: grab; user-select: none; touch-action: none; align-items: flex-start; justify-content: space-between; gap: 8px; padding-bottom: 8px; }
 .dsh-knowledge-morning-title { display: flex; align-items: baseline; gap: 8px; min-width: 0; }
 .dsh-knowledge-morning-title h2 { margin: 0; color: var(--knowledge-card-accent); font-size: 18px; line-height: 1.25; font-weight: 600; letter-spacing: -.2px; }
 .dsh-knowledge-morning-title small { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--knowledge-text-tertiary); font-size: 11.5px; font-weight: 400; }
 .dsh-knowledge-morning-x { flex: none; width: 24px; height: 24px; padding: 0; border: 0; border-radius: 7px; background: transparent; color: var(--knowledge-text-tertiary); font-size: 18px; line-height: 1; cursor: pointer; }
+.dsh-knowledge-morning-head.is-dragging { cursor: grabbing; }
 .dsh-knowledge-morning-x:hover { color: var(--knowledge-text); background: var(--knowledge-hover); }
 
 .dsh-knowledge-morning-scroll { flex: 1 1 auto; min-height: 0; overflow-y: auto; overscroll-behavior: contain; scrollbar-width: thin; scrollbar-gutter: stable; padding-right: 3px; }
