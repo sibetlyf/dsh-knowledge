@@ -14,6 +14,7 @@ import { isNoteId, type NoteReference, type NoteListRequest } from './notes/doma
 import { renderNoteSharePage } from './notes/share-page.js'
 import { createNoteShareManifest, importNoteShare, inspectNoteShareUrl, type NoteShareRequestPolicy } from './notes/share-import.js'
 import { renderKnowledgeSharePage } from './knowledge-share-page.js'
+import { renderKnowledgeBaseSharePage } from './knowledge-base-share-page.js'
 import { renderWorklogSharePage } from './worklog-share-page.js'
 import type { KnowledgeShareStore } from './knowledge-share.js'
 import type { RecallUsage, RecallPreferencePatch, FrictionInput } from './recall-ranking.js'
@@ -162,6 +163,48 @@ async function dispatch(
       token,
       title: entry.title,
       body: entry.body,
+    }))
+  }
+
+  if (segments[0] === 'shared-base' && options.knowledgeShares !== undefined) {
+    if (method !== 'GET') throw httpError(405, 'shared knowledge base is read-only')
+    const token = segments[1]
+    if (token === undefined) throw httpError(404, 'shared knowledge base was not found')
+    const share = await options.knowledgeShares.get(token)
+    if (share === undefined || share.kind !== 'base') throw httpError(404, 'shared knowledge base was not found or is no longer available')
+    const base = await provider.getKnowledgeBase(share.id)
+    if (base === undefined || base.status !== 'active') throw httpError(404, 'shared knowledge base was not found or is no longer available')
+    const allDocuments: Array<{ id: string; title: string; relPath: string }> = []
+    let cursor: string | undefined
+    let total = 0
+    do {
+      const page = await provider.listDocumentIndex({ knowledgeBaseIds: [share.id], limit: 100, ...(cursor === undefined ? {} : { cursor }) })
+      allDocuments.push(...page.items.map(document => ({ id: document.id, title: document.title, relPath: document.relPath })))
+      total = page.total
+      cursor = page.nextCursor
+    } while (cursor !== undefined && allDocuments.length < 2000)
+    const requestedId = url.searchParams.get('doc')
+    const selectedId = requestedId ?? allDocuments[0]?.id
+    const selected = selectedId === undefined ? undefined : await provider.getDocument(selectedId)
+    if (selected !== undefined && selected.knowledgeBaseId !== share.id) throw httpError(404, 'shared document was not found')
+    if (segments[2] === 'raw' && segments.length === 3) {
+      if (selected === undefined) throw httpError(404, 'shared document was not found')
+      return sendOpaqueFile(res, `${selected.title}.md`, 'text/markdown; charset=utf-8', Buffer.from(selected.content, 'utf8'), url.searchParams.get('download') === '1')
+    }
+    if (segments.length !== 2) throw httpError(404, 'shared knowledge base route was not found')
+    const documents = allDocuments.map(document => ({
+      id: document.id,
+      title: document.title,
+      relPath: document.relPath,
+      body: document.id === selected?.id ? selected.content : '',
+    }))
+    return sendHtml(res, 200, renderKnowledgeBaseSharePage({
+      apiPrefix: prefix,
+      token,
+      baseName: base.name,
+      documents,
+      ...(selected === undefined ? {} : { selectedId: selected.id }),
+      truncated: total > allDocuments.length,
     }))
   }
 
@@ -548,6 +591,13 @@ async function dispatch(
       if (body.kind === 'worklog') {
         const share = await options.knowledgeShares.create('worklog', '工作日报', 'worklog')
         return sendJson(res, 201, { ...share, path: `${prefix}/shared-worklog/${encodeURIComponent(share.token)}` })
+      }
+      if (body.kind === 'base') {
+        const knowledgeBaseId = requiredString(body.knowledgeBaseId, 'knowledgeBaseId')
+        const base = await provider.getKnowledgeBase(knowledgeBaseId)
+        if (base === undefined || base.status !== 'active') throw httpError(404, '知识库不存在或已归档')
+        const share = await options.knowledgeShares.create(knowledgeBaseId, base.name, 'base')
+        return sendJson(res, 201, { ...share, path: `${prefix}/shared-base/${encodeURIComponent(share.token)}` })
       }
       if (body.kind !== undefined && body.kind !== 'document') throw httpError(400, 'unsupported share kind')
       const documentId = requiredString(body.documentId, 'documentId')

@@ -1715,6 +1715,7 @@ function renderKnowledgeBaseCard(base) {
     ),
     element('div', { class: 'base-card-actions' },
       actionButton('查看知识', () => { void openKnowledgeBaseDocuments(base) }, 'ghost small', { 'data-open-knowledge-base': base.id }),
+      !archived ? actionButton('分享知识库', () => { void openKnowledgeBaseShare(base) }, 'ghost small') : null,
       archived ? actionButton('恢复', () => confirmRestoreKnowledgeBase(base), 'small') : actionButton('编辑', () => openKnowledgeBaseEditor(base), 'small'),
       archived ? actionButton('永久删除', () => confirmDeleteKnowledgeBase(base), 'danger small') : null,
       !archived && base.id !== 'default' ? actionButton('归档', () => confirmArchiveKnowledgeBase(base), 'danger small') : null,
@@ -4084,27 +4085,38 @@ async function openKnowledgeShare(documentEntry) {
   }
 }
 
+async function openKnowledgeBaseShare(base) {
+  try {
+    const share = await api('knowledge-shares', { method: 'POST', body: { knowledgeBaseId: base.id, kind: 'base' } })
+    showKnowledgeShareDialog({ title: base.name, kindLabel: '整个知识库 · 只读分享' }, share)
+  } catch (error) {
+    showToast(`创建知识库分享失败：${friendlyError(error)}`, 'error')
+  }
+}
+
 function knowledgeShareUrl(share) {
   return new URL(share.path, location.href).href
 }
 
 function showKnowledgeShareDialog(documentEntry, share) {
+  const title = typeof documentEntry === 'string' ? documentEntry : documentEntry.title
+  const kindLabel = typeof documentEntry === 'string' ? '知识文档 · 只读分享' : documentEntry.kindLabel || '知识文档 · 只读分享'
   const url = knowledgeShareUrl(share)
   const input = Object.assign(element('input', {
     class: 'input notes-share-link-input', readonly: true, value: url,
-    'aria-label': `${documentEntry.title} 的分享链接`, onFocus: event => event.currentTarget.select(),
+    'aria-label': `${title} 的分享链接`, onFocus: event => event.currentTarget.select(),
   }), { value: url })
   let modal
   const body = element('div', { class: 'notes-share-dialog-body' },
     element('div', { class: 'notes-share-dialog-kind' },
-      element('span', {}, element('strong', {}, documentEntry.title), element('small', {}, '知识文档 · 只读分享'))),
+      element('span', {}, element('strong', {}, title), element('small', {}, kindLabel))),
     element('label', { class: 'notes-share-link-label' },
       element('span', {}, '分享链接'),
       element('div', { class: 'notes-share-link-row' }, input,
         actionButton('复制', () => copyText(url, '分享链接已复制。'), 'primary small'))),
-    element('p', { class: 'notes-share-dialog-note' }, '链接中的内容会随原知识文档更新。任何获得链接的人都能访问，不需要 DSH；停止分享后立即失效。'),
+    element('p', { class: 'notes-share-dialog-note' }, '链接中的内容会随原文档/知识库更新。任何获得链接的人都能访问，不需要 DSH；停止分享后立即失效。'),
     element('div', { class: 'notes-share-dialog-danger' },
-      element('span', {}, element('strong', {}, '停止分享'), element('small', {}, '不会删除原知识文档。')),
+      element('span', {}, element('strong', {}, '停止分享'), element('small', {}, '不会删除原文档或知识库。')),
       actionButton('停止分享', async () => {
         try {
           await api(`knowledge-shares/${encodeURIComponent(share.token)}`, { method: 'DELETE' })

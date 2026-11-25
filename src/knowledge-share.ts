@@ -4,7 +4,7 @@ import { mkdir, readFile, rename, writeFile } from 'node:fs/promises'
 import { dirname, join } from 'node:path'
 import { randomBytes, randomUUID } from 'node:crypto'
 
-export type KnowledgeShareKind = 'document' | 'worklog'
+export type KnowledgeShareKind = 'document' | 'worklog' | 'base'
 
 export interface KnowledgeShare {
   token: string
@@ -21,7 +21,7 @@ function isShare(value: unknown): value is KnowledgeShare {
   if (value === null || typeof value !== 'object') return false
   const row = value as Record<string, unknown>
   return typeof row.token === 'string' && TOKEN_RE.test(row.token)
-    && (row.kind === 'document' || row.kind === 'worklog')
+    && (row.kind === 'document' || row.kind === 'worklog' || row.kind === 'base')
     && typeof row.id === 'string' && row.id.length > 0
     && typeof row.title === 'string'
     && Number.isFinite(row.createdAt)
