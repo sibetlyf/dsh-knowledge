@@ -230,9 +230,11 @@ pnpm dsh web
 | GET | `/shared/:token/manifest` | public | 返回供导入使用的只读目录清单与内容摘要 |
 | GET/POST | `/knowledge-shares` | admin | 列出或创建知识文档只读分享 |
 | DELETE | `/knowledge-shares/:token` | admin | 撤销知识文档分享 |
-| GET | `/shared-knowledge/:token` | public | 打开知识文档只读分享页，无需 DSH 或 Bearer Token |
+| GET | `/shared-knowledge/:token` | public | 打开知识文档只读分享页；链接必须携带有效令牌 |
 | GET | `/shared-knowledge/:token/raw` | public | 下载当前文档 Markdown，支持 `download=1` |
 | GET | `/shared-knowledge/:token/manifest` | public | 返回标题、版本、更新时间和正文长度 |
+| GET | `/shared-worklog/:token` | public | 工作日报只读页；链接必须携带有效令牌 |
+| GET | `/shared-worklog/:token/raw` | public | 下载当前日报 Markdown，支持 `download=1` |
 | GET/POST | `/entries` | read/write | 列表和直接创建 |
 | GET/PUT/DELETE | `/entries/:id` | read/write/admin | 详情、更新、彻底删除 |
 | GET/POST | `/entries/:id/note-references` | read/write | 查看或添加结构化笔记关联 |

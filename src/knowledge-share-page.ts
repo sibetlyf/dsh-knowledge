@@ -5,7 +5,7 @@ function escapeHtml(value: string): string {
   return value.replaceAll('&', '&amp;').replaceAll('<', '&lt;').replaceAll('>', '&gt;').replaceAll('"', '&quot;').replaceAll("'", '&#39;')
 }
 
-const STANDALONE_TOKENS = `:root{--bg:#f5f6f7;--text:#202428;--text-secondary:#5c646b;--text-tertiary:#8b939a;--border:#d7dce0;--border-strong:#b5bcc2;--surface-raised:#fff;--accent:#3f647b;--font-ui:-apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Microsoft YaHei",sans-serif;--font-mono:ui-monospace,SFMono-Regular,Consolas,monospace;--font-reading:Georgia,"Songti SC","Noto Serif CJK SC",serif}
+export const STANDALONE_TOKENS = `:root{--bg:#f5f6f7;--text:#202428;--text-secondary:#5c646b;--text-tertiary:#8b939a;--border:#d7dce0;--border-strong:#b5bcc2;--surface-raised:#fff;--accent:#3f647b;--font-ui:-apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Microsoft YaHei",sans-serif;--font-mono:ui-monospace,SFMono-Regular,Consolas,monospace;--font-reading:Georgia,"Songti SC","Noto Serif CJK SC",serif}
 @media(prefers-color-scheme:dark){:root{--bg:#15181a;--text:#eef1f3;--text-secondary:#aab2b8;--text-tertiary:#7d868d;--border:#333a3f;--border-strong:#4a545b;--surface-raised:#202528;--accent:#8eb6cd}}`
 
 export interface KnowledgeSharePageInput {

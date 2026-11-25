@@ -26,6 +26,7 @@ function Reports({ close, openSession, embedded = false, currentProject = '' }) 
   const [error, setError] = useState(''), [message, setMessage] = useState(''), [busy, setBusy] = useState(false)
   const [modal, setModal] = useState(''), [draft, setDraft] = useState(''), [revision, setRevision] = useState(0)
   const [period, setPeriod] = useState(null), [periodKind, setPeriodKind] = useState('week'), [periodBusy, setPeriodBusy] = useState(false)
+  const [share, setShare] = useState(null), [shareBusy, setShareBusy] = useState(false)
   const [settingsDirty, setSettingsDirty] = useState(false)
   const [evidence, setEvidence] = useState(null)
   const [dates, setDates] = useState(false)
@@ -87,13 +88,38 @@ function Reports({ close, openSession, embedded = false, currentProject = '' }) 
       setPeriod(result); setPeriodKind(kind); setModal('period')
     } catch (e) { setError(e.message) } finally { setPeriodBusy(false) }
   }
+  async function openShare() {
+    setShareBusy(true); setError('')
+    try {
+      const response = await fetch('/knowledge-local/v1/knowledge-shares', {
+        method: 'POST', credentials: 'same-origin',
+        headers: { 'content-type': 'application/json', 'x-dsh-knowledge-client': 'management-web' },
+        body: JSON.stringify({ kind: 'worklog' }),
+      })
+      const result = await response.json().catch(() => ({}))
+      if (!response.ok) throw new Error(result.error || `HTTP ${response.status}`)
+      setShare(result); setModal('share')
+    } catch (e) { setError(e.message) } finally { setShareBusy(false) }
+  }
+  async function stopShare() {
+    if (!share) return
+    setShareBusy(true)
+    try {
+      const response = await fetch(`/knowledge-local/v1/knowledge-shares/${encodeURIComponent(share.token)}`, {
+        method: 'DELETE', credentials: 'same-origin', headers: { 'x-dsh-knowledge-client': 'management-web' },
+      })
+      if (!response.ok) throw new Error(`HTTP ${response.status}`)
+      setShare(null); setModal('');
+    } catch (e) { setError(e.message) } finally { setShareBusy(false) }
+  }
+  const shareUrl = share ? new URL(share.path, location.href).href : ''
   function visit(sessionId) { try { openSession(sessionId) } catch { setError('无法打开来源会话，它可能已被删除或归档。') } }
   const localSource = record => !record.sourceId ? !state?.remote : record.sourceId === state?.sourceId
   const active = ['queued', 'running'].includes(detail?.job?.status)
   const dayList = <nav className="wl-days" aria-label="日报日期"><input type="date" aria-label="选择日报日期" value={day} onChange={e => { if (e.target.value) select(e.target.value) }} />{state && [...new Set([state.today, ...state.days])].filter(Boolean).sort().reverse().map(d => <button key={d} aria-current={d === day ? 'date' : undefined} onClick={() => select(d)}><span>{d}</span><small>{state.failedDays?.includes(d) ? '整理失败' : d === state.today ? '今天' : ''}</small></button>)}</nav>
   return <section className="dsh-worklog wl-workspace">
     <header className="wl-toolbar">{!embedded && <><h1>工作记录</h1><span className="wl-muted wl-desktop">每天的进展，留有依据</span></>}<div className="wl-spacer" />
-      <button className="wl-mobile" onClick={() => setDates(true)}>日期</button><button onClick={() => setModal('settings')} disabled={!state}>采集设置</button>{!embedded && <button onClick={close}>返回对话</button>}
+      <button className="wl-mobile" onClick={() => setDates(true)}>日期</button><button onClick={() => setModal('settings')} disabled={!state}>采集设置</button><button onClick={() => { void openShare() }} disabled={shareBusy || !detail}>{shareBusy ? '生成中…' : '分享日报'}</button>{!embedded && <button onClick={close}>返回对话</button>}
     </header>
     <SyncStatus />
     {error && <div className="wl-error" role="alert">{error}<button onClick={() => { setError(''); setVersion(v => v + 1) }}>重新加载</button></div>}
@@ -120,7 +146,7 @@ function Reports({ close, openSession, embedded = false, currentProject = '' }) 
     {message && <div className="wl-feedback" role="status">{message}</div>}
     {dates && <Dialog title="选择日期" close={() => setDates(false)}>{dayList}</Dialog>}
     {evidence && <SourceViewer key={evidence} id={evidence} close={() => setEvidence(null)} time={time} localSource={localSource} visit={visit} openSession={openSession} />}
-    {modal && <Dialog key={modal} title={modal === 'period' ? `${periodKind === 'week' ? '周报' : '月报'} · ${period?.from || ''} ~ ${period?.to || ''}` : { failure: '整理失败详情', settings: '工作记录 · 采集设置', note: '补记一条', edit: '编辑日报', history: '历史版本', replace: '重新整理日报' }[modal]} busy={busy} protectChanges={['settings', 'note', 'edit'].includes(modal)} dirty={modal === 'settings' ? settingsDirty : modal === 'edit' ? draft !== detail.report.markdown : modal === 'note' ? !!draft.trim() : undefined} close={() => !busy && setModal('')}>
+    {modal && <Dialog key={modal} title={modal === 'period' ? `${periodKind === 'week' ? '周报' : '月报'} · ${period?.from || ''} ~ ${period?.to || ''}` : modal === 'share' ? '分享工作日报' : { failure: '整理失败详情', settings: '工作记录 · 采集设置', note: '补记一条', edit: '编辑日报', history: '历史版本', replace: '重新整理日报' }[modal]} busy={busy} protectChanges={['settings', 'note', 'edit'].includes(modal)} dirty={modal === 'settings' ? settingsDirty : modal === 'edit' ? draft !== detail.report.markdown : modal === 'note' ? !!draft.trim() : undefined} close={() => !busy && setModal('')}>
       {error && <p className="wl-error" role="alert">{error}</p>}
       {modal === 'settings' && <Settings state={state} currentProject={currentProject} busy={busy} onDirtyChange={setSettingsDirty} saveCapture={config => act('/capture-settings', config)} save={config => act('/settings', config)} />}
       {['note', 'edit'].includes(modal) && <form id={editFormId} onSubmit={e => { e.preventDefault(); act(modal === 'note' ? '/note' : '/save', modal === 'note' ? { day, text: draft } : { day, markdown: draft, revision }) }}><label>{modal === 'note' ? '记录实际完成的工作、决定或待办' : 'Markdown 正文'}<textarea autoFocus rows={14} value={draft} onChange={e => setDraft(e.target.value)} required /></label><DialogActions><button type="submit" form={editFormId} disabled={busy || !draft.trim()} className="wl-primary">{busy ? '保存中…' : '保存'}</button></DialogActions></form>}
@@ -128,6 +154,15 @@ function Reports({ close, openSession, embedded = false, currentProject = '' }) 
       {modal === 'history' && <History day={day} time={time} edit={markdown => { setDraft(markdown); setRevision(detail.report.revision); setModal('edit') }} />}
       {modal === 'failure' && detail?.job && <FailureDetails key={detail.job.id} day={day} jobId={detail.job.id} onEvidence={setEvidence} />}
       {modal === 'period' && period && <article className="wl-document"><Markdown text={period.markdown} onEvidence={() => {}} /></article>}
+      {modal === 'share' && share && <div>
+        <p>任何拿到链接的人都能只读查看工作日报，不需要 DSH 或登录令牌。链接内含随机令牌，停止分享后立即失效。</p>
+        <label>分享链接<input readOnly value={shareUrl} onFocus={event => event.currentTarget.select()} /></label>
+        <DialogActions>
+          <button disabled={shareBusy} onClick={() => { void copyText(shareUrl).then(() => setMessage('分享链接已复制')).catch(e => setError(e.message)) }}>复制链接</button>
+          <button disabled={shareBusy} onClick={() => { void stopShare() }}>停止分享</button>
+          <button className="wl-primary" onClick={() => setModal('')}>完成</button>
+        </DialogActions>
+      </div>}
     </Dialog>}
   </section>
 }

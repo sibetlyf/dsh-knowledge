@@ -131,6 +131,10 @@ export function apply(ctx: Context, config: KnowledgeConfig): void {
     if (!journalRuntime) throw connectionError(503, '中央日报服务尚未就绪')
     return journalRuntime.dispatch(method, path, data, query)
   }
+  const journalBrowse = (method: string, path: string, data: Record<string, unknown>, query: URLSearchParams): Promise<unknown> => {
+    if (!journalRuntime) throw connectionError(503, '工作日报服务尚未就绪')
+    return journalRuntime.browser(method, path, data, query)
+  }
 
   const coordinator = new ExtractionCoordinator(runtime, provider, resolved, () => (
     clientSettings.writebackProvider && clientSettings.writebackModel
@@ -184,7 +188,7 @@ export function apply(ctx: Context, config: KnowledgeConfig): void {
     const resolvedDay = day ?? new Date().toLocaleDateString('en-CA', { timeZone: 'Asia/Shanghai' })
     let brief: unknown
     try {
-      if (journalRuntime) brief = await journalDispatch('GET', '/brief', {}, new URLSearchParams({ day: resolvedDay }))
+      if (journalRuntime) brief = await journalBrowse('GET', '/brief', {}, new URLSearchParams({ day: resolvedDay }))
     } catch (error) {
       runtime.logger.warn(`dsh-knowledge: morning brief failed open: ${error instanceof Error ? error.message : String(error)}`)
     }
@@ -293,6 +297,7 @@ export function apply(ctx: Context, config: KnowledgeConfig): void {
         if (managementProvider === undefined) throw connectionError(409, '当前 DSH 没有可供远程访问的本地知识库。')
         disposePublicApi = registerKnowledgeApi(httpRuntime, managementProvider, resolved.apiPrefix, {
           worklog: journalDispatch,
+          worklogBrowser: journalBrowse,
           shareRequestPolicy: () => ({ trustedPrivateOrigins: trustedShareOrigins }),
           tencentDocs,
           morning: morningBrief,
@@ -349,6 +354,8 @@ export function apply(ctx: Context, config: KnowledgeConfig): void {
       } else if (managementProvider !== undefined) {
         disposeManagementApi = registerKnowledgeApi(httpRuntime, managementProvider, LOCAL_MANAGEMENT_API_PREFIX, {
           authMode: 'same-origin',
+          worklog: journalDispatch,
+          worklogBrowser: journalBrowse,
           ...(localNoteVault?{noteWorkspace:{vault:localNoteVault}}:{}),
           service: { current: publicApiView, update: updateClientSettings },
           shareRequestPolicy: () => ({ trustedPrivateOrigins: trustedShareOrigins }),

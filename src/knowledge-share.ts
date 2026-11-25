@@ -4,9 +4,11 @@ import { mkdir, readFile, rename, writeFile } from 'node:fs/promises'
 import { dirname, join } from 'node:path'
 import { randomBytes, randomUUID } from 'node:crypto'
 
+export type KnowledgeShareKind = 'document' | 'worklog'
+
 export interface KnowledgeShare {
   token: string
-  kind: 'document'
+  kind: KnowledgeShareKind
   id: string
   title: string
   createdAt: number
@@ -19,7 +21,7 @@ function isShare(value: unknown): value is KnowledgeShare {
   if (value === null || typeof value !== 'object') return false
   const row = value as Record<string, unknown>
   return typeof row.token === 'string' && TOKEN_RE.test(row.token)
-    && row.kind === 'document'
+    && (row.kind === 'document' || row.kind === 'worklog')
     && typeof row.id === 'string' && row.id.length > 0
     && typeof row.title === 'string'
     && Number.isFinite(row.createdAt)
@@ -62,14 +64,14 @@ export class KnowledgeShareStore {
     return (await this.load()).find(row => row.token === token)
   }
 
-  async create(id: string, title: string): Promise<KnowledgeShare> {
+  async create(id: string, title: string, kind: KnowledgeShareKind = 'document'): Promise<KnowledgeShare> {
     const rows = await this.load()
-    const existing = rows.find(row => row.kind === 'document' && row.id === id)
+    const existing = rows.find(row => row.kind === kind && row.id === id)
     if (existing) return existing
     if (rows.length >= MAX_SHARES) throw Object.assign(new Error('分享数量已达上限'), { status: 409 })
     const share: KnowledgeShare = {
       token: `ks_${randomBytes(24).toString('base64url')}`,
-      kind: 'document',
+      kind,
       id,
       title: title.slice(0, 200),
       createdAt: Date.now(),

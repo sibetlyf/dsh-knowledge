@@ -14,6 +14,7 @@ import { isNoteId, type NoteReference, type NoteListRequest } from './notes/doma
 import { renderNoteSharePage } from './notes/share-page.js'
 import { createNoteShareManifest, importNoteShare, inspectNoteShareUrl, type NoteShareRequestPolicy } from './notes/share-import.js'
 import { renderKnowledgeSharePage } from './knowledge-share-page.js'
+import { renderWorklogSharePage } from './worklog-share-page.js'
 import type { KnowledgeShareStore } from './knowledge-share.js'
 import type { RecallUsage, RecallPreferencePatch, FrictionInput } from './recall-ranking.js'
 import type { RetrievalIndexScope } from './retrieval-index.js'
@@ -27,6 +28,7 @@ export interface KnowledgeApiOptions {
   noteWorkspace?:NoteWorkspace
 
   worklog?: (method: string, path: string, data: Record<string, unknown>, query: URLSearchParams) => Promise<unknown>
+  worklogBrowser?: (method: string, path: string, data: Record<string, unknown>, query: URLSearchParams) => Promise<unknown>
   shareRequestPolicy?: () => NoteShareRequestPolicy
   knowledgeShares?: KnowledgeShareStore
   tencentDocs?: {
@@ -160,6 +162,44 @@ async function dispatch(
       token,
       title: entry.title,
       body: entry.body,
+    }))
+  }
+
+  const worklogRead = options.worklogBrowser ?? options.worklog
+  if (segments[0] === 'shared-worklog' && worklogRead !== undefined) {
+    if (method !== 'GET') throw httpError(405, 'shared worklog is read-only')
+    const token = segments[1]
+    if (token === undefined) throw httpError(404, 'shared worklog was not found')
+    const share = await options.knowledgeShares?.get(token)
+    if (share === undefined || share.kind !== 'worklog') throw httpError(404, 'shared worklog was not found or is no longer available')
+    const requestedDay = url.searchParams.get('day')?.trim()
+    if (requestedDay !== undefined && !/^\d{4}-\d{2}-\d{2}$/u.test(requestedDay)) throw httpError(400, 'day must be YYYY-MM-DD')
+    type WorklogShareState = { today?: string; days?: Array<string | { day?: string }> }
+    const state = await worklogRead('GET', '/state', {}, new URLSearchParams()) as WorklogShareState
+    const days = (state.days ?? []).map(item => typeof item === 'string' ? item : typeof item?.day === 'string' ? item.day : '').filter(Boolean)
+    const day = requestedDay ?? state.today ?? days[0] ?? ''
+    if (!day) throw httpError(404, 'worklog has no report to share')
+    const detail = await worklogRead('GET', '/day-summary', {}, new URLSearchParams({ day })) as {
+      report?: { markdown?: unknown; updated?: unknown }
+    }
+    const markdown = typeof detail?.report?.markdown === 'string' ? detail.report.markdown : ''
+    if (segments[2] === 'raw' && segments.length === 3) {
+      return sendOpaqueFile(res, `工作日报-${day}.md`, 'text/markdown; charset=utf-8', Buffer.from(markdown, 'utf8'), url.searchParams.get('download') === '1')
+    }
+    if (segments.length !== 2) throw httpError(404, 'shared worklog route was not found')
+    let todos: Array<{ text: string; cat?: string; done?: boolean; carriedFrom?: string }> = []
+    try {
+      const brief = await worklogRead('GET', '/brief', {}, new URLSearchParams({ day })) as { todos?: unknown }
+      if (Array.isArray(brief?.todos)) todos = brief.todos.filter((item): item is { text: string; cat?: string; done?: boolean; carriedFrom?: string } => item !== null && typeof item === 'object' && typeof (item as { text?: unknown }).text === 'string')
+    } catch { /* todo list is optional on the public page */ }
+    return sendHtml(res, 200, renderWorklogSharePage({
+      apiPrefix: prefix,
+      token,
+      day,
+      days,
+      markdown,
+      ...(typeof detail?.report?.updated === 'number' ? { updated: detail.report.updated } : {}),
+      todos,
     }))
   }
 
@@ -505,6 +545,11 @@ async function dispatch(
     }
     if (method === 'POST' && segments.length === 1) {
       const body = await readObject(req)
+      if (body.kind === 'worklog') {
+        const share = await options.knowledgeShares.create('worklog', '工作日报', 'worklog')
+        return sendJson(res, 201, { ...share, path: `${prefix}/shared-worklog/${encodeURIComponent(share.token)}` })
+      }
+      if (body.kind !== undefined && body.kind !== 'document') throw httpError(400, 'unsupported share kind')
       const documentId = requiredString(body.documentId, 'documentId')
       const entry = await provider.get(documentId)
       if (entry === undefined || entry.status !== 'active') throw httpError(404, '知识文档不存在或已归档')

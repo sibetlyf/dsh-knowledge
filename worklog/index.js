@@ -38,5 +38,5 @@ export function apply(ctx, config) {
   })
   service.start()
   ctx.effect(() => async () => { await service.close(); store.close(); config.onDispose?.() }, 'worklog.close')
-  return { calendar: (...args) => service.calendar(...args), dispatch: (...args) => service.serveCentral(...args), read: (...args) => service.read(...args), isRunning: () => !!worker.active }
+  return { calendar: (...args) => service.calendar(...args), dispatch: (...args) => service.serveCentral(...args), browser: (...args) => service.browser(...args), read: (...args) => service.read(...args), isRunning: () => !!worker.active }
 }
