@@ -1,5 +1,6 @@
 import { calendarPaths } from './calendar/routes.js'
-import { capture, settings, fail } from './domain.js'
+import { capture, settings, fail, validDay, dayOf } from './domain.js'
+import { generatePeriod } from './period.js'
 import { createCentral, pick, captureKeys, sharedKeys, sharedRevision } from './central.js'
 import { Outbox } from './outbox.js'
 import { destination, requestCentral } from './remote.js'
@@ -13,6 +14,24 @@ export class JournalService {
     worker.isEnabled = () => this.current().backend === 'local' && !this.current().paused
     store.icloud.active = () => !this.closed && this.current().backend === 'local' && !this.current().paused
     store.originId()
+  }
+  async period(day, kind) {
+    const base = this.store.period(day, kind)
+    const config = this.store.config()
+    if (!config.provider || !config.model) return { ...base, generated: false }
+    try {
+      const markdown = await generatePeriod(this.worker.llm, {
+        route: { provider: config.provider, model: config.model },
+        kind,
+        from: base.from,
+        to: base.to,
+        material: base.markdown.slice(0, 50_000),
+        signal: AbortSignal.timeout(120_000),
+      })
+      return { ...base, markdown, generated: true }
+    } catch (error) {
+      return { ...base, generated: false, error: error instanceof Error ? error.message : String(error) }
+    }
   }
   collect(session, turn) {
     if (session.header.origin === 'subagent') return
@@ -94,6 +113,20 @@ export class JournalService {
     // Browser cannot bypass migration confirmation via central ingestion routes.
     if (['/ingest', '/archive', '/identity'].includes(path)) throw fail('日报接口不存在', 404)
     if (!target) {
+      if (method === 'GET' && path === '/todos') {
+        const day = validDay(query.get('day') || dayOf(Date.now(), this.store.config().timezone))
+        return { day, todos: this.store.todos(day) }
+      }
+      if (method === 'POST' && path === '/todos') return { todos: this.store.mutateTodo(data) }
+      if (method === 'GET' && path === '/brief') {
+        return this.store.brief(validDay(query.get('day') || dayOf(Date.now(), this.store.config().timezone)))
+      }
+      if (method === 'GET' && path === '/period') {
+        return this.period(
+          validDay(query.get('day') || dayOf(Date.now(), this.store.config().timezone)),
+          query.get('kind') || 'week',
+        )
+      }
       if (method === 'POST' && path === '/settings') {
         if (data.sharedRevision !== undefined && data.sharedRevision !== sharedRevision(this.store.config())) throw fail('中央配置已更新，请重新打开采集设置后重试', 409)
         return this.store.configure(data)

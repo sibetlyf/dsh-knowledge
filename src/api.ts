@@ -13,6 +13,8 @@ import type { RuntimeContextLike } from './runtime.js'
 import { isNoteId, type NoteReference, type NoteListRequest } from './notes/domain.js'
 import { renderNoteSharePage } from './notes/share-page.js'
 import { createNoteShareManifest, importNoteShare, inspectNoteShareUrl, type NoteShareRequestPolicy } from './notes/share-import.js'
+import { renderKnowledgeSharePage } from './knowledge-share-page.js'
+import type { KnowledgeShareStore } from './knowledge-share.js'
 import type { RecallUsage, RecallPreferencePatch, FrictionInput } from './recall-ranking.js'
 import type { RetrievalIndexScope } from './retrieval-index.js'
 
@@ -26,6 +28,15 @@ export interface KnowledgeApiOptions {
 
   worklog?: (method: string, path: string, data: Record<string, unknown>, query: URLSearchParams) => Promise<unknown>
   shareRequestPolicy?: () => NoteShareRequestPolicy
+  knowledgeShares?: KnowledgeShareStore
+  tencentDocs?: {
+    status(signal?: AbortSignal): Promise<unknown>
+    saveToken(token: string): Promise<unknown>
+    clearToken(): Promise<unknown>
+    importDocument(input: { url: string; knowledgeBaseId?: string; title?: string; group?: string }, signal?: AbortSignal): Promise<unknown>
+    publish(documentId: string, signal?: AbortSignal): Promise<unknown>
+  }
+  morning?: (day?: string, signal?: AbortSignal) => Promise<unknown>
   authMode?: 'bearer' | 'same-origin'
   service?: {
     current(): { publicApiEnabled: boolean; publicApiPrefix: string; writebackProvider?: string; writebackModel?: string; extractionEveryTurns?:number; extractionIdleSeconds?:number }
@@ -119,6 +130,36 @@ async function dispatch(
       ...selectedText === undefined ? {} : { selectedText },
       contentTruncated,
       listTruncated,
+    }))
+  }
+
+  if (segments[0] === 'shared-knowledge' && options.knowledgeShares !== undefined) {
+    if (method !== 'GET') throw httpError(405, 'shared knowledge is read-only')
+    const token = segments[1]
+    if (token === undefined) throw httpError(404, 'shared knowledge was not found')
+    const share = await options.knowledgeShares.get(token)
+    if (share === undefined) throw httpError(404, 'shared knowledge was not found or is no longer available')
+    const entry = await provider.get(share.id)
+    if (entry === undefined || entry.status !== 'active') throw httpError(404, 'shared knowledge was not found or is no longer available')
+    if (segments[2] === 'raw' && segments.length === 3) {
+      return sendOpaqueFile(res, `${entry.title}.md`, 'text/markdown; charset=utf-8', Buffer.from(entry.body, 'utf8'), url.searchParams.get('download') === '1')
+    }
+    if (segments[2] === 'manifest' && segments.length === 3) {
+      return sendJson(res, 200, {
+        kind: 'knowledge-document',
+        title: entry.title,
+        createdAt: share.createdAt,
+        updatedAt: entry.updatedAt,
+        version: entry.version,
+        bodyLength: entry.body.length,
+      })
+    }
+    if (segments.length !== 2) throw httpError(404, 'shared knowledge route was not found')
+    return sendHtml(res, 200, renderKnowledgeSharePage({
+      apiPrefix: prefix,
+      token,
+      title: entry.title,
+      body: entry.body,
     }))
   }
 
@@ -454,6 +495,73 @@ async function dispatch(
       ...cursor === undefined ? {} : { cursor },
       limit: integerParam(url, 'limit', 60, 1, 100),
     }))
+  }
+
+  if (segments[0] === 'knowledge-shares' && options.knowledgeShares !== undefined) {
+    requirePermission(actor.permissions, 'admin')
+    if (method === 'GET' && segments.length === 1) {
+      const shares = await options.knowledgeShares.list()
+      return sendJson(res, 200, { shares, pathPrefix: `${prefix}/shared-knowledge/` })
+    }
+    if (method === 'POST' && segments.length === 1) {
+      const body = await readObject(req)
+      const documentId = requiredString(body.documentId, 'documentId')
+      const entry = await provider.get(documentId)
+      if (entry === undefined || entry.status !== 'active') throw httpError(404, '知识文档不存在或已归档')
+      const share = await options.knowledgeShares.create(documentId, entry.title)
+      return sendJson(res, 201, { ...share, path: `${prefix}/shared-knowledge/${encodeURIComponent(share.token)}` })
+    }
+    if (method === 'DELETE' && segments.length === 2) {
+      const removed = await options.knowledgeShares.revoke(segments[1] ?? '')
+      if (!removed) throw httpError(404, '分享不存在')
+      res.statusCode = 204
+      res.end()
+      return
+    }
+    throw httpError(404, 'knowledge share action was not found')
+  }
+
+  if (segments[0] === 'morning' && segments.length === 1 && method === 'GET' && options.morning !== undefined) {
+    requirePermission(actor.permissions, 'read')
+    return sendJson(res, 200, await options.morning(url.searchParams.get('day')?.trim() || undefined))
+  }
+
+  if (segments[0] === 'tencent-docs' && segments.length === 2 && options.tencentDocs !== undefined) {
+    if (segments[1] === 'status' && method === 'GET') {
+      requirePermission(actor.permissions, 'read')
+      return sendJson(res, 200, await options.tencentDocs.status())
+    }
+    if (segments[1] === 'token' && method === 'POST') {
+      requirePermission(actor.permissions, 'write')
+      const body = await readObject(req)
+      const token = typeof body.token === 'string' ? body.token.trim() : ''
+      if (token.length === 0) throw httpError(400, 'token is required')
+      return sendJson(res, 200, await options.tencentDocs.saveToken(token))
+    }
+    if (segments[1] === 'token' && method === 'DELETE') {
+      requirePermission(actor.permissions, 'write')
+      return sendJson(res, 200, await options.tencentDocs.clearToken())
+    }
+    if (segments[1] === 'import' && method === 'POST') {
+      requirePermission(actor.permissions, 'write')
+      const body = await readObject(req)
+      const urlValue = typeof body.url === 'string' ? body.url.trim() : ''
+      if (urlValue.length === 0) throw httpError(400, 'url is required')
+      return sendJson(res, 200, await options.tencentDocs.importDocument({
+        url: urlValue,
+        ...typeof body.knowledgeBaseId === 'string' && body.knowledgeBaseId.trim() ? { knowledgeBaseId: body.knowledgeBaseId.trim() } : {},
+        ...typeof body.title === 'string' && body.title.trim() ? { title: body.title.trim() } : {},
+        ...typeof body.group === 'string' && body.group.trim() ? { group: body.group.trim() } : {},
+      }))
+    }
+    if (segments[1] === 'publish' && method === 'POST') {
+      requirePermission(actor.permissions, 'write')
+      const body = await readObject(req)
+      const documentId = typeof body.documentId === 'string' ? body.documentId.trim() : ''
+      if (documentId.length === 0) throw httpError(400, 'documentId is required')
+      return sendJson(res, 200, await options.tencentDocs.publish(documentId))
+    }
+    throw httpError(404, 'tencent docs action was not found')
   }
 
   if (segments[0] === 'knowledge-bases') {

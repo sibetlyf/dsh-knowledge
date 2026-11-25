@@ -33,6 +33,8 @@ import { RemoteKnowledgeProvider, RemoteProviderError } from './remote-provider.
 import type { RuntimeContextLike } from './runtime.js'
 import { loadServiceSettings, serviceSettingsPath, storeServiceSettings, type KnowledgeServiceSettings } from './service-settings.js'
 import { registerKnowledgeTools } from './tools.js'
+import { createTencentDocsBridge } from './tencent-docs.js'
+import { KnowledgeShareStore } from './knowledge-share.js'
 import { createKnowledgeTrackingService, KNOWLEDGE_TRACKING_SERVICE } from './tracking.js'
 import { createKnowledgeMountManagement, KNOWLEDGE_MOUNT_MANAGEMENT_SERVICE } from './mount-management.js'
 import { createNoteRecording } from './note-recording.js'
@@ -153,6 +155,42 @@ export function apply(ctx: Context, config: KnowledgeConfig): void {
   }, message => runtime.logger.warn(message), () => ({everyTurns:clientSettings.extractionEveryTurns??1,idleSeconds:clientSettings.extractionIdleSeconds??180,maxChars:resolved.extractionMaxInputChars})) : undefined
   const handleCodec = new KnowledgeHandleCodec(randomBytes(32), () => createHash('sha256').update(destination()).digest('hex'))
   const noteHandleCodec = new KnowledgeNoteHandleCodec(randomBytes(32))
+  const tencentDocs = createTencentDocsBridge(runtime, provider)
+  const knowledgeShares = new KnowledgeShareStore(resolved.databasePath ?? join(process.cwd(), '.knowledge-shares'))
+  const meetingSnapshot = async (): Promise<{ available: boolean; tool?: string; summary?: string; error?: string }> => {
+    const tools = (runtime.get('tools') ?? runtime.tools) as {
+      schemas?: () => Array<{ name: string }>
+      execute?: (input: { name: string; arguments: unknown; signal: AbortSignal; callId: never }) => Promise<{ value?: unknown; content?: unknown; isError?: boolean }>
+    } | undefined
+    if (tools?.schemas === undefined || tools.execute === undefined) return { available: false }
+    for (const name of ['meeting_agent_status', 'meeting_status']) {
+      if (!tools.schemas().some(tool => tool.name === name)) continue
+      try {
+        const result = await tools.execute({
+          name,
+          arguments: {},
+          signal: AbortSignal.timeout(5_000),
+          callId: `knowledge-morning:${Date.now()}` as never,
+        })
+        const status = result.value ?? result.content
+        return { available: true, tool: name, summary: describeMeeting(status) }
+      } catch (error) {
+        return { available: false, tool: name, error: error instanceof Error ? error.message : String(error) }
+      }
+    }
+    return { available: false }
+  }
+  const morningBrief = async (day?: string): Promise<unknown> => {
+    const resolvedDay = day ?? new Date().toLocaleDateString('en-CA', { timeZone: 'Asia/Shanghai' })
+    let brief: unknown
+    try {
+      if (journalRuntime) brief = await journalDispatch('GET', '/brief', {}, new URLSearchParams({ day: resolvedDay }))
+    } catch (error) {
+      runtime.logger.warn(`dsh-knowledge: morning brief failed open: ${error instanceof Error ? error.message : String(error)}`)
+    }
+    const meeting = await meetingSnapshot()
+    return { day: resolvedDay, brief, meeting }
+  }
   const managementEmbedToken = randomBytes(32).toString('base64url')
   registerKnowledgeRecall(runtime, provider, resolved, handleCodec)
   registerKnowledgeCatalog(runtime, provider, resolved)
@@ -256,6 +294,9 @@ export function apply(ctx: Context, config: KnowledgeConfig): void {
         disposePublicApi = registerKnowledgeApi(httpRuntime, managementProvider, resolved.apiPrefix, {
           worklog: journalDispatch,
           shareRequestPolicy: () => ({ trustedPrivateOrigins: trustedShareOrigins }),
+          tencentDocs,
+          morning: morningBrief,
+          knowledgeShares,
         })
       }
     }
@@ -311,6 +352,9 @@ export function apply(ctx: Context, config: KnowledgeConfig): void {
           ...(localNoteVault?{noteWorkspace:{vault:localNoteVault}}:{}),
           service: { current: publicApiView, update: updateClientSettings },
           shareRequestPolicy: () => ({ trustedPrivateOrigins: trustedShareOrigins }),
+          tencentDocs,
+          morning: morningBrief,
+          knowledgeShares,
         })
       }
     }
@@ -549,4 +593,28 @@ function sendControlError(res: { writeHead(status: number, headers?: Record<stri
     'content-type': 'application/json; charset=utf-8',
     'cache-control': 'no-store',
   }).end(JSON.stringify({ error: message }))
+}
+
+function describeMeeting(value: unknown): string {
+  if (typeof value === 'string') return value.trim().slice(0, 120) || '会议助手已就绪'
+  if (Array.isArray(value)) {
+    for (const item of value) {
+      const text = describeMeeting(item)
+      if (text.length > 0 && text !== '会议助手已就绪') return text
+    }
+    return '会议助手已就绪'
+  }
+  if (value !== null && typeof value === 'object') {
+    const record = value as Record<string, unknown>
+    if (record.listening === true || record.running === true || record.active === true || record.inMeeting === true) return '会议助手正在听'
+    const meeting = record.meeting
+    const title = typeof record.title === 'string' ? record.title
+      : meeting !== null && typeof meeting === 'object' && typeof (meeting as Record<string, unknown>).title === 'string'
+        ? String((meeting as Record<string, unknown>).title)
+        : undefined
+    if (title) return `会议助手 · ${title.slice(0, 80)}`
+    if (typeof record.state === 'string' && record.state.trim().length > 0) return `会议助手 · ${record.state.trim().slice(0, 80)}`
+    if (typeof record.summary === 'string' && record.summary.trim().length > 0) return record.summary.trim().slice(0, 120)
+  }
+  return '会议助手已就绪'
 }

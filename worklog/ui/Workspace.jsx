@@ -25,6 +25,7 @@ function Reports({ close, openSession, embedded = false, currentProject = '' }) 
   const [state, setState] = useState(null), [day, setDay] = useState(''), [detail, setDetail] = useState(null)
   const [error, setError] = useState(''), [message, setMessage] = useState(''), [busy, setBusy] = useState(false)
   const [modal, setModal] = useState(''), [draft, setDraft] = useState(''), [revision, setRevision] = useState(0)
+  const [period, setPeriod] = useState(null), [periodKind, setPeriodKind] = useState('week'), [periodBusy, setPeriodBusy] = useState(false)
   const [settingsDirty, setSettingsDirty] = useState(false)
   const [evidence, setEvidence] = useState(null)
   const [dates, setDates] = useState(false)
@@ -79,6 +80,13 @@ function Reports({ close, openSession, embedded = false, currentProject = '' }) 
     const link = document.createElement('a'); link.href = url; link.download = `工作日报-${day}.md`; link.click(); setTimeout(() => URL.revokeObjectURL(url), 1000)
   }
   async function copyReport() { try { await copyText(detail.report.markdown); setMessage('Markdown 已复制') } catch (e) { setError(e.message) } }
+  async function openPeriod(kind) {
+    setPeriodBusy(true); setError('')
+    try {
+      const result = await api(`/period?kind=${encodeURIComponent(kind)}&day=${encodeURIComponent(day)}`)
+      setPeriod(result); setPeriodKind(kind); setModal('period')
+    } catch (e) { setError(e.message) } finally { setPeriodBusy(false) }
+  }
   function visit(sessionId) { try { openSession(sessionId) } catch { setError('无法打开来源会话，它可能已被删除或归档。') } }
   const localSource = record => !record.sourceId ? !state?.remote : record.sourceId === state?.sourceId
   const active = ['queued', 'running'].includes(detail?.job?.status)
@@ -95,6 +103,8 @@ function Reports({ close, openSession, embedded = false, currentProject = '' }) 
         <div className="wl-heading"><div><span className="wl-eyebrow">工作日报</span><h2>{day}</h2><p className="wl-muted">{detail.report.updated ? `整理于 ${time(detail.report.updated)}` : '尚未整理日报'}{detail.pending > 0 && ` · ${detail.pending} 条待整理`}</p></div>
           <div className="wl-actions"><button className="wl-primary" disabled={busy || active || !detail.included} onClick={generate}>{active ? '整理中…' : detail.report.markdown ? '更新日报' : '整理日报'}</button>
             <button onClick={() => { setDraft(''); setModal('note') }}>补记一条</button>
+            <button disabled={busy || periodBusy} onClick={() => openPeriod('week')}>{periodBusy ? '生成中…' : '周报'}</button>
+            <button disabled={busy || periodBusy} onClick={() => openPeriod('month')}>月报</button>
             <ActionMenu label="更多日报操作"><button disabled={!detail.report.markdown} onClick={edit}>编辑日报</button><button disabled={!detail.report.markdown} onClick={copyReport}>复制 Markdown</button><button disabled={!detail.report.markdown} onClick={exportReport}>导出 Markdown</button><button disabled={!detail.historyCount} onClick={() => setModal('history')}>历史版本</button></ActionMenu>
           </div>
         </div>
@@ -110,13 +120,14 @@ function Reports({ close, openSession, embedded = false, currentProject = '' }) 
     {message && <div className="wl-feedback" role="status">{message}</div>}
     {dates && <Dialog title="选择日期" close={() => setDates(false)}>{dayList}</Dialog>}
     {evidence && <SourceViewer key={evidence} id={evidence} close={() => setEvidence(null)} time={time} localSource={localSource} visit={visit} openSession={openSession} />}
-    {modal && <Dialog key={modal} title={{ failure: '整理失败详情', settings: '工作记录 · 采集设置', note: '补记一条', edit: '编辑日报', history: '历史版本', replace: '重新整理日报' }[modal]} busy={busy} protectChanges={['settings', 'note', 'edit'].includes(modal)} dirty={modal === 'settings' ? settingsDirty : modal === 'edit' ? draft !== detail.report.markdown : modal === 'note' ? !!draft.trim() : undefined} close={() => !busy && setModal('')}>
+    {modal && <Dialog key={modal} title={modal === 'period' ? `${periodKind === 'week' ? '周报' : '月报'} · ${period?.from || ''} ~ ${period?.to || ''}` : { failure: '整理失败详情', settings: '工作记录 · 采集设置', note: '补记一条', edit: '编辑日报', history: '历史版本', replace: '重新整理日报' }[modal]} busy={busy} protectChanges={['settings', 'note', 'edit'].includes(modal)} dirty={modal === 'settings' ? settingsDirty : modal === 'edit' ? draft !== detail.report.markdown : modal === 'note' ? !!draft.trim() : undefined} close={() => !busy && setModal('')}>
       {error && <p className="wl-error" role="alert">{error}</p>}
       {modal === 'settings' && <Settings state={state} currentProject={currentProject} busy={busy} onDirtyChange={setSettingsDirty} saveCapture={config => act('/capture-settings', config)} save={config => act('/settings', config)} />}
       {['note', 'edit'].includes(modal) && <form id={editFormId} onSubmit={e => { e.preventDefault(); act(modal === 'note' ? '/note' : '/save', modal === 'note' ? { day, text: draft } : { day, markdown: draft, revision }) }}><label>{modal === 'note' ? '记录实际完成的工作、决定或待办' : 'Markdown 正文'}<textarea autoFocus rows={14} value={draft} onChange={e => setDraft(e.target.value)} required /></label><DialogActions><button type="submit" form={editFormId} disabled={busy || !draft.trim()} className="wl-primary">{busy ? '保存中…' : '保存'}</button></DialogActions></form>}
       {modal === 'replace' && <><p>日报包含手工修改。重新整理会替换正文，原版本保留在历史版本中。新整理期间的任何编辑都会阻止覆盖。</p><DialogActions><button disabled={busy} onClick={() => setModal('')}>保留正文</button><button className="wl-primary" disabled={busy} onClick={() => act('/generate', { day, allowReplace: true })}>确认重新整理</button></DialogActions></>}
       {modal === 'history' && <History day={day} time={time} edit={markdown => { setDraft(markdown); setRevision(detail.report.revision); setModal('edit') }} />}
       {modal === 'failure' && detail?.job && <FailureDetails key={detail.job.id} day={day} jobId={detail.job.id} onEvidence={setEvidence} />}
+      {modal === 'period' && period && <article className="wl-document"><Markdown text={period.markdown} onEvidence={() => {}} /></article>}
     </Dialog>}
   </section>
 }

@@ -25,6 +25,7 @@ import {
   IconDataOutlineRegular as IconDataOutline16,
   IconPanelLeftOutlineRegular as IconPanelLeftOutline16,
 } from '@deepseek-ai/dsh-client-ui-primitives'
+import { HeroMorningCard } from './morning-card.js'
 import { knowledgeDesignCss } from './design-tokens.js'
 import { availableActivitySession, deriveCurrentSession } from './knowledge-activity-state.js'
 import { supportsDockedPanels } from './docked-panel-compat.js'
@@ -102,11 +103,20 @@ export function apply(ctx: ClientContext): void {
     order: 20,
     label: () => '知识库',
   }, KnowledgeConnectionCard))
+  ctx.slots.inject('settings.plugins.tab', () => ctx.slots.register({
+    name: 'settings.plugins.tab',
+    id: 'knowledge-tencent-docs',
+    order: 21,
+    label: () => '腾讯文档',
+  }, TencentDocsSettings))
 
   ctx.slots.inject('conversation.chat.turnTail', () => ctx.slots.register({
     name: 'conversation.chat.turnTail',
     id: 'knowledge-writeback-status',
   }, props => <KnowledgeWritebackStatus sessionId={String(props.sessionId)} turn={props.turn.turn} workspace={workspace} />))
+  ctx.slots.inject('conversation.hero.brand.mark', () => ctx.slots.register({
+    name: 'conversation.hero.brand.mark',
+  }, props => <HeroMorningCard {...props} />))
 }
 
 function KnowledgeWritebackStatus({
@@ -212,6 +222,79 @@ function createKnowledgeWorkspaceController(client: ClientContext, beforeOpen: (
     },
   }
   return controller
+}
+
+function TencentDocsSettings() {
+  const [status, setStatus] = useState<{
+    connected?: boolean
+    tools?: string[]
+    token?: { configured?: boolean; source?: string; fingerprint?: string; overriddenByEnv?: boolean }
+    error?: string
+  }>()
+  const [token, setToken] = useState('')
+  const [busy, setBusy] = useState(false)
+  const [message, setMessage] = useState('')
+  const load = useCallback(async () => {
+    try {
+      const response = await fetch('/knowledge-local/v1/tencent-docs/status', {
+        credentials: 'same-origin',
+        headers: { 'x-dsh-knowledge-client': 'management-web' },
+      })
+      const body = await response.json()
+      setStatus(body)
+      setMessage('')
+    } catch (error) {
+      setStatus({ error: error instanceof Error ? error.message : String(error) })
+    }
+  }, [])
+  useEffect(() => { void load() }, [load])
+  const save = async () => {
+    if (!token.trim()) return
+    setBusy(true)
+    try {
+      const response = await fetch('/knowledge-local/v1/tencent-docs/token', {
+        method: 'POST', credentials: 'same-origin',
+        headers: { 'content-type': 'application/json', 'x-dsh-knowledge-client': 'management-web' },
+        body: JSON.stringify({ token: token.trim() }),
+      })
+      const body = await response.json()
+      if (!response.ok) throw new Error(body.error || `HTTP ${response.status}`)
+      setStatus(body); setToken(''); setMessage('已保存到本地 vault，桥插件会自动重连。')
+    } catch (error) { setMessage(error instanceof Error ? error.message : String(error)) } finally { setBusy(false) }
+  }
+  const clear = async () => {
+    setBusy(true)
+    try {
+      const response = await fetch('/knowledge-local/v1/tencent-docs/token', {
+        method: 'DELETE', credentials: 'same-origin',
+        headers: { 'x-dsh-knowledge-client': 'management-web' },
+      })
+      const body = await response.json()
+      if (!response.ok) throw new Error(body.error || `HTTP ${response.status}`)
+      setStatus(body); setMessage('已清除腾讯文档 token。')
+    } catch (error) { setMessage(error instanceof Error ? error.message : String(error)) } finally { setBusy(false) }
+  }
+  const tokenState = status?.token
+  return <section className="dsh-knowledge-settings-card">
+    <header><h3>腾讯文档</h3><p>导入腾讯文档到知识库，或把知识文档发布回腾讯文档。凭据只保存在本机 vault，接口不返回明文。</p></header>
+    <div className="dsh-knowledge-remote-fields">
+      <label>space_secret
+        <input type="password" value={token} onChange={event => setToken(event.target.value)} placeholder="32 位 space_secret" autoComplete="off" spellCheck={false} />
+      </label>
+      <p className="dsh-knowledge-hint">
+        {status?.error ? `状态读取失败：${status.error}` : tokenState?.configured
+          ? `已配置 · 来源 ${tokenState.source === 'env' ? '环境变量' : 'vault'} · 指纹 ${tokenState.fingerprint}${tokenState.overriddenByEnv ? '（环境变量覆盖）' : ''}`
+          : '尚未配置。环境变量 TDOC_OAUTH_ACCESS_TOKEN 优先。'}
+      </p>
+      {status?.tools?.length ? <p className="dsh-knowledge-hint">已检测到工具：{status.tools.join('、')}</p> : null}
+    </div>
+    {message ? <p className="dsh-knowledge-hint" role="status">{message}</p> : null}
+    <div className="dsh-knowledge-settings-actions">
+      <button type="button" disabled={busy || !token.trim()} onClick={() => { void save() }}>{busy ? '保存中…' : '保存 token'}</button>
+      {tokenState?.configured ? <button type="button" disabled={busy} onClick={() => { void clear() }}>清除</button> : null}
+      <button type="button" disabled={busy} onClick={() => { void load() }}>刷新状态</button>
+    </div>
+  </section>
 }
 
 function KnowledgeConnectionCard() {
@@ -587,7 +670,7 @@ function installStyles(): () => void {
   const style = document.createElement('style')
   style.dataset.plugin = PLUGIN_ID
   style.dataset.pluginCss = STYLE_ID
-  const scope = ':is(.dsh-knowledge-trigger, .dsh-knowledge-activity-panel, .dsh-knowledge-workspace, .dsh-knowledge-settings-card, .dsh-knowledge-writeback-notice)'
+  const scope = ':is(.dsh-knowledge-trigger, .dsh-knowledge-activity-panel, .dsh-knowledge-workspace, .dsh-knowledge-settings-card, .dsh-knowledge-writeback-notice, .dsh-knowledge-morning-card)'
   style.textContent = knowledgeDesignCss(scope, 'body[data-ds-dark-theme] ' + scope, false) + cssText + activityCss + settingsSurfaceCss
   document.head.appendChild(style)
   return () => { style.remove() }

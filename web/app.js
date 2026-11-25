@@ -2042,6 +2042,7 @@ function renderDocumentWorkspace(workspace, options = {}) {
     element('aside', { class: 'note-tree-panel', 'aria-label': '知识目录' },
       element('header', { class: 'note-tree-header' },
         element('div', {}, element('h2', { id: `${workspace.kind}-documents-heading` }, options.heading || '知识目录'), element('span', {}, query ? `${view.searchTotal} 条搜索结果` : `${workspaceDocuments.length} 篇已加载`)),
+        !readOnly ? actionButton('导入腾讯文档', () => { void importTencentDocument(workspace) }, 'ghost small') : null,
         !readOnly ? actionButton('+', () => { void startBlankDocument(workspace, view.knowledgeBaseId || activeBases[0]?.id) }, 'ghost note-add-button', { 'aria-label': '新建文档', title: '新建文档' }) : null,
       ),
       element('div', {}, element('div', { class: 'note-tree-search-wrap' }, interfaceIcon('search', 'search-symbol'), search),
@@ -2056,6 +2057,39 @@ function renderDocumentWorkspace(workspace, options = {}) {
     }) : null,
     renderNoteEditor(workspace, view.editor, selectedBase),
   )
+}
+
+async function importTencentDocument(workspace) {
+  const url = window.prompt('粘贴腾讯文档链接（docs.qq.com/doc/...、sheet/... 或 slide/...）')
+  if (url === null || url.trim().length === 0) return
+  try {
+    const result = await api('tencent-docs/import', {
+      method: 'POST',
+      body: {
+        url: url.trim(),
+        ...workspace.view.knowledgeBaseId ? { knowledgeBaseId: workspace.view.knowledgeBaseId } : {},
+      },
+    })
+    showToast(`已导入腾讯文档：${result.title}`, 'success')
+    await loadDocuments()
+    renderShell()
+  } catch (error) {
+    showToast(friendlyError(error), 'error')
+  }
+}
+
+async function publishTencentDocument(workspace, editor) {
+  if (editor.dirty) {
+    const saved = await saveDocumentEditor(workspace)
+    if (!saved) return
+  }
+  try {
+    const result = await api('tencent-docs/publish', { method: 'POST', body: { documentId: editor.id } })
+    showToast(result.url ? `已发布到腾讯文档：${result.url}` : '已发布到腾讯文档。', 'success')
+    if (result.url) window.open(result.url, '_blank', 'noopener,noreferrer')
+  } catch (error) {
+    showToast(friendlyError(error), 'error')
+  }
 }
 
 function renderNoteEditor(workspace, editor, base) {
@@ -2115,6 +2149,7 @@ function renderNoteEditor(workspace, editor, base) {
         finalized ? badge(DOCUMENT_STATE_LABELS[editor.documentState] || '已结束', 'success') : readOnly ? badge('只读') : null,
         element('span', { class: 'editor-save-status', role: 'status' }, editor.saveState),
         finalized && !readOnly ? actionButton('重新打开', () => reopenDocument(workspace, editor), 'small') : null,
+        !readOnly && !finalized && !editor.isNew ? actionButton('发布到腾讯文档', () => { void publishTencentDocument(workspace, editor) }, 'ghost small') : null,
         citation ? element('span', { class: 'citation-document-label', role: 'status' }, `来源 · 第 ${citation.startLine}–${citation.endLine} 行`) : null,
         citation ? actionButton('退出定位', () => { view.citation = null; renderShell() }, 'ghost small') : null,
         editable ? actionButton(editor.isNew ? '创建文档' : '保存', () => { void saveDocumentEditor(workspace).then(saved => { if (saved) renderShell() }) }, 'primary small') : null,
@@ -2123,6 +2158,7 @@ function renderNoteEditor(workspace, editor, base) {
             ...(documentWorkspaceBases(workspace).some(item => item.id !== editor.knowledgeBaseId)
               ? [{ label: '移动到…', icon: 'move', run: () => openMoveKnowledgeDocument(workspace, editor) }] : []),
             ...(!finalized ? [{ label: '标记结束', icon: 'check', run: () => openFinalizeDocument(workspace, editor) }] : []),
+            { label: '分享链接', icon: 'link', run: () => { void openKnowledgeShare(editor) } },
           ],
           !finalized ? [{ label: '删除文档', icon: 'trash', danger: true, run: () => confirmDeleteDocument(workspace, editor) }] : [],
         ]) : null,
@@ -4037,6 +4073,55 @@ async function downloadNoteFile(node, button) {
 async function copyNoteReference(node) {
   try { await navigator.clipboard.writeText(noteReference(node)); showToast('笔记引用已复制。') }
   catch { showToast('复制失败，请手动复制文档编号。', 'error') }
+}
+
+async function openKnowledgeShare(documentEntry) {
+  try {
+    const share = await api('knowledge-shares', { method: 'POST', body: { documentId: documentEntry.id } })
+    showKnowledgeShareDialog(documentEntry, share)
+  } catch (error) {
+    showToast(`创建知识文档分享失败：${friendlyError(error)}`, 'error')
+  }
+}
+
+function knowledgeShareUrl(share) {
+  return new URL(share.path, location.href).href
+}
+
+function showKnowledgeShareDialog(documentEntry, share) {
+  const url = knowledgeShareUrl(share)
+  const input = Object.assign(element('input', {
+    class: 'input notes-share-link-input', readonly: true, value: url,
+    'aria-label': `${documentEntry.title} 的分享链接`, onFocus: event => event.currentTarget.select(),
+  }), { value: url })
+  let modal
+  const body = element('div', { class: 'notes-share-dialog-body' },
+    element('div', { class: 'notes-share-dialog-kind' },
+      element('span', {}, element('strong', {}, documentEntry.title), element('small', {}, '知识文档 · 只读分享'))),
+    element('label', { class: 'notes-share-link-label' },
+      element('span', {}, '分享链接'),
+      element('div', { class: 'notes-share-link-row' }, input,
+        actionButton('复制', () => copyText(url, '分享链接已复制。'), 'primary small'))),
+    element('p', { class: 'notes-share-dialog-note' }, '链接中的内容会随原知识文档更新。任何获得链接的人都能访问，不需要 DSH；停止分享后立即失效。'),
+    element('div', { class: 'notes-share-dialog-danger' },
+      element('span', {}, element('strong', {}, '停止分享'), element('small', {}, '不会删除原知识文档。')),
+      actionButton('停止分享', async () => {
+        try {
+          await api(`knowledge-shares/${encodeURIComponent(share.token)}`, { method: 'DELETE' })
+          modal?.close(true)
+          showToast('知识文档分享已停止。', 'success')
+        } catch (error) {
+          showToast(`停止分享失败：${friendlyError(error)}`, 'error')
+        }
+      }, 'danger small')),
+  )
+  modal = openModal({
+    title: '分享知识文档',
+    description: '生成独立的只读访问链接',
+    body,
+    cancelLabel: '完成',
+    className: 'notes-share-dialog',
+  })
 }
 
 function noteShareForNode(noteId) {
