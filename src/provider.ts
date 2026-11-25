@@ -36,6 +36,8 @@ import type { KnowledgeNoteReference, KnowledgeNoteReferenceSource, NoteListRequ
 
 /** Stable storage boundary shared by local SQLite and remote HTTP clients. */
 export interface KnowledgeProvider {
+  recordRecallIncident?(id: string, value: import('./recall-ranking.js').FrictionInput, signal?: AbortSignal): Promise<{ id: string }>
+  recordRecallUsage?(usage: import('./recall-ranking.js').RecallUsage, signal?: AbortSignal): Promise<void>
   writebackProtocol?(signal?: AbortSignal): Promise<{ idempotentDirectWrites: boolean }>
   readonly mode: 'local' | 'remote'
   getSettings(signal?: AbortSignal): Promise<KnowledgeSettings>
@@ -79,7 +81,7 @@ export interface KnowledgeProvider {
   restoreNoteVersion(id: string, version: number, expectedVersion?: number, signal?: AbortSignal): Promise<NoteNode>
   createNoteFolder(name: string, parentId?: string | null, signal?: AbortSignal): Promise<NoteNode>
   createNoteDocument(name: string, parentId?: string | null, content?: string, signal?: AbortSignal): Promise<NoteNode>
-  updateNoteContent(id: string, content: Uint8Array, signal?: AbortSignal, expectedVersion?: number): Promise<NoteNode>
+  updateNoteContent(id: string, content: Uint8Array, signal?: AbortSignal, expectedVersion?: number, source?: string): Promise<NoteNode>
   renameNote(id: string, name: string, signal?: AbortSignal): Promise<NoteNode>
   moveNote(id: string, parentId: string | null, signal?: AbortSignal): Promise<NoteNode>
   deleteNote(id: string, signal?: AbortSignal): Promise<void>

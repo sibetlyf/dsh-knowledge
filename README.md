@@ -1,179 +1,68 @@
 # DSH Knowledge
 
-面向 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) 的全栈个人知识库、笔记与工作日报插件。支持本地使用和远程中央知识库，完全基于 Cordis 依赖注入内核开发，**不修改 DSH Agent Loop**。
+面向 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) 的知识库、笔记与工作日报插件。支持本地使用和远程中央知识库，不修改 DSH Agent Loop。
 
-[![GitHub Repository](https://img.shields.io/badge/GitHub-sibetlyf%2Fdsh--knowledge-blue?logo=github)](https://github.com/sibetlyf/dsh-knowledge)
-[![license](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
+[![npm](https://img.shields.io/npm/v/%40lemoncat7%2Fdsh-knowledge)](https://www.npmjs.com/package/@lemoncat7/dsh-knowledge)
 
----
+## 功能
 
-## 核心功能
+- 知识库与文档分组、全文检索、项目和会话挂载，按权限召回与回写。
+- 会话只暴露一个 `knowledge` 工具入口，按需发现、查看参数和执行 19 项知识库／笔记操作；不改变挂载和确认权限。见[统一工具入口](docs/tool-entry.md)。
+- 回答完成后在后台独立提取知识，提供审核、版本历史、冲突保护、任务重试与文档封存。
+- 独立笔记文档与目录：编辑、预览、分享、历史恢复；输入框 `@` 可搜索并引用笔记文档及上传的可编辑文本文件（Markdown、纯文本、代码和配置文件）。
+- 内置工作日报：按本机工作目录选择采集范围，可显式包含子目录；支持补记、整理与导出，默认开启每天 23:30 的保底整理，可独立关闭，补充当天新增素材（按日报时区）。
+- 本地 SQLite 或认证的中央知识服务，多个客户端可连接同一服务。
 
-- **任务文件自动归档与知识化（新功能）**：
-  - 每轮对话结束自动识别**任务涉及的所有文件**：`present` 交付物、工具读取/写入/转换的文件、shell 与 workspace-changes 变更、用户上传附件与 `@` 引用，**无需确认或审批**即可归档并纳入知识库。
-  - 归档副本内容寻址保存，默认支持**任意格式**（图片、PDF、Word、Excel、PowerPoint、ODF、压缩包、音视频、源码等），未知格式保留原始文件并提供下载。
-  - **文件放在归档文件夹，数据库只保存链接、元数据与关键词**（默认不复制正文，`artifactArchiveStoreContent: false`）；知识文档给出绝对文件路径与 `read` 提示，PDF/Office 抽取文字仅用于生成关键词。
-  - 自动创建并挂载 `制品归档` 知识库（仅召回、不参与对话回写），文件按类别自动归入 `文档 / 表格 / 演示 / 图片 / 压缩包 / 音视频 / 代码 / 其他` 栏目并参与双向链接。
-  - 没有可写挂载时自动把「默认知识库」以可写模式挂载到项目；新建知识栏目与普通待审候选都会自动落盘，不再需要人工审核（冲突与凭据类内容仍保留安全拦截）。
-  - **论文自动整理**：识别 PDF 论文并提取标题、摘要、关键词、年份、arXiv/DOI 与类别；首次出现论文时只创建一个「论文库」，按 `论文 · <类别>` 分组，摘要与关键词进入数据库并立即索引；非论文 PDF 仍留在制品库。
-  - **谨慎新建知识库**：对话提取最多每轮新建一个知识栏目，每天自动新建知识库默认不超过 3 个（`autoCreateKnowledgeBasesMaxPerDay`），同名栏目复用；论文只用一个论文库，不按单篇论文建库。
-  - 控制台新增「制品文件」页面：按格式预览图片、PDF、纯文本、音视频，下载任意文件，并一键打开对应知识文档进行编辑、调整分组或移动。
-  - **选择文件夹导入**：从「制品文件」逐级浏览或输入本机文件夹，递归扫描后自动归档、分类、论文识别、建立链接与索引；文件多时后台继续。
-  - **插件联动**：宿主 `dshKnowledge` 服务提供 `ingestRecord` / `ingestFiles` / `search` / `listBases` / `introduceBase`，并广播 `knowledge/write`，便于会议、记忆等未来插件接入。
-  - 默认排除密钥、数据库与依赖目录，可配置扩展名、大小上限与排除模式。详见 [制品自动归档](docs/artifacts.md)。
-- **自动分类与免审核**：
-  - AI 提取时优先复用已有知识库与文档分组；现有栏目都不适合时，可自动新建知识栏目（知识库）并直接写入。
-  - 后台定期自动批准非冲突的待审核候选，笔记整理草案也直接落盘；仅凭据类内容和真实冲突保留人工确认。
-- **后台全自动知识与笔记整理（新功能）**：
-  - 对话结束后监听 `agent/turn-stopping` 自动捕获交流产出，后台提炼核心认知。
-  - **支持 PDF 文本解析**：内置纯 TypeScript PDF 文本抽取引擎，无需外部工具即可自动解析 `.pdf` 资料并参与知识整理。
-  - **Obsidian 风格思维标题树与双链**：输出 Obsidian 风格的多级标题大纲树（`#`、`##`、`###`）与网状双向链接（`[[主题]]`）。
-  - **对应工作内容与任务清单呈现**：自动提炼出结构化的已完成工作记录、技术决策归集，以及 `- [ ]` 待办清单。
-  - **自动落盘的整理草案**：AI 整理产出直接保存到目标笔记目录（`noteOrganizeAutoApprove`，默认开启）；关闭后仍可在草案表中人工预览与批准/拒绝。
-- **知识库与多范围挂载**：
-  - 知识库与文档分组、FTS5 全文检索、项目和会话多层级挂载，按精确权限召回与回写。
-  - **全量双向链接**：每篇知识文档自动显示「关联文档 / 反向链接」，按共同标签、同一分组与标题主题计算关联；只读/定稿预览中的 `[[文档标题]]` 渲染为可点击链接并支持反向跳转，无需手工维护。
-  - **思维链接图**：默认只展示一级分组，点击分组逐级展开其子分组与文档，点击文档才打开正文；顶部「返回上一级」/「全部」和面包屑用于快速回到浅层，支持拖动、缩放、悬停高亮与导出 PNG。
-  - **后台运行可视化**：顶栏右侧常驻后台状态卡实时显示自动归档、知识回写与日报整理的排队/进度，完成后短暂提示；空闲时显示“后台自动整理”已开启。
-  - **阅读优先的布局**：正文、导航与目录字号整体放大；知识目录改为可滑出的抽屉，不再永久占用左侧第三列，文档区域默认占满宽度。
-  - **自动恢复与自动保存**：再次打开知识文档会恢复上次阅读的文档，没有历史时自动打开最近更新的一篇；编辑后停止输入约 1.4 秒自动保存，减少“找文档、点保存”的重复操作。
-  - **对话中引入知识库**：在输入框键入 `@`，从「引入知识库」分组选择任意知识库；发送时自动创建仅召回会话挂载，自动召回、`knowledge_search` 与 `knowledge_read` 随即使用该库，不会把对话内容写回该库。
-  - **对话中直接导入文件夹**：输入框工具行的文件夹按钮，或输入 `@` 选择「导入文件夹…」，都直接打开知识库文件夹浏览器；确认后递归归档、分类、论文识别并加入索引，完成后右下角弹出气泡显示新增/更新/未变/跳过/失败，点「查看明细」可逐文件查看类别、目标知识库、分组与论文分类。
-  - **腾讯文档双向联动**：知识目录顶部可粘贴 `docs.qq.com` 链接直接导入为知识文档；文档工具栏「发布到腾讯文档」把本地 Markdown 发布为智能文档并返回云端链接。底层复用 dsh-tencent-docs-bridge 已挂载的官方 MCP 工具，不保存腾讯登录凭据。
-  - **腾讯文档 token 配置**：管理台「自动化 → 腾讯文档」可直接输入 32 位 `space_secret`，只写入本地 vault（0600），保存后桥插件自动重连，无需重启。
-  - **早晨卡片、每日待办与周月报**：欢迎页鲸鱼 logo 上方显示早晨卡片（今日待办、勾选、快捷添加、会议助手状态）；工作日报保留日报正文，并支持生成周报/月报，默认使用 DSH 当前云端默认模型，失败时回退本地汇总。
-  - **自动化设置页**：管理台「自动化」集中配置自动审核、自动整理/工作纪要的按对话或按频率触发，以及 token 节省模式；保存后即时生效。
-  - **知识上下文精简**：自动整理只给模型既有文档的标题、标签、分组和约 600 字摘要；自动链接在本地用元数据/关键词推导，不调用模型，完整正文只在 `knowledge_read` 时按需读取。
-  - **文档与日报优化**：知识文档工具栏「优化格式」和工作日报「优化排版」会用严谨的编辑提示做格式/表达优化，保留事实、数字、路径、链接和引用编号，去除 AI 腔。
-  - 回答生成前注入有界摘要，回答完成后后台独立提取知识，具备版本历史、冲突保护、任务重试与文档封存机制。
-- **独立笔记工作区与输入框 `@` 引用**：
-  - 独立的树形笔记文档目录：支持 Markdown、文本编辑、图片与 PDF 就地预览、历史版本回退与分享。
-  - 聊天输入框键入 `@` 可快速联想并引用笔记文档。
-- **内置工作日报系统（Worklog）**：
-  - 按本机工作目录选择采集范围，自动汇总会话与项目开发活动；支持人工补记、整理与 Markdown 导出。
-  - **知识库更新后自动刷新日报**：对话知识回写与制品归档会实时写入当天日报素材，后台防抖整理并更新日报；首次使用自动为当前项目开启采集与每日生成，可用 `worklogAutoUpdateEnabled` 关闭。
-- **灵活的部署模式**：
-  - 支持本地单机 SQLite WAL 存储，或作为认证的中央知识库服务（提供 REST API，支持多客户端协同）。
+## 安装
 
----
-
-## 安装与配置
-
-### 运行环境
-- 适配 DeepSeek Harness **0.2.1-rc.2**
-- Node.js **^22.19.0 或 >=24.0.0**
-
-### 安装方式
-
-推荐使用 **GitRef** 安装，直接从 GitHub 仓库的指定 ref 构建，不依赖 npm 发布：
+需要 Node.js **>=24.9.0**。不按 DSH 版本号限制安装或加载；兼容性测试作为历史记录保留，见[宿主兼容策略](docs/host-compatibility-policy.md)。
 
 ```bash
-# 固定到当前发布标签（Windows PowerShell 需要给 # 后的 ref 加引号）
-dsh plugin --profile web add "github:sibetlyf/dsh-knowledge#v2.15.14"
+dsh plugin --profile web add @lemoncat7/dsh-knowledge@latest
 ```
 
-跟踪主分支的最新提交：
+安装或升级后重启对应的 DSH Profile；`web` 请按实际使用的 Profile 调整。
 
-```bash
-dsh plugin --profile web add "github:sibetlyf/dsh-knowledge#main"
-```
+打开侧栏「知识库」创建知识库，在「项目与会话挂载」选择使用范围和写入模式。笔记不需要先挂载知识库；工作日报在「工作记录」中单独开启采集。
 
-也可以固定到任意 commit：
+## 使用边界
 
-```bash
-dsh plugin --profile web add "github:sibetlyf/dsh-knowledge#089ca65"
-```
+未挂载知识库不召回、不回写。笔记默认不参与知识自动回写，引用笔记不授予修改或删除权限；修改按工具确认流程执行。日报采集默认关闭，不补采历史会话。远程模式不做隐式双向同步；公开访问应配置认证，升级前备份数据。
 
-> GitRef 安装会在安装时构建依赖；请确保本机可访问 GitHub。安装或更新后请重启对应的 DSH Profile。
+## 文档
 
-发布新版本时，先更新 `package.json` 的版本号，再打同名 tag 并推送；GitRef 用户即可固定到该 tag：
+- [使用、权限与部署配置](docs/usage.md)
+- [文档分组](docs/document-groups.md)
+- [笔记 @ 引用](docs/note-mentions.md)
+- [空闲读写与后台处理](docs/idle-performance.md)
+- [版本与发布说明](https://github.com/lemoncat7/dsh-knowledge/releases)
+- [发布维护约定](docs/releases/README.md)
 
-```bash
-git tag v2.15.15
-git push origin v2.15.15
-```
+### 2.17.2
 
-对应的安装命令：
+新建笔记/目录及批量创建免确认；修改与删除已有内容仍需确认。详见 [版本说明](docs/releases/2.17.2.md)。
 
-```bash
-dsh plugin --profile web add "github:sibetlyf/dsh-knowledge#v2.15.15"
-```
+## 2.18.0 笔记离线副本与本地文件
 
-仍可使用 npm 作为备用安装源（仅当当前 registry 已发布 `dsh-knowledge`）：
+笔记工作区增加远程补同步和可供 Obsidian 打开的 Markdown 目录。支持范围、冲突规则和 schema 升级注意事项见 [说明](docs/note-workspace-sync.md)。
 
-```bash
-dsh plugin --profile web add dsh-knowledge
-```
+本地文件索引仅在持久化状态变化时执行原子写入和落盘同步；空闲扫描保留索引文件的 inode 与修改时间。写入失败仍会在后续扫描中重试，实际笔记变更、冲突和移动检查点继续同步保存。
 
-### 配置说明
 
-可在 DSH 的插件配置中开启后台自动笔记整理：
+## 宿主兼容策略
 
-```yaml
-noteOrganizeEnabled: true               # 是否开启后台自动整理（默认 false）
-noteOrganizeTargetFolder: '整理归档'     # 整理生成的笔记存放的文件夹名
-noteOrganizePrompt: '对所有对话产出、笔记及文档进行深度提炼，提取核心主题、工作产出，并生成思维树与双链'
-noteOrganizeIntervalMinutes: 60        # 后台定时扫描轮询间隔（分钟）
-noteOrganizeMinNotes: 2                # 触发自动整理的未归档最少素材数量
-```
+DSH 更新后不再为了补版本声明单独发布插件；按实际接口和功能验证、修复。[策略及历史测试入口](docs/host-compatibility-policy.md)。
 
-制品自动归档默认开启，可在插件配置中调整：
+### 工作日历
 
-```yaml
-artifactArchiveEnabled: true           # 自动归档任务涉及的所有文件并纳入知识库（默认 true）
-artifactArchiveBaseName: '制品归档'    # 目标知识库名称，不存在时自动创建
-artifactArchiveExtensions: ['*']        # 默认归档所有格式；可改成扩展名列表收窄文件工具写入
-artifactArchiveExclude: ['**/node_modules/**', '**/.env']     # 排除路径模式
-artifactArchiveMaxFileBytes: 33554432  # 单文件上限（字节，默认 32 MiB）
-artifactArchiveMaxChars: 46000          # 开启正文入库时的正文上限
-artifactArchiveStoreContent: false      # 默认只存链接/元数据/关键词；true 才把抽取正文写入数据库
-artifactArchivePaperEnabled: true       # 识别 PDF 论文并提取摘要/关键词/分类
-artifactArchivePaperBaseName: '论文库'  # 论文知识库，首次出现论文时创建一次
-artifactArchiveAutoMount: true         # 自动挂载制品库到项目以参与召回
-autoWritableMountEnabled: true         # 无可写知识库挂载时自动挂载「默认知识库」
-autoWritableMountWriteMode: direct     # direct 直接写入；audit 进入待审核
-autoCreateKnowledgeBases: true         # 现有栏目都不适合时自动新建知识栏目（知识库）
-autoCreateKnowledgeBasesMaxPerDay: 3   # 每天自动新建知识库上限；0 只复用现有库
-autoApprovePendingEnabled: true        # 自动批准非冲突待审候选，取消人工审核
-autoApprovePendingIntervalMinutes: 2   # 自动批准轮询间隔（分钟）
-autoOrganizeTrigger: turn              # turn 每轮对话 / interval 按分钟批量整理
-autoOrganizeIntervalMinutes: 30        # interval 模式的整理间隔
-worklogAutoUpdateEnabled: true         # 知识库更新后自动记录素材并刷新当天日报
-worklogAutoUpdateTrigger: turn         # turn 每轮 / interval 按分钟批量刷新日报
-worklogAutoUpdateIntervalMinutes: 30   # interval 模式的日报刷新间隔
-tokenSavingEnabled: true               # 限制提取输入/输出、召回条数与上下文字符，节省 token
-autoRecallAllEnabled: true             # 会话没有召回挂载时自动检索所有生效知识库（零操作）
-```
+工作记录新增每日目标与时间段日历，支持月/周视图、进度、改期、标签和回收站。AI 通过统一入口的 `knowledge_calendar` 操作管理；可导出 `.ics`，预留外部日历适配器。详见 [工作日历](docs/work-calendar.md)。
 
-数据默认存放在非系统盘（Windows 下优先插件所在盘，如 `G:\dsh-knowledge`），可用 `DSH_KNOWLEDGE_HOME` 覆盖；首次启动会把旧 C 盘用户目录的知识库与归档复制到新目录，旧目录保留为备份。
+## 本分支保留的增强
 
-知识文档的磁盘目录与数据库一致：一级为知识库名称，二级及以下为 `分组 · 子分组` 对应的目录；例如 `默认知识库/项目规范/部署/文档标题--id.md`。旧版 `base-<id>` 目录会在首次同步时自动迁移。
+- **欢迎页早晨卡片**：把工作日报、当天待办、会议助手状态收进一张浮动卡片；支持拖拽与双击复位，卡片上方即 DSH 新建会话的鲸鱼标。
+- **每日待办与简报**：工作/生活分类、跨天承接、完成状态；`/worklog-control/v1/todos` 与 `/brief` 由同一份 SQLite 数据生成，日报生成时也会把待办写入素材。
+- **周报/月报**：工作记录页可直接生成，按日聚合日报与待办；默认模型缺失时仍返回可读的模板正文，并明确标注未生成。
+- **腾讯文档**：设置 → 腾讯文档 可保存 `space_secret`（只写本机 vault）；知识目录的「导入腾讯文档」和文档的「发布到腾讯文档」调用同一桥插件。
+- **知识文档只读分享**：知识文档的「更多」菜单生成独立链接；链接页面只读、无需 DSH 或 Bearer Token，文档更新后内容随之更新，撤销后立即失效。
 
-自动审核默认开启：非冲突、非凭据类的待审候选会在每轮结束和后台轮询中自动批准；真实冲突与凭据类内容仍保留人工确认。`tokenSavingEnabled: true` 时提取输入默认上限 12000 字符、输出 3072 tokens，自动召回最多 2 条、上下文字符上限 3000；需要更高精度时可关闭该开关或单独调高参数。`autoRecallAllEnabled` 让没有手动挂载的会话也能直接召回所有生效知识库，实现对话内零操作使用。
-
----
-
-## 架构与实现设计
-
-- **非侵入式设计**：不入侵修改 DSH 主循环，通过标准 Agent Tools、Prompt 挂载组装、InputTriggers 以及 Client Slots 扩展点无缝集成。
-- **前后端同构插件**：
-  - **后端（Node.js）**：基于 Cordis 微内核架构，注册 `LocalKnowledgeProvider`、`ExtractionCoordinator`、`NoteAutoOrganizer` 与 HTTP REST API。
-  - **前端（Client UI）**：通过 esbuild 打包成标准 DSH 客户端脚本，无缝注入侧栏图标、输入框 `@` 触发器及实时回写任务视图。
-  - **控制台（Web App）**：内嵌基于 Tiptap 富文本编辑器、Markdown 预览与变更审查界面的独立文档工作区。
-
----
-
-## 文档索引
-
-- [制品自动归档与知识化说明](docs/artifacts.md)
-- [后台自动笔记整理与 PDF 支持详细说明](docs/auto-note-organizer.md)
-- [使用、权限与部署配置说明](docs/usage.md)
-- [输入框 @ 笔记文档引用指南](docs/note-mentions.md)
-- [文档分组设计](docs/document-groups.md)
-- [系统架构与实现形式分析](docs/architecture.md)
-
----
-
-## 开源协议
-
-本项目采用 [MIT 许可证](LICENSE)。
+公开分享页仍由当前 DSH WebServer 提供。要发给不在同一台机器上的人，必须让 DSH 的监听地址或反向代理对该用户可访问；反向代理上的登录保护若要保留，需要把 `/knowledge-local/v1/shared-knowledge/` 设为公开路径。分享链接本身只是随机令牌，不携带模型或账户凭据。

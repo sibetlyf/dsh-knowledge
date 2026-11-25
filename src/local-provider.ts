@@ -4,7 +4,7 @@ import { mkdirSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { DatabaseSync } from 'node:sqlite'
 import { migrateKnowledgeDatabase } from './storage/migrations.js'
-import { NoteProposalStore } from './notes/proposal-store.js'
+import { documentTitleQuery } from './search-query.js'
 import { noteExcerptMarkdown, type NoteExcerptRequest } from './note-excerpt.js'
 import {
   contentHash,
@@ -70,6 +70,8 @@ import {
 } from './notes/domain.js'
 import { compareNames } from './collation.js'
 import { decodePageCursor, encodePageCursor } from './page-cursor.js'
+import { RecallRankingStore, type RecallUsage, validateUsage } from './recall-ranking.js'
+import { RetrievalIndex } from './retrieval-index.js'
 
 type SqlRow = Record<string, unknown>
 
@@ -89,9 +91,15 @@ const JOINED_ENTRY_COLUMNS = `
 const EXTRACTION_LEASE_MS = 15 * 60 * 1000
 
 export class LocalKnowledgeProvider implements KnowledgeProvider {
+  readonly recallRanking: RecallRankingStore
+  readonly retrievalIndex: RetrievalIndex
+
+  async recordRecallIncident(id: string, value: import('./recall-ranking.js').FrictionInput, signal?: AbortSignal): Promise<{ id: string }> {
+    signal?.throwIfAborted()
+    return this.recallRanking.incident(id, value)
+  }
   readonly mode = 'local' as const
   readonly notes: NoteStore
-  readonly proposalStore: NoteProposalStore
   private readonly db: DatabaseSync
   private readonly documentStore: KnowledgeDocumentStore
   private readonly documentsReady: Promise<void>
@@ -108,11 +116,12 @@ export class LocalKnowledgeProvider implements KnowledgeProvider {
       inMemory ? storageRoot : join(storageRoot, 'notes'),
       inMemory,
     )
-    this.proposalStore = new NoteProposalStore(this.notes.database)
     this.documentStore = new KnowledgeDocumentStore(join(storageRoot, 'documents'))
     this.db = new DatabaseSync(path)
     this.db.exec('PRAGMA journal_mode = WAL; PRAGMA foreign_keys = ON; PRAGMA busy_timeout = 5000;')
     migrateKnowledgeDatabase(this.db, this.notes)
+    this.recallRanking = new RecallRankingStore(this.db)
+    this.retrievalIndex = new RetrievalIndex(this.db)
     if (this.db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='knowledge_candidates'").get()) {
       this.db.exec('CREATE INDEX IF NOT EXISTS knowledge_candidates_page ON knowledge_candidates(status, created_at DESC, id DESC);')
     }
@@ -123,6 +132,21 @@ export class LocalKnowledgeProvider implements KnowledgeProvider {
 
   private assertOpen(): void {
     if (this.closed) throw new Error('knowledge provider is closed')
+  }
+
+  async recordRecallUsage(usage: RecallUsage, _signal?: AbortSignal, namespace = 'local'): Promise<void> {
+    this.assertOpen(); validateUsage(usage)
+    // Telemetry is a narrowly scoped read-side effect, never document write authority.
+    const mounts = await this.resolveMounts(usage.sessionId, usage.projectId)
+    const allowed = mounts.filter(mount => mount.enabled && mount.recallEnabled && mount.base.status === 'active')
+    const ids: string[] = []
+    for (const id of new Set(usage.ids)) {
+      const row = this.db.prepare('SELECT knowledge_base_id,status,scope_kind,scope_id,tags_json FROM knowledge_entries WHERE id=?').get(id) as SqlRow | undefined
+      if (!row || row.status !== 'active' || (row.scope_kind === 'project' && row.scope_id !== usage.projectId)) continue
+      const tags = JSON.parse(String(row.tags_json)) as string[]
+      if (allowed.some(mount => mount.knowledgeBaseId === row.knowledge_base_id && (!mount.includeTags.length || mount.includeTags.some(tag => tags.includes(tag))) && !mount.excludeTags.some(tag => tags.includes(tag)))) ids.push(id)
+    }
+    if (ids.length) this.recallRanking.record({ ...usage, ids }, namespace)
   }
 
   async writebackProtocol(): Promise<{ idempotentDirectWrites: boolean }> { return { idempotentDirectWrites: true } }
@@ -600,6 +624,7 @@ export class LocalKnowledgeProvider implements KnowledgeProvider {
     const filterSql = `${typeSql}${baseSql}${includeSql}${excludeSql}`
     const filterArgs = [...typeArgs, ...baseIds, ...includeTags, ...excludeTags]
     const text = request.text.trim()
+    const candidateLimit = text ? Math.min(400, limit * 4) : limit
     let rows: SqlRow[]
     if (text.length === 0) {
       rows = this.db.prepare(`
@@ -619,20 +644,34 @@ export class LocalKnowledgeProvider implements KnowledgeProvider {
           WHERE knowledge_fts MATCH ? AND e.status = 'active' AND ${scopeSql}${filterSql}
           ORDER BY CASE WHEN e.scope_kind = 'project' THEN 0 ELSE 1 END, rank, e.updated_at DESC
           LIMIT ?
-        `).all(ftsQuery, ...scopeArgs, ...filterArgs, limit) as SqlRow[]
+        `).all(ftsQuery, ...scopeArgs, ...filterArgs, candidateLimit) as SqlRow[]
       } catch {
         rows = []
       }
-      if (rows.length < limit) {
-        const supplements = this.searchByTerms(text, scopeSql, scopeArgs, filterSql, filterArgs, limit)
+      // Preserve exact document-name matches before a crowded content pool is capped.
+      // Apply precisely the same project/base/tag restrictions as full-text search.
+      const titleQuery = documentTitleQuery(text)
+      if (titleQuery.length <= 200) {
+        const named = this.db.prepare(`
+          SELECT ${ENTRY_COLUMNS}, 0.0 AS rank FROM knowledge_entries e
+          WHERE e.status = 'active' AND ${scopeSql}${filterSql} AND lower(trim(e.title)) = lower(?)
+          ORDER BY e.updated_at DESC, e.id LIMIT ?
+        `).all(...scopeArgs, ...filterArgs, titleQuery, candidateLimit) as SqlRow[]
+        const namedIds = new Set(named.map(row => String(row.id)))
+        rows = [...named, ...rows.filter(row => !namedIds.has(String(row.id)))].slice(0, candidateLimit)
+      }
+      if (rows.length < candidateLimit) {
+        const supplements = this.searchByTerms(text, scopeSql, scopeArgs, filterSql, filterArgs, candidateLimit)
         const seen = new Set(rows.map(row => String(row.id)))
-        rows.push(...supplements.filter(row => !seen.has(String(row.id))).slice(0, limit - rows.length))
+        rows.push(...supplements.filter(row => !seen.has(String(row.id))).slice(0, candidateLimit - rows.length))
       }
     }
-    return rows.map(row => {
+    const hits = rows.map(row => {
       const entry = rowToEntry(row)
       return { entry, score: relevanceScore(entry, text) }
-    }).sort((left, right) => right.score - left.score || right.entry.updatedAt.localeCompare(left.entry.updatedAt))
+    })
+    return (text ? this.recallRanking.boost(hits) : hits.sort((a, b) => b.entry.updatedAt.localeCompare(a.entry.updatedAt)))
+      .slice(0, limit).map(hit => request.includePassage ? { ...hit, ...this.retrievalIndex.passage(hit.entry, text) } : hit)
   }
 
   private searchByTerms(
@@ -1009,9 +1048,9 @@ export class LocalKnowledgeProvider implements KnowledgeProvider {
     return this.notes.createDocument(name, parentId, content)
   }
 
-  async updateNoteContent(id: string, content: Uint8Array, _signal?: AbortSignal, expectedVersion?: number): Promise<NoteNode> {
+  async updateNoteContent(id: string, content: Uint8Array, _signal?: AbortSignal, expectedVersion?: number, source = '应用修改'): Promise<NoteNode> {
     this.assertOpen()
-    return this.notes.updateContent(id, content, expectedVersion)
+    return this.notes.updateContent(id, content, expectedVersion, source)
   }
 
   async renameNote(id: string, name: string): Promise<NoteNode> {
@@ -1622,6 +1661,7 @@ export class LocalKnowledgeProvider implements KnowledgeProvider {
     if (this.closed) return
     await this.documentsReady
     this.closed = true
+    this.retrievalIndex.close()
     this.db.close()
     await this.notes.close()
   }
@@ -2260,6 +2300,7 @@ function relevanceScore(entry: KnowledgeEntry, query: string): number {
   const normalizedQuery = normalizedBody(query)
   if (normalizedQuery.length === 0) return 1
   const title = normalizedBody(entry.title)
+  if (title === normalizedBody(documentTitleQuery(query))) return 1
   const body = normalizedBody(entry.body)
   const tags = normalizedBody(entry.tags.join(' '))
   const combined = `${title}\n${body}\n${tags}`

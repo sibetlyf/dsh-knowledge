@@ -1,3 +1,5 @@
+import { normalizeWritebackFrequency } from './service-settings.js'
+import {handleNoteWorkspace,type NoteWorkspace} from './notes/workspace-http.js'
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import type { KnowledgeConnectionSettings } from './connection.js'
 import type { RuntimeContextLike } from './runtime.js'
@@ -11,9 +13,10 @@ export function registerRemoteManagementProxy(
   prefix: string,
   current: () => KnowledgeConnectionSettings,
   localService: {
-    current(): { writebackProvider?: string; writebackModel?: string }
-    update(patch: { writebackProvider?: string | null; writebackModel?: string | null }): Promise<{ writebackProvider?: string; writebackModel?: string }>
+    current(): { writebackProvider?: string; writebackModel?: string; extractionEveryTurns?:number; extractionIdleSeconds?:number }
+    update(patch: { writebackProvider?: string | null; writebackModel?: string | null; extractionEveryTurns?:number; extractionIdleSeconds?:number }): Promise<{ writebackProvider?: string; writebackModel?: string; extractionEveryTurns?:number; extractionIdleSeconds?:number }>
   },
+  workspace?:()=>NoteWorkspace,
 ): () => void {
   const webServer = ctx.webServer ?? ctx.get('webServer') as RuntimeContextLike['webServer']
   if (webServer === undefined) throw new Error('remote knowledge management requires the DSH webServer service')
@@ -21,7 +24,7 @@ export function registerRemoteManagementProxy(
     kind: 'prefix',
     path: prefix,
     handler: async (req, res) => {
-      try { await dispatch(prefix, current(), localService, req, res) } catch (error) { sendError(res, error) }
+      try { await dispatch(prefix, current(), localService, req, res,workspace?.()) } catch (error) { sendError(res, error) }
     },
   })
 }
@@ -30,11 +33,12 @@ async function dispatch(
   prefix: string,
   settings: KnowledgeConnectionSettings,
   localService: {
-    current(): { writebackProvider?: string; writebackModel?: string }
-    update(patch: { writebackProvider?: string | null; writebackModel?: string | null }): Promise<{ writebackProvider?: string; writebackModel?: string }>
+    current(): { writebackProvider?: string; writebackModel?: string; extractionEveryTurns?:number; extractionIdleSeconds?:number }
+    update(patch: { writebackProvider?: string | null; writebackModel?: string | null; extractionEveryTurns?:number; extractionIdleSeconds?:number }): Promise<{ writebackProvider?: string; writebackModel?: string; extractionEveryTurns?:number; extractionIdleSeconds?:number }>
   },
   req: IncomingMessage,
   res: ServerResponse,
+  workspace?:NoteWorkspace,
 ): Promise<void> {
   assertManagementRequest(req)
   if (settings.backend !== 'remote' || settings.remoteUrl === undefined || settings.remoteToken === undefined) {
@@ -45,6 +49,7 @@ async function dispatch(
   // Journal uses its own Host-authenticated browser gateway, never this generic proxy.
   if (/^worklog(?:\/|$)/i.test(decodeURIComponent(relative))) throw httpError(404, '请通过日报工作区访问。')
   const method = req.method ?? 'GET'
+  if(workspace && await handleNoteWorkspace(workspace,relative,incoming,req,res))return
   if (relative === 'service') {
     if (method === 'GET') {
       const local = localService.current()
@@ -52,6 +57,7 @@ async function dispatch(
       publicApiEnabled: true,
       publicApiPrefix: settings.remoteUrl,
       remote: true,
+      ...normalizeWritebackFrequency(local as Record<string,unknown>),
       ...local.writebackProvider && local.writebackModel
         ? { writebackProvider: local.writebackProvider, writebackModel: local.writebackModel }
         : {},
@@ -67,11 +73,13 @@ async function dispatch(
     const updated = await localService.update({
       ...writebackProvider === undefined ? {} : { writebackProvider },
       ...writebackModel === undefined ? {} : { writebackModel },
+        ...normalizeWritebackFrequency(body),
     })
     return sendJson(res, 200, {
       publicApiEnabled: true,
       publicApiPrefix: settings.remoteUrl,
       remote: true,
+      ...normalizeWritebackFrequency(updated as Record<string,unknown>),
       ...updated.writebackProvider && updated.writebackModel
         ? { writebackProvider: updated.writebackProvider, writebackModel: updated.writebackModel }
         : {},

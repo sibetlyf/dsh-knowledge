@@ -1,3 +1,5 @@
+import { normalizeWritebackFrequency } from './service-settings.js'
+import {handleNoteWorkspace,type NoteWorkspace} from './notes/workspace-http.js'
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import {
   DEFAULT_KNOWLEDGE_BASE_ID, isKnowledgeType, normalizeDraft, normalizeKnowledgeBaseDraft,
@@ -7,12 +9,14 @@ import {
 import { LocalKnowledgeProvider } from './local-provider.js'
 import { normalizeFinalizationChange } from './document-lifecycle.js'
 import { normalizeDocumentGroup } from './document-groups.js'
-import { resolveDocumentLinks } from './document-links.js'
-import { resolveKnowledgeGraph } from './document-graph.js'
 import type { RuntimeContextLike } from './runtime.js'
 import { isNoteId, type NoteReference, type NoteListRequest } from './notes/domain.js'
 import { renderNoteSharePage } from './notes/share-page.js'
 import { createNoteShareManifest, importNoteShare, inspectNoteShareUrl, type NoteShareRequestPolicy } from './notes/share-import.js'
+import { renderKnowledgeSharePage } from './knowledge-share-page.js'
+import type { KnowledgeShareStore } from './knowledge-share.js'
+import type { RecallUsage, RecallPreferencePatch, FrictionInput } from './recall-ranking.js'
+import type { RetrievalIndexScope } from './retrieval-index.js'
 
 const MAX_BODY_BYTES = 1_048_576
 const MAX_NOTE_BODY_BYTES = 64 * 1024 * 1024
@@ -20,9 +24,11 @@ const MAX_SHARED_NOTE_PREVIEW_BYTES = 512 * 1024
 export const LOCAL_MANAGEMENT_API_PREFIX = '/knowledge-local/v1'
 
 export interface KnowledgeApiOptions {
+  noteWorkspace?:NoteWorkspace
+
   worklog?: (method: string, path: string, data: Record<string, unknown>, query: URLSearchParams) => Promise<unknown>
   shareRequestPolicy?: () => NoteShareRequestPolicy
-  optimize?: (documentId: string, signal: AbortSignal) => Promise<unknown>
+  knowledgeShares?: KnowledgeShareStore
   tencentDocs?: {
     status(signal?: AbortSignal): Promise<unknown>
     saveToken(token: string): Promise<unknown>
@@ -33,29 +39,8 @@ export interface KnowledgeApiOptions {
   morning?: (day?: string, signal?: AbortSignal) => Promise<unknown>
   authMode?: 'bearer' | 'same-origin'
   service?: {
-    current(): {
-      publicApiEnabled: boolean
-      publicApiPrefix: string
-      writebackProvider?: string
-      writebackModel?: string
-      autoApprovePendingEnabled?: boolean
-      autoOrganizeTrigger?: 'turn' | 'interval'
-      autoOrganizeIntervalMinutes?: number
-      worklogAutoUpdateTrigger?: 'turn' | 'interval'
-      worklogAutoUpdateIntervalMinutes?: number
-      tokenSavingEnabled?: boolean
-    }
-    update(patch: {
-      publicApiEnabled?: boolean
-      writebackProvider?: string | null
-      writebackModel?: string | null
-      autoApprovePendingEnabled?: boolean
-      autoOrganizeTrigger?: 'turn' | 'interval'
-      autoOrganizeIntervalMinutes?: number
-      worklogAutoUpdateTrigger?: 'turn' | 'interval'
-      worklogAutoUpdateIntervalMinutes?: number
-      tokenSavingEnabled?: boolean
-    }): Promise<unknown>
+    current(): { publicApiEnabled: boolean; publicApiPrefix: string; writebackProvider?: string; writebackModel?: string; extractionEveryTurns?:number; extractionIdleSeconds?:number }
+    update(patch: { publicApiEnabled?: boolean; writebackProvider?: string | null; writebackModel?: string | null; extractionEveryTurns?:number; extractionIdleSeconds?:number }): Promise<{ publicApiEnabled: boolean; publicApiPrefix: string; writebackProvider?: string; writebackModel?: string; extractionEveryTurns?:number; extractionIdleSeconds?:number }>
   }
 }
 
@@ -148,11 +133,117 @@ async function dispatch(
     }))
   }
 
+  if (segments[0] === 'shared-knowledge' && options.knowledgeShares !== undefined) {
+    if (method !== 'GET') throw httpError(405, 'shared knowledge is read-only')
+    const token = segments[1]
+    if (token === undefined) throw httpError(404, 'shared knowledge was not found')
+    const share = await options.knowledgeShares.get(token)
+    if (share === undefined) throw httpError(404, 'shared knowledge was not found or is no longer available')
+    const entry = await provider.get(share.id)
+    if (entry === undefined || entry.status !== 'active') throw httpError(404, 'shared knowledge was not found or is no longer available')
+    if (segments[2] === 'raw' && segments.length === 3) {
+      return sendOpaqueFile(res, `${entry.title}.md`, 'text/markdown; charset=utf-8', Buffer.from(entry.body, 'utf8'), url.searchParams.get('download') === '1')
+    }
+    if (segments[2] === 'manifest' && segments.length === 3) {
+      return sendJson(res, 200, {
+        kind: 'knowledge-document',
+        title: entry.title,
+        createdAt: share.createdAt,
+        updatedAt: entry.updatedAt,
+        version: entry.version,
+        bodyLength: entry.body.length,
+      })
+    }
+    if (segments.length !== 2) throw httpError(404, 'shared knowledge route was not found')
+    return sendHtml(res, 200, renderKnowledgeSharePage({
+      apiPrefix: prefix,
+      token,
+      title: entry.title,
+      body: entry.body,
+    }))
+  }
+
   const actor = options.authMode === 'same-origin' ? authenticateSameOrigin(req) : authenticateBearer(provider, req)
+
+  if(options.authMode==='same-origin' && options.noteWorkspace && await handleNoteWorkspace(options.noteWorkspace,relative,url,req,res))return
+
+  if (segments[0] === 'note-sync') {
+    if(method==='GET' && segments.length===1){requirePermission(actor.permissions,'read');return sendJson(res,200,provider.notes.syncManifest())}
+    if(method==='POST' && segments.length===1){
+      const body=JSON.parse((await readBinary(req,90*1024*1024)).toString('utf8')) as import('./notes/sync-protocol.js').NoteSyncChange
+      requirePermission(actor.permissions,body?.value===null?'admin':'write')
+      if(body?.value===null && provider.notes.get(body.id)){
+        const refs=await noteReferencesForSubtree(provider,body.id)
+        if(refs.length)throw httpError(409,'笔记仍被知识文档引用，不能同步删除')
+      }
+      return sendJson(res,200,provider.notes.applySyncChange(actor.id,body))
+    }
+    throw httpError(405,'unsupported note sync method')
+  }
+
+  if (segments[0] === 'retrieval-index') {
+    requirePermission(actor.permissions, 'read')
+    let baseIds: string[] | undefined = url.searchParams.has('knowledgeBaseId') ? [...new Set(url.searchParams.getAll('knowledgeBaseId'))] : undefined
+    if (baseIds && baseIds.length > 100) throw httpError(400, 'too many knowledge bases')
+    const sessionId = url.searchParams.get('sessionId') || undefined
+    const projectId = url.searchParams.get('projectId') || undefined
+    let policies: RetrievalIndexScope['mounts']
+    if (sessionId) {
+      const mounts = await provider.resolveMounts(sessionId, projectId)
+      const allowed = mounts.filter(m => m.enabled && m.recallEnabled && m.base.status === 'active')
+      policies = allowed
+      baseIds = allowed.map(m => m.knowledgeBaseId).filter(id => !baseIds || baseIds.includes(id))
+    }
+    const scope = { ...(baseIds ? { baseIds } : {}), ...(projectId ? { projectId } : {}), ...(policies ? { mounts: policies } : {}), scoped: Boolean(sessionId || projectId) }
+    if (method === 'GET' && segments.length === 1) {
+      return sendJson(res, 200, { ...provider.retrievalIndex.status(scope, {
+        details: url.searchParams.get('details') === '1', state: url.searchParams.get('state') === 'pending' ? 'pending' : 'failed',
+        offset: integerParam(url, 'offset', 0, 0, 1_000_000),
+      }), canRetry: actor.permissions.includes('admin') })
+    }
+    if (method === 'POST' && segments.length === 2 && segments[1] === 'retry') {
+      requirePermission(actor.permissions, 'admin')
+      const body = await readObject(req)
+      const documentId = body.documentId === undefined ? undefined : requiredString(body.documentId, 'documentId')
+      return sendJson(res, 200, { queued: provider.retrievalIndex.retryFailed(scope, documentId) })
+    }
+    throw httpError(404, 'retrieval index route was not found')
+  }
+
+  if (segments[0] === 'recall') {
+    requirePermission(actor.permissions, 'read')
+    const id = segments[1]
+    if (method === 'GET' && segments.length === 1) return sendJson(res, 200, { ...provider.recallRanking.list({ days: Number(url.searchParams.get('days') ?? 30), limit: Number(url.searchParams.get('limit') ?? 30), base: url.searchParams.get('base') || '', query: url.searchParams.get('q') || '', sort: url.searchParams.get('sort') || 'score', cursor: url.searchParams.get('cursor') || '' }), canManage: actor.permissions.includes('admin') })
+    if (method === 'POST' && id === 'usage' && segments.length === 2) {
+      await provider.recordRecallUsage(await readObject(req) as unknown as RecallUsage, undefined, actor.id)
+      return sendJson(res, 200, { recorded: true })
+    }
+    if (id && method === 'GET' && segments.length === 2) return sendJson(res, 200, provider.recallRanking.detail(id, url.searchParams.get('kind') || 'incidents', Number(url.searchParams.get('before') ?? Number.MAX_SAFE_INTEGER)))
+    if (id && method === 'POST' && segments[2] === 'feedback' && segments.length === 3) {
+      requirePermission(actor.permissions, 'write')
+      const value = await readObject(req) as unknown as FrictionInput
+      return sendJson(res, 200, await provider.recordRecallIncident(id, value))
+    }
+    requirePermission(actor.permissions, 'admin')
+    if (id === 'preferences' && method === 'POST' && segments.length === 2) {
+      const data = await readObject(req)
+      return sendJson(res, 200, provider.recallRanking.patchMany(data.items as { id: string; revision: number }[], data.priority as number))
+    }
+    if (id && method === 'PATCH' && segments.length === 2) return sendJson(res, 200, provider.recallRanking.patch(id, await readObject(req) as unknown as RecallPreferencePatch))
+    if (id && method === 'POST' && segments[2] === 'incidents' && segments.length === 3) return sendJson(res, 200, provider.recallRanking.incident(id, await readObject(req) as unknown as FrictionInput))
+    if (id && method === 'POST' && segments[2] === 'incidents' && segments[3] && segments[4] === 'retract' && segments.length === 5) {
+      const data = await readObject(req)
+      provider.recallRanking.retract(id, segments[3], data.reason as string)
+      return sendJson(res, 200, { retracted: true })
+    }
+    throw httpError(404, '召回排行接口不存在')
+  }
 
   if (segments[0] === 'worklog') {
     if (!['GET', 'POST'].includes(method) || segments.length !== 2) throw httpError(404, '日报接口不存在')
-    requirePermission(actor.permissions, method === 'GET' ? 'read' : segments[1] === 'settings' || segments[1] === 'archive' ? 'admin' : 'write')
+    const operation = segments[1]!
+    const calendarSettings = ['calendar-settings', 'calendar-report-settings', 'calendar-report-recheck', 'calendar-workdays-settings'].includes(operation) || operation.startsWith('calendar-icloud-')
+    requirePermission(actor.permissions, calendarSettings ? 'admin' : method === 'GET' ? 'read' : operation === 'settings' || operation === 'archive' ? 'admin' : 'write')
     if (!options.worklog) throw httpError(503, '中央日报服务尚未就绪')
     const result = await options.worklog(method, `/${segments[1]}`, method === 'POST' ? await readObject(req) : {}, url.searchParams)
     return sendJson(res, 200, segments[1] === 'state' && method === 'GET' ? { ...(result as Record<string, unknown>), canManage: actor.permissions.includes('admin') } : result)
@@ -171,6 +262,7 @@ async function dispatch(
         limit: integerParam(url, 'limit', 200, 1, 500),
         ...kind === null ? {} : { kind },
         ...url.searchParams.get('recursive') === '1' ? { recursive: true } : {},
+        ...url.searchParams.get('editableOnly') === '1' ? { editableOnly: true } : {},
       }
       return sendJson(res, 200, url.searchParams.get('paged') === '1'
         ? provider.notes.listPage(request, url.searchParams.get('cursor') || undefined)
@@ -227,6 +319,10 @@ async function dispatch(
         policy,
       ))
     }
+    if (method === 'GET' && segments[1] === 'revision' && segments.length === 2) {
+      requirePermission(actor.permissions, 'read')
+      return sendJson(res, 200, {version: provider.notes.syncManifest().revision, updatedAt: ''})
+    }
     const id = segments[1]
     if (id !== undefined && method === 'GET' && segments.length === 2) {
       requirePermission(actor.permissions, 'read')
@@ -242,7 +338,7 @@ async function dispatch(
     if (id !== undefined && method === 'PUT' && segments[2] === 'content' && segments.length === 3) {
       requirePermission(actor.permissions, 'write')
       const expectedVersion = url.searchParams.has('expectedVersion') ? integerParam(url, 'expectedVersion', 1, 1, Number.MAX_SAFE_INTEGER) : undefined
-      return sendJson(res, 200, await provider.notes.updateContent(id, await readBinary(req, MAX_NOTE_BODY_BYTES), expectedVersion))
+      return sendJson(res, 200, await provider.notes.updateContent(id, await readBinary(req, MAX_NOTE_BODY_BYTES), expectedVersion, ['AI 修改', '应用修改'].includes(url.searchParams.get('origin') ?? '') ? url.searchParams.get('origin')! : req.headers['x-dsh-knowledge-client'] === 'management-web' ? '网页修改' : 'API 修改'))
     }
     if (id !== undefined && method === 'GET' && segments[2] === 'versions' && segments.length === 3) {
       requirePermission(actor.permissions, 'read')
@@ -307,64 +403,6 @@ async function dispatch(
     }
   }
 
-  if (segments[0] === 'morning' && segments.length === 1 && method === 'GET' && options.morning !== undefined) {
-    requirePermission(actor.permissions, 'read')
-    return sendJson(res, 200, await options.morning(url.searchParams.get('day')?.trim() || undefined))
-  }
-
-  if (segments[0] === 'tencent-docs' && segments.length === 2 && options.tencentDocs !== undefined) {
-    if (segments[1] === 'status' && method === 'GET') {
-      requirePermission(actor.permissions, 'read')
-      return sendJson(res, 200, await options.tencentDocs.status())
-    }
-    if (segments[1] === 'token' && method === 'POST') {
-      requirePermission(actor.permissions, 'write')
-      const body = await readObject(req)
-      const token = typeof body.token === 'string' ? body.token.trim() : ''
-      if (token.length === 0) throw httpError(400, 'token is required')
-      return sendJson(res, 200, await options.tencentDocs.saveToken(token))
-    }
-    if (segments[1] === 'token' && method === 'DELETE') {
-      requirePermission(actor.permissions, 'write')
-      return sendJson(res, 200, await options.tencentDocs.clearToken())
-    }
-    if (segments[1] === 'import' && method === 'POST') {
-      requirePermission(actor.permissions, 'write')
-      const body = await readObject(req)
-      const url = typeof body.url === 'string' ? body.url.trim() : ''
-      if (url.length === 0) throw httpError(400, 'url is required')
-      return sendJson(res, 200, await options.tencentDocs.importDocument({
-        url,
-        ...typeof body.knowledgeBaseId === 'string' && body.knowledgeBaseId.trim() ? { knowledgeBaseId: body.knowledgeBaseId.trim() } : {},
-        ...typeof body.title === 'string' && body.title.trim() ? { title: body.title.trim() } : {},
-        ...typeof body.group === 'string' && body.group.trim() ? { group: body.group.trim() } : {},
-      }))
-    }
-    if (segments[1] === 'publish' && method === 'POST') {
-      requirePermission(actor.permissions, 'write')
-      const body = await readObject(req)
-      const documentId = typeof body.documentId === 'string' ? body.documentId.trim() : ''
-      if (documentId.length === 0) throw httpError(400, 'documentId is required')
-      return sendJson(res, 200, await options.tencentDocs.publish(documentId))
-    }
-    throw httpError(404, 'tencent docs action was not found')
-  }
-
-  if (method === 'POST' && segments[0] === 'optimize' && segments.length === 1 && options.optimize !== undefined) {
-    requirePermission(actor.permissions, 'write')
-    const body = await readObject(req)
-    const documentId = typeof body.documentId === 'string' ? body.documentId.trim() : ''
-    if (documentId.length === 0) throw httpError(400, 'documentId is required')
-    const controller = new AbortController()
-    const abort = (): void => controller.abort(new Error('client aborted'))
-    req.on('close', abort)
-    try {
-      return sendJson(res, 200, await options.optimize(documentId, controller.signal))
-    } finally {
-      req.off('close', abort)
-    }
-  }
-
   if (segments[0] === 'settings' && segments.length === 1) {
     requirePermission(actor.permissions, 'read')
     if (method === 'GET') return sendJson(res, 200, await provider.getSettings())
@@ -390,32 +428,11 @@ async function dispatch(
       const writebackModel = body.writebackModel
       if (writebackProvider !== undefined && writebackProvider !== null && typeof writebackProvider !== 'string') throw httpError(400, 'writebackProvider must be a string or null')
       if (writebackModel !== undefined && writebackModel !== null && typeof writebackModel !== 'string') throw httpError(400, 'writebackModel must be a string or null')
-      const autoApprovePendingEnabled = body.autoApprovePendingEnabled
-      if (autoApprovePendingEnabled !== undefined && typeof autoApprovePendingEnabled !== 'boolean') throw httpError(400, 'autoApprovePendingEnabled must be a boolean')
-      const autoOrganizeTrigger = body.autoOrganizeTrigger
-      if (autoOrganizeTrigger !== undefined && autoOrganizeTrigger !== 'turn' && autoOrganizeTrigger !== 'interval') throw httpError(400, 'autoOrganizeTrigger must be turn or interval')
-      const worklogAutoUpdateTrigger = body.worklogAutoUpdateTrigger
-      if (worklogAutoUpdateTrigger !== undefined && worklogAutoUpdateTrigger !== 'turn' && worklogAutoUpdateTrigger !== 'interval') throw httpError(400, 'worklogAutoUpdateTrigger must be turn or interval')
-      const tokenSavingEnabled = body.tokenSavingEnabled
-      if (tokenSavingEnabled !== undefined && typeof tokenSavingEnabled !== 'boolean') throw httpError(400, 'tokenSavingEnabled must be a boolean')
-      const minutes = (key: 'autoOrganizeIntervalMinutes' | 'worklogAutoUpdateIntervalMinutes'): number | undefined => {
-        const value = body[key]
-        if (value === undefined) return undefined
-        if (typeof value !== 'number' || !Number.isFinite(value) || value < 1 || value > 1440) throw httpError(400, `${key} must be between 1 and 1440`)
-        return Math.trunc(value)
-      }
-      const autoOrganizeIntervalMinutes = minutes('autoOrganizeIntervalMinutes')
-      const worklogAutoUpdateIntervalMinutes = minutes('worklogAutoUpdateIntervalMinutes')
       return sendJson(res, 200, await options.service.update({
         ...body.publicApiEnabled === undefined ? {} : { publicApiEnabled: body.publicApiEnabled },
         ...writebackProvider === undefined ? {} : { writebackProvider },
         ...writebackModel === undefined ? {} : { writebackModel },
-        ...autoApprovePendingEnabled === undefined ? {} : { autoApprovePendingEnabled },
-        ...autoOrganizeTrigger === undefined ? {} : { autoOrganizeTrigger },
-        ...autoOrganizeIntervalMinutes === undefined ? {} : { autoOrganizeIntervalMinutes },
-        ...worklogAutoUpdateTrigger === undefined ? {} : { worklogAutoUpdateTrigger },
-        ...worklogAutoUpdateIntervalMinutes === undefined ? {} : { worklogAutoUpdateIntervalMinutes },
-        ...tokenSavingEnabled === undefined ? {} : { tokenSavingEnabled },
+        ...normalizeWritebackFrequency(body),
       }))
     }
   }
@@ -430,6 +447,7 @@ async function dispatch(
       if (!types.every(isKnowledgeType)) throw httpError(400, 'search types are invalid')
       return sendJson(res, 200, await provider.search({
         text: body.text,
+        ...body.includePassage === true ? { includePassage: true } : {},
         ...body.projectId === undefined ? {} : { projectId: body.projectId },
         knowledgeBaseIds: stringArray(body.knowledgeBaseIds, 'knowledgeBaseIds', 100),
         includeTags: stringArray(body.includeTags, 'includeTags', 100),
@@ -445,6 +463,7 @@ async function dispatch(
     const excludeTags = url.searchParams.getAll('excludeTag').filter(Boolean)
     const result = await provider.search({
       text: url.searchParams.get('q') ?? '',
+      ...url.searchParams.get('includePassage') === '1' ? { includePassage: true } : {},
       ...projectId === undefined ? {} : { projectId },
       ...knowledgeBaseIds.length === 0 ? {} : { knowledgeBaseIds },
       ...includeTags.length === 0 ? {} : { includeTags },
@@ -476,6 +495,73 @@ async function dispatch(
       ...cursor === undefined ? {} : { cursor },
       limit: integerParam(url, 'limit', 60, 1, 100),
     }))
+  }
+
+  if (segments[0] === 'knowledge-shares' && options.knowledgeShares !== undefined) {
+    requirePermission(actor.permissions, 'admin')
+    if (method === 'GET' && segments.length === 1) {
+      const shares = await options.knowledgeShares.list()
+      return sendJson(res, 200, { shares, pathPrefix: `${prefix}/shared-knowledge/` })
+    }
+    if (method === 'POST' && segments.length === 1) {
+      const body = await readObject(req)
+      const documentId = requiredString(body.documentId, 'documentId')
+      const entry = await provider.get(documentId)
+      if (entry === undefined || entry.status !== 'active') throw httpError(404, '知识文档不存在或已归档')
+      const share = await options.knowledgeShares.create(documentId, entry.title)
+      return sendJson(res, 201, { ...share, path: `${prefix}/shared-knowledge/${encodeURIComponent(share.token)}` })
+    }
+    if (method === 'DELETE' && segments.length === 2) {
+      const removed = await options.knowledgeShares.revoke(segments[1] ?? '')
+      if (!removed) throw httpError(404, '分享不存在')
+      res.statusCode = 204
+      res.end()
+      return
+    }
+    throw httpError(404, 'knowledge share action was not found')
+  }
+
+  if (segments[0] === 'morning' && segments.length === 1 && method === 'GET' && options.morning !== undefined) {
+    requirePermission(actor.permissions, 'read')
+    return sendJson(res, 200, await options.morning(url.searchParams.get('day')?.trim() || undefined))
+  }
+
+  if (segments[0] === 'tencent-docs' && segments.length === 2 && options.tencentDocs !== undefined) {
+    if (segments[1] === 'status' && method === 'GET') {
+      requirePermission(actor.permissions, 'read')
+      return sendJson(res, 200, await options.tencentDocs.status())
+    }
+    if (segments[1] === 'token' && method === 'POST') {
+      requirePermission(actor.permissions, 'write')
+      const body = await readObject(req)
+      const token = typeof body.token === 'string' ? body.token.trim() : ''
+      if (token.length === 0) throw httpError(400, 'token is required')
+      return sendJson(res, 200, await options.tencentDocs.saveToken(token))
+    }
+    if (segments[1] === 'token' && method === 'DELETE') {
+      requirePermission(actor.permissions, 'write')
+      return sendJson(res, 200, await options.tencentDocs.clearToken())
+    }
+    if (segments[1] === 'import' && method === 'POST') {
+      requirePermission(actor.permissions, 'write')
+      const body = await readObject(req)
+      const urlValue = typeof body.url === 'string' ? body.url.trim() : ''
+      if (urlValue.length === 0) throw httpError(400, 'url is required')
+      return sendJson(res, 200, await options.tencentDocs.importDocument({
+        url: urlValue,
+        ...typeof body.knowledgeBaseId === 'string' && body.knowledgeBaseId.trim() ? { knowledgeBaseId: body.knowledgeBaseId.trim() } : {},
+        ...typeof body.title === 'string' && body.title.trim() ? { title: body.title.trim() } : {},
+        ...typeof body.group === 'string' && body.group.trim() ? { group: body.group.trim() } : {},
+      }))
+    }
+    if (segments[1] === 'publish' && method === 'POST') {
+      requirePermission(actor.permissions, 'write')
+      const body = await readObject(req)
+      const documentId = typeof body.documentId === 'string' ? body.documentId.trim() : ''
+      if (documentId.length === 0) throw httpError(400, 'documentId is required')
+      return sendJson(res, 200, await options.tencentDocs.publish(documentId))
+    }
+    throw httpError(404, 'tencent docs action was not found')
   }
 
   if (segments[0] === 'knowledge-bases') {
@@ -592,14 +678,6 @@ async function dispatch(
     }
   }
 
-  if (segments[0] === 'graph' && segments.length === 1) {
-    if (method !== 'GET') throw httpError(405, '知识链接图只支持读取。')
-    requirePermission(actor.permissions, 'read')
-    const knowledgeBaseId = url.searchParams.get('knowledgeBaseId')?.trim()
-    if (!knowledgeBaseId) throw httpError(400, 'knowledgeBaseId is required')
-    return sendJson(res, 200, await resolveKnowledgeGraph(provider, knowledgeBaseId, integerParam(url, 'limit', 80, 2, 100)))
-  }
-
   if (segments[0] === 'documents') {
     if (method === 'GET' && segments.length === 1) {
       requirePermission(actor.permissions, 'read')
@@ -670,12 +748,6 @@ async function dispatch(
     if (id !== undefined && method === 'GET' && segments[2] === 'versions' && segments.length === 3) {
       requirePermission(actor.permissions, 'read')
       return sendJson(res, 200, await provider.versions(id))
-    }
-    if (id !== undefined && method === 'GET' && segments[2] === 'links' && segments.length === 3) {
-      requirePermission(actor.permissions, 'read')
-      const links = await resolveDocumentLinks(provider, id)
-      if (links === undefined) throw httpError(404, `knowledge entry "${id}" was not found`)
-      return sendJson(res, 200, links)
     }
     if (id !== undefined && method === 'GET' && segments[2] === 'revision' && segments.length === 3) {
       requirePermission(actor.permissions, 'read')

@@ -1,7 +1,6 @@
+import { calendarPaths } from './calendar/routes.js'
 import { capture, settings, fail, validDay, dayOf } from './domain.js'
-import { optimizeReport } from './optimizer.js'
 import { generatePeriod } from './period.js'
-import { knowledgeRecord, prepareWorklog } from './knowledge.js'
 import { createCentral, pick, captureKeys, sharedKeys, sharedRevision } from './central.js'
 import { Outbox } from './outbox.js'
 import { destination, requestCentral } from './remote.js'
@@ -13,62 +12,8 @@ export class JournalService {
     this.central = createCentral(store, worker, models)
     this.outbox = new Outbox(store, current, request)
     worker.isEnabled = () => this.current().backend === 'local' && !this.current().paused
+    store.icloud.active = () => !this.closed && this.current().backend === 'local' && !this.current().paused
     store.originId()
-  }
-  collect(session, turn) {
-    if (session.header.origin === 'subagent') return
-    this.store.observe(session.header.cwd)
-    const connection = { ...this.current() }, record = capture(session, turn, this.store.config())
-    if (!record) return
-    if (connection.backend === 'remote') this.outbox.capture(record, connection)
-    else this.store.insert({ ...record, sourceId: this.store.originId() })
-  }
-  /**
-   * Record one automatic knowledge write as worklog source material.
-   *
-   * First use provisions the journal for the affected project (capture enabled,
-   * project added, daily generation enabled) so no manual setup is required.
-   * Remote clients queue the record through the existing outbox.
-   */
-  recordKnowledge(event, now = Date.now()) {
-    if (!event || typeof event.id !== 'string' || event.id.length === 0) return null
-    const project = typeof event.project === 'string' ? event.project.trim() : ''
-    if (!project) return null
-    const config = prepareWorklog(this.store, project, now)
-    if (!config.enabled) return null
-    if (config.scope === 'selected' && !config.projects.includes(project)) return null
-    if (typeof event.sessionId === 'string' && config.excludedSessions.includes(event.sessionId)) return null
-    this.store.observe(project)
-    const record = knowledgeRecord(event, config, this.store.originId(), now)
-    const connection = { ...this.current() }
-    if (connection.backend === 'remote') this.outbox.capture(record, connection)
-    else this.store.insert(record)
-    return { day: record.day, remote: connection.backend === 'remote' }
-  }
-  async serveCentral(method, path, data, query) {
-    if (this.current().paused) throw fail('知识库连接正在切换，请稍后重试', 409)
-    if (this.current().backend !== 'local') throw fail('当前节点不是中央日报服务，请连接本地模式的中央知识库', 409)
-    const value = await this.central(method, path, data, query)
-    if (method === 'GET' && path === '/state') return { ...value, config: pick(value.config, sharedKeys), projects: [] }
-    return value
-  }
-  collectorState() {
-    const target = destination(this.current())
-    return { remote: !!target, sourceId: this.store.originId(), capture: pick(this.store.config(), captureKeys),
-      projects: this.store.overview().projects, defaultProject: this.defaultProject,
-      sync: target ? this.outbox.status(target) : null,
-      localHistory: this.store.db.prepare('SELECT count(*) AS n FROM records').get().n,
-      localReports: this.store.db.prepare('SELECT count(*) AS n FROM reports').get().n }
-  }
-  async optimize(day) {
-    const detail = this.store.detail(day)
-    if (!detail.report.markdown.trim()) throw fail('这份日报还没有正文，请先整理日报', 409)
-    if (detail.report.edited === false && detail.report.revision === 0) throw fail('这份日报还没有正文，请先整理日报', 409)
-    const config = this.store.config()
-    if (!config.provider || !config.model) throw fail('请先在采集设置中选择日报模型', 409)
-    const markdown = await optimizeReport(this.worker.llm, detail.report.markdown, { provider: config.provider, model: config.model })
-    this.store.save(day, markdown, detail.report.revision, detail.report.covered, true)
-    return this.store.detail(day)
   }
   async period(day, kind) {
     const base = this.store.period(day, kind)
@@ -88,7 +33,67 @@ export class JournalService {
       return { ...base, generated: false, error: error instanceof Error ? error.message : String(error) }
     }
   }
+  collect(session, turn) {
+    if (session.header.origin === 'subagent') return
+    this.store.observe(session.header.cwd)
+    const connection = { ...this.current() }, record = capture(session, turn, this.store.config())
+    if (!record) return
+    if (connection.backend === 'remote') this.outbox.capture(record, connection)
+    else this.store.insert({ ...record, sourceId: this.store.originId() })
+  }
+  async serveCentral(method, path, data, query) {
+    if (this.current().paused) throw fail('知识库连接正在切换，请稍后重试', 409)
+    if (this.current().backend !== 'local') throw fail('当前节点不是中央日报服务，请连接本地模式的中央知识库', 409)
+    const value = await this.central(method, path, data, query)
+    if (method === 'GET' && path === '/state') return { ...value, config: pick(value.config, sharedKeys), projects: [] }
+    return value
+  }
+  async read(path, query, signal) {
+    signal.throwIfAborted()
+    if (!['/reports', '/report'].includes(path)) throw fail('不支持的日报读取操作', 400)
+    const connection = { ...this.current() }
+    if (connection.paused) throw fail('知识库连接正在切换，请稍后重试', 409)
+    const key = value => JSON.stringify([value.backend,value.remoteUrl,value.remoteToken])
+    const target = destination(connection)
+    let value
+    try {
+      value = target
+        ? await this.request(connection,'GET',path,undefined,query,signal)
+        : await this.central('GET',path,{},query)
+    } catch (error) { signal.throwIfAborted(); throw error }
+    signal.throwIfAborted()
+    const current = this.current()
+    if (current.paused || key(current)!==key(connection)) throw fail('知识库连接已变化，请重新读取日报',409)
+    return { ...value,source:target?'remote':'local' }
+  }
+  async calendar(method, path, data, query, signal) {
+    signal.throwIfAborted()
+    if (!calendarPaths.has(path) || !['GET', 'POST'].includes(method)) throw fail('日历操作无效')
+    const connection = { ...this.current() }, key = value => JSON.stringify([value.backend, value.remoteUrl, value.remoteToken])
+    if (connection.paused) throw fail('知识库连接正在切换，请稍后重试', 409)
+    const target = destination(connection)
+    let value
+    try { value = target ? await this.request(connection, method, path, method === 'POST' ? data : undefined, query, signal) : await this.central(method, path, data, query, signal) }
+    catch (e) {
+      if (method === 'POST' && !/^\/calendar-(?:icloud-|report-settings|report-recheck|workdays-settings)/.test(path)) throw fail(`${e.message}。如果请求可能已发送，请在原连接用同一 requestId 和相同参数核对或重试，不要改用新编号。`, e.status || 502)
+      signal.throwIfAborted(); throw e
+    }
+    const current = this.current()
+    if (current.paused || key(current) !== key(connection)) throw fail(method === 'POST' ? '连接已变化，操作可能已在原目标完成；请恢复原连接并用同一 requestId 核对，不要在新连接重放' : '知识库连接已变化，请重新读取日历', 409)
+    if (method === 'GET') signal.throwIfAborted()
+    // A confirmed write stays confirmed even if cancellation arrives after commit.
+    return { ...value, source: target ? 'remote' : 'local' }
+  }
+  collectorState() {
+    const target = destination(this.current())
+    return { remote: !!target, sourceId: this.store.originId(), capture: pick(this.store.config(), captureKeys),
+      projects: this.store.overview().projects, defaultProject: this.defaultProject,
+      sync: target ? this.outbox.status(target) : null,
+      localHistory: this.store.db.prepare('SELECT count(*) AS n FROM records').get().n,
+      localReports: this.store.db.prepare('SELECT count(*) AS n FROM reports').get().n }
+  }
   async browser(method, path, data = {}, query = new URLSearchParams()) {
+    if (calendarPaths.has(path)) return this.calendar(method, path, data, query, new AbortController().signal)
     if (this.current().paused) throw fail('知识库连接正在切换，请稍后重试', 409)
     const connection = { ...this.current() }, target = destination(connection)
     if (method === 'GET' && path === '/collector-state') return this.collectorState()
@@ -122,7 +127,6 @@ export class JournalService {
           query.get('kind') || 'week',
         )
       }
-      if (method === 'POST' && path === '/optimize') return this.optimize(validDay(data.day))
       if (method === 'POST' && path === '/settings') {
         if (data.sharedRevision !== undefined && data.sharedRevision !== sharedRevision(this.store.config())) throw fail('中央配置已更新，请重新打开采集设置后重试', 409)
         return this.store.configure(data)
@@ -143,6 +147,11 @@ export class JournalService {
     if (path === '/state') return { ...value, remote: true, sourceId: this.store.originId(), config: { ...value.config, ...pick(this.store.config(), captureKeys) }, projects: this.store.overview().projects, defaultProject: this.defaultProject }
     return value
   }
-  start() { this.worker.start(); this.outbox.start() }
-  async close() { await this.outbox.close(); await this.worker.close() }
+  start() {
+    this.worker.start(); this.outbox.start()
+    this.icloudTimer = setInterval(() => { void this.store.icloud.begin() }, 15_000)
+    this.icloudTimer.unref?.()
+    void this.store.icloud.begin()
+  }
+  async close() { this.closed = true; clearInterval(this.icloudTimer); await this.store.icloud.close(); await this.outbox.close(); await this.worker.close() }
 }

@@ -1,3 +1,4 @@
+import { normalizeNoteName } from './notes/store.js'
 import type { KnowledgeProvider } from './provider.js'
 import type { NoteNode } from './notes/domain.js'
 import { KnowledgeNoteHandleCodec } from './note-reference-handle.js'
@@ -21,14 +22,15 @@ export function registerKnowledgeNoteTools(
   provider: KnowledgeProvider,
   codec: KnowledgeNoteHandleCodec,
   knowledgeCodec: KnowledgeHandleCodec,
+  register = (tool: ToolDefinitionLike) => ctx.tools.register(tool),
 ): void {
-  ctx.tools.register(listNotesTool(provider, codec))
-  ctx.tools.register(readNoteTool(provider, codec, knowledgeCodec))
-  const confirmable = noteConfirmationTools(ctx)
-  ctx.tools.register(confirmable(createNoteTool(ctx, provider, codec)))
-  ctx.tools.register(confirmable(updateNoteTool(ctx, provider, codec, knowledgeCodec)))
-  ctx.tools.register(confirmable(moveNoteTool(ctx, provider, codec)))
-  ctx.tools.register(deleteNoteTool(provider, codec))
+  register(listNotesTool(provider, codec))
+  register(readNoteTool(provider, codec, knowledgeCodec))
+  const confirmable = noteConfirmationTools(ctx, register)
+  register(createNoteTool(provider, codec))
+  register(confirmable(updateNoteTool(ctx, provider, codec, knowledgeCodec)))
+  register(confirmable(moveNoteTool(ctx, provider, codec)))
+  register(confirmable(deleteNoteTool(provider, codec)))
 }
 
 function listNotesTool(provider: KnowledgeProvider, codec: KnowledgeNoteHandleCodec): ToolDefinitionLike {
@@ -116,35 +118,61 @@ function readNoteTool(provider: KnowledgeProvider, codec: KnowledgeNoteHandleCod
   }
 }
 
-function createNoteTool(ctx: RuntimeContextLike, provider: KnowledgeProvider, codec: KnowledgeNoteHandleCodec): ToolDefinitionLike {
+function createNoteTool(provider: KnowledgeProvider, codec: KnowledgeNoteHandleCodec): ToolDefinitionLike {
+  const fields = {
+    kind: { type: 'string', enum: ['document', 'folder'] },
+    name: { type: 'string', maxLength: 255 },
+    parentFolderHandle: { type: 'string', description: 'Exact signed destination folder handle. Omit for root.' },
+    content: { type: 'string', maxLength: MAX_TOOL_NOTE_CONTENT, description: 'Initial Markdown for a document; omit for folders.' },
+  }
   return {
     name: 'knowledge_note_create',
-    description: 'Propose creating a note or folder from natural user intent. This tool asks the user for one-shot approval before writing; no prescribed user wording is needed. Omit parentFolderHandle for root. Do not repeatedly ask after rejection.',
-    parameters: {
-      type: 'object', additionalProperties: false,
-      properties: {
-        kind: { type: 'string', enum: ['document', 'folder'] },
-        name: { type: 'string', description: 'Document title/filename or folder name.' },
-        parentFolderHandle: { type: 'string', description: 'Exact signed folder handle returned by knowledge_note_list. Omit for root.' },
-        content: { type: 'string', description: 'Initial Markdown content for a document. Omit for a folder.' },
-      },
-      required: ['kind', 'name'],
-    },
+    description: 'Create NEW notes or folders immediately, without a confirmation round. Single creation uses kind/name/content/parentFolderHandle. For batch generation use ONLY items (1–20 items, total content at most 1,000,000 characters); parentIndex can point to an earlier folder item. Existing notes are never overwritten. Batch creation is sequential, not atomic: on failure it stops and returns confirmed creations and an unconfirmed item. Inspect the destination before retrying an unconfirmed item; never replay the whole batch. Use the corresponding operations for EXISTING notes: edits, renames and moves default to preview/confirmation unless explicitly delegated for the current target; permanent deletion always requires confirmation.',
+    parameters: { type: 'object', additionalProperties: false, properties: {
+      ...fields,
+      items: { type: 'array', minItems: 1, maxItems: 20, items: { type: 'object', additionalProperties: false, properties: {
+        ...fields, parentIndex: { type: 'integer', minimum: 0, description: 'Zero-based index of an EARLIER folder in this batch, mutually exclusive with parentFolderHandle.' },
+      }, required: ['kind', 'name'] } },
+    } },
     output: textOutput,
-    async execute(raw: unknown, exec: ToolRunContextLike): Promise<string> {
-      const agent = requireToolAgent(exec, 'knowledge note tools')
-      const args = toolRecord(raw)
-      const kind = noteKind(args.kind)
-      const name = requiredToolString(args.name, 'name', 255)
-      const content = optionalContent(args.content, 'content') ?? ''
-      if (kind === 'folder' && args.content !== undefined) throw new Error('content must be omitted when creating a folder')
-      const parentId = await resolveOptionalFolderId(provider, codec, agent.session.id, args.parentFolderHandle, 'parentFolderHandle', exec.signal)
-      const parent = parentId === null ? '根目录' : (await provider.getNote(parentId, exec.signal))?.name ?? parentId
-      await approveNoteMutation(ctx, exec, 'knowledge_note_create', `创建${kind === 'folder' ? '目录' : '笔记'}「${name}」\n目标目录：${parent}\n${content.slice(0, 600)}${content.length > 600 ? '\n（预览已截断）' : ''}`)
-      const node = kind === 'folder'
-        ? await provider.createNoteFolder(name, parentId, exec.signal)
-        : await provider.createNoteDocument(name, parentId, content, exec.signal)
-      return mutationResult(provider, 'created', node, codec.encode(agent.session.id, node.id))
+    async execute(raw, exec): Promise<string> {
+      const agent = requireToolAgent(exec, 'knowledge note tools'), args = toolRecord(raw)
+      const batch = args.items !== undefined
+      if (batch && Object.keys(fields).some(key=>args[key] !== undefined)) throw new Error('items cannot be combined with single-create fields')
+      const inputs = batch ? args.items : [args]
+      if (!Array.isArray(inputs) || !inputs.length || inputs.length > 20) throw new Error('items must contain 1–20 entries')
+      const plans: Array<{ kind:'document'|'folder'; name:string; content:string; parentId:string|null; parentIndex:number|undefined }> = []
+      let total = 0
+      // Validate every item and external destination before the first write.
+      for (const [index, rawItem] of inputs.entries()) {
+        const item = toolRecord(rawItem), kind = noteKind(item.kind), name = requiredToolString(item.name, 'name', 255)
+        normalizeNoteName(kind === 'document' && !name.trim().toLowerCase().endsWith('.md') ? name+'.md' : name)
+        const content = optionalContent(item.content, 'content') ?? ''
+        if (kind === 'folder' && item.content !== undefined) throw new Error('content must be omitted for a folder')
+        total += content.length
+        if (total > 1_000_000) throw new Error('batch content exceeds 1,000,000 characters')
+        const parentIndex = optionalToolInteger(item.parentIndex, 'parentIndex', 0, 19)
+        if (parentIndex !== undefined && (!batch || item.parentFolderHandle !== undefined || parentIndex >= index || plans[parentIndex]?.kind !== 'folder')) throw new Error('parentIndex must reference an earlier folder and cannot coexist with parentFolderHandle')
+        const parentId = parentIndex === undefined ? await resolveOptionalFolderId(provider, codec, agent.session.id, item.parentFolderHandle, 'parentFolderHandle', exec.signal) : null
+        plans.push({ kind, name, content, parentId, parentIndex })
+      }
+      const nodes: NoteNode[] = []
+      for (const [index, plan] of plans.entries()) {
+        try {
+          exec.signal.throwIfAborted()
+          const parentId = plan.parentIndex === undefined ? plan.parentId : nodes[plan.parentIndex]!.id
+          const node = plan.kind === 'folder' ? await provider.createNoteFolder(plan.name, parentId, exec.signal) : await provider.createNoteDocument(plan.name, parentId, plan.content, exec.signal)
+          nodes.push(node)
+        } catch (error) {
+          if (!batch) throw error
+          return JSON.stringify({ storage: provider.mode, operation: 'batch_create', status: 'incomplete', created: nodes.map((node,index)=>({ index, note: noteView(node,codec.encode(agent.session.id,node.id)) })),
+            failed: { index, name: plan.name, outcome: 'unconfirmed', error: error instanceof Error ? error.message : String(error) },
+            notAttempted: plans.slice(index+1).map((p,n)=>({index:index+1+n,name:p.name})),
+            notice: '已确认创建的项目不要重放；失败项可能已被远端保存，先查询目标目录核实，再只处理剩余项目。没有自动回滚或覆盖已有内容。', })
+        }
+      }
+      if (!batch) return mutationResult(provider, 'created', nodes[0]!, codec.encode(agent.session.id, nodes[0]!.id))
+      return JSON.stringify({ storage: provider.mode, operation: 'batch_create', status: 'completed', created: nodes.map((node,index)=>({index,note:noteView(node,codec.encode(agent.session.id,node.id))})) })
     },
   }
 }
@@ -152,7 +180,7 @@ function createNoteTool(ctx: RuntimeContextLike, provider: KnowledgeProvider, co
 function updateNoteTool(ctx: RuntimeContextLike, provider: KnowledgeProvider, codec: KnowledgeNoteHandleCodec, knowledgeCodec: KnowledgeHandleCodec): ToolDefinitionLike {
   return {
     name: 'knowledge_note_update',
-    description: 'Propose ALL requested changes to one note together, with one before/after preview and ONE user confirmation. Read needed pages first and pass expectedVersion. Use batch_edit for multiple sections: all edits use the same original snapshot and are saved atomically. Use replace_content when the user requests a whole-document rewrite; do not split that request into chapter-by-chapter confirmations. Use replace_range for a single local change and append_content only for genuine additions. Show returned locations and before/after differences, not a bare confirmation request. Do not retry after rejection or write unchanged observations.',
+    description: 'Propose ALL requested changes to one note together, with one before/after preview and, by default, ONE user confirmation. Explicit scoped delegation can authorize the exact change without another confirmation. Read needed pages first and pass expectedVersion. Use batch_edit for multiple sections: all edits use the same original snapshot and are saved atomically. Use replace_content when the user requests a whole-document rewrite; do not split that request into chapter-by-chapter confirmations. Use replace_range for a single local change and append_content only for genuine additions. Show returned locations and before/after differences, not a bare confirmation request. Do not retry after rejection or write unchanged observations.',
     parameters: {
       type: 'object', additionalProperties: false,
       properties: {
@@ -196,7 +224,7 @@ function updateNoteTool(ctx: RuntimeContextLike, provider: KnowledgeProvider, co
         const plan = planNoteContentUpdate(original, operation, args)
         await approveNoteMutation(ctx, exec, 'knowledge_note_update', `${plan.summary}\n笔记：${node.name}\n版本：${expectedVersion}${purpose ? `\n本次修改目的：${purpose}` : ''}`, plan.preview)
         await assertNoteUnchanged(provider, node, exec.signal)
-        updated = await provider.updateNoteContent(node.id, new TextEncoder().encode(plan.content), exec.signal, expectedVersion)
+        updated = await provider.updateNoteContent(node.id, new TextEncoder().encode(plan.content), exec.signal, expectedVersion, 'AI 修改')
       }
       return mutationResult(provider, 'updated', updated, codec.encode(agent.session.id, updated.id))
     },
@@ -206,7 +234,7 @@ function updateNoteTool(ctx: RuntimeContextLike, provider: KnowledgeProvider, co
 function moveNoteTool(ctx: RuntimeContextLike, provider: KnowledgeProvider, codec: KnowledgeNoteHandleCodec): ToolDefinitionLike {
   return {
     name: 'knowledge_note_move',
-    description: 'Propose moving a note or folder; this tool requests one-shot user approval showing the item and destination, without prescribed user wording. Use exact signed handles. Omit targetFolderHandle for root. Do not retry after rejection.',
+    description: 'Propose moving a note or folder; by default this tool requests one-shot user approval showing the item and destination, without prescribed user wording. Explicit scoped delegation can authorize the exact move. Use exact signed handles. Omit targetFolderHandle for root. Do not retry after rejection.',
     parameters: {
       type: 'object', additionalProperties: false,
       properties: {
@@ -243,7 +271,7 @@ async function assertNoteUnchanged(provider: KnowledgeProvider, node: NoteNode, 
 function deleteNoteTool(provider: KnowledgeProvider, codec: KnowledgeNoteHandleCodec): ToolDefinitionLike {
   return {
     name: 'knowledge_note_delete',
-    description: 'Permanently delete one note or folder only when the current user explicitly asks. Requires an exact signed handle. Referenced notes are protected; remote deletion also requires an admin-capable token.',
+    description: 'Propose permanent deletion of an existing note or folder. Shows the exact target and descendant list; requires later-turn user confirmation before deleting. Requires an exact signed handle. Referenced notes remain protected; remote deletion still requires an admin-capable token.',
     parameters: {
       type: 'object', additionalProperties: false,
       properties: { noteHandle: { type: 'string', description: 'Exact signed handle returned by knowledge_note_list or knowledge_note_search.' } },
@@ -255,11 +283,26 @@ function deleteNoteTool(provider: KnowledgeProvider, codec: KnowledgeNoteHandleC
       const args = toolRecord(raw)
       const handle = requiredToolString(args.noteHandle, 'noteHandle', 4096)
       const node = await resolveNoteHandle(provider, codec, agent.session.id, handle, exec.signal)
-      assertExplicitKnowledgeNoteRequest(agent, 'delete', node.kind === 'folder' ? 'folder' : 'document')
+      const snapshot = await deletionSnapshot(provider, node, exec.signal)
+      await requestNoteConfirmation(exec, `永久删除「${node.name}」及包含的项目，共 ${snapshot.length} 项；不会自动恢复。`, {
+        text: JSON.stringify(snapshot, null, 2), changeCount: snapshot.length, locations: [],
+      })
+      await assertNoteUnchanged(provider, node, exec.signal)
+      if (JSON.stringify(await deletionSnapshot(provider, node, exec.signal)) !== JSON.stringify(snapshot)) throw new Error('确认期间目录内容已变化，请重新读取并确认；未删除')
       await provider.deleteNote(node.id, exec.signal)
       return JSON.stringify({ storage: provider.mode, operation: 'deleted', note: { name: node.name, kind: node.kind } }, null, 2)
     },
   }
+}
+
+async function deletionSnapshot(provider: KnowledgeProvider, root: NoteNode, signal: AbortSignal) {
+  const nodes = [root]
+  for (let index = 0; index < nodes.length; index++) {
+    signal.throwIfAborted()
+    if (nodes[index]!.kind === 'folder') nodes.push(...await provider.listNotes({parentId:nodes[index]!.id,limit:201},signal))
+    if (nodes.length > 200) throw new Error('目录删除超过200项，请在管理页面核对范围后处理；未删除')
+  }
+  return nodes.sort((a,b)=>a.id.localeCompare(b.id)).map(n=>({id:n.id,name:n.name,kind:n.kind,parentId:n.parentId,version:n.version,sha256:n.sha256}))
 }
 
 async function resolveNoteHandle(

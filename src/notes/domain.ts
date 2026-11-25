@@ -15,6 +15,7 @@ export interface NoteNode {
 }
 
 export interface NoteVersion {
+  source?: string
   noteId: string
   version: number
   name: string
@@ -58,6 +59,8 @@ export interface NoteListRequest {
   limit?: number
   kind?: NoteNodeKind
   recursive?: boolean
+  /** Include editable documents and text uploads; apply before the result limit. */
+  editableOnly?: boolean
 }
 
 export interface NoteFileUpload {

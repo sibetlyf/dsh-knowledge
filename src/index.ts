@@ -1,25 +1,12 @@
+import { normalizeWritebackFrequency } from './service-settings.js'
+import { NoteVault } from './notes/vault.js'
 import type { Context } from '@deepseek-ai/cordis'
 import { createHash, randomBytes } from 'node:crypto'
 import { existsSync } from 'node:fs'
-import { readdir, stat } from 'node:fs/promises'
-import type { IncomingMessage } from 'node:http'
-import { homedir } from 'node:os'
-import { basename, dirname, join, resolve } from 'node:path'
+import { dirname, join } from 'node:path'
 import { apply as registerWorklog, type JournalRuntime } from './worklog-runtime.js'
-import { ArtifactArchiver, globToRegExp, type ArtifactIngestItem } from './artifacts/archive.js'
-import { scanFolder } from './artifacts/folder-import.js'
-import { lastAssistantRoute } from './artifacts/collect.js'
-import { createUploadReader } from './artifacts/uploads.js'
-import { createKnowledgeWatcher } from './knowledge-watcher.js'
-import { createKnowledgeIntegration, createKnowledgeWriteBus, KNOWLEDGE_INTEGRATION_SERVICE } from './integration.js'
-import { optimizeKnowledgeDocument } from './optimize.js'
-import { createTencentDocsBridge } from './tencent-docs.js'
-import { migrateLegacyKnowledgeStore } from './migrate-knowledge-store.js'
-import { createWritableMountGuard } from './auto-writable.js'
-import { createPendingAutoApprover } from './auto-approve.js'
 import { assertKnowledgeBrowserRequest, LOCAL_MANAGEMENT_API_PREFIX, registerKnowledgeApi } from './api.js'
 import { registerKnowledgeActivityControl } from './activity-control.js'
-import { registerBackgroundStatusControl } from './background-status.js'
 import { registerWritebackControl } from './writeback/control.js'
 import { registerWritebackLive } from './writeback/live-control.js'
 import {
@@ -43,31 +30,22 @@ import { registerKnowledgeCatalog, registerKnowledgeRecall } from './recall.js'
 import { KnowledgeHandleCodec } from './retrieval.js'
 import { KnowledgeNoteHandleCodec } from './note-reference-handle.js'
 import { RemoteKnowledgeProvider, RemoteProviderError } from './remote-provider.js'
-import type { RuntimeContextLike, SessionLike } from './runtime.js'
-import type { ArtifactCandidate } from './artifacts/collect.js'
+import type { RuntimeContextLike } from './runtime.js'
 import { loadServiceSettings, serviceSettingsPath, storeServiceSettings, type KnowledgeServiceSettings } from './service-settings.js'
 import { registerKnowledgeTools } from './tools.js'
+import { createTencentDocsBridge } from './tencent-docs.js'
+import { KnowledgeShareStore } from './knowledge-share.js'
 import { createKnowledgeTrackingService, KNOWLEDGE_TRACKING_SERVICE } from './tracking.js'
 import { createKnowledgeMountManagement, KNOWLEDGE_MOUNT_MANAGEMENT_SERVICE } from './mount-management.js'
 import { createNoteRecording } from './note-recording.js'
 import { registerKnowledgeWeb } from './web.js'
 import { WritebackQueue, WritebackDeferred, type WritebackStatus, type WritebackWork } from './writeback/queue.js'
-import { NoteAutoOrganizer } from './notes/auto-organizer.js'
-import { NoteProposalStore } from './notes/proposal-store.js'
-import { extractPdfText } from './pdf-parser.js'
 
 export const Config = ConfigSchema
 export type Config = KnowledgeConfig
 export * from './domain.js'
 export * from './provider.js'
 export * from './notes/domain.js'
-export * from './notes/mindmap-domain.js'
-export { extractPdfText } from './pdf-parser.js'
-export { ArtifactArchiver } from './artifacts/archive.js'
-export type { ArtifactRecord, ArtifactIngestSummary } from './artifacts/archive.js'
-export { artifactMediaType, extractArtifactContent } from './artifacts/text.js'
-export { NoteAutoOrganizer } from './notes/auto-organizer.js'
-export { NoteProposalStore } from './notes/proposal-store.js'
 export { LocalKnowledgeProvider } from './local-provider.js'
 export { RemoteKnowledgeProvider, RemoteProviderError } from './remote-provider.js'
 
@@ -78,21 +56,6 @@ export const name = 'dsh-knowledge'
 export const inject = ['llm', 'tools']
 
 /** Mount storage, hybrid retrieval, extraction, and the optional authenticated HTTP API. */
-interface FolderImportJob {
-  id: string
-  root: string
-  status: 'running' | 'done' | 'failed'
-  accepted: number
-  processed: number
-  startedAt: string
-  finishedAt?: string
-  error?: string
-  truncated: boolean
-  skippedByScan: number
-  counts: { created: number; updated: number; unchanged: number; skipped: number; failed: number }
-  items: ArtifactIngestItem[]
-}
-
 export function apply(ctx: Context, config: KnowledgeConfig): void {
   const runtime = ctx as unknown as RuntimeContextLike
   const resolved = resolveConfig(config)
@@ -111,11 +74,6 @@ export function apply(ctx: Context, config: KnowledgeConfig): void {
   runtime.inject?.(['settings'], settingsRuntime => {
     settingsRuntime.effect(() => settingsRuntime.settings!.configure({ auto: false }, ctx.fiber))
   })
-  if ((config.databasePath ?? '').trim().length === 0 && resolved.backend === 'local'
-    && resolved.databasePath !== undefined && resolved.databasePath !== ':memory:') {
-    const legacyRoot = join(process.env.DSH_HOME?.trim() || join(homedir(), '.dsh'), 'knowledge')
-    migrateLegacyKnowledgeStore(legacyRoot, dirname(resolved.databasePath), runtime.logger)
-  }
   const persistedServicePath = serviceSettingsPath(resolved.connectionPath)
   let publicApiEnabled = resolved.exposeApi
   let clientSettings: KnowledgeServiceSettings = { publicApiEnabled }
@@ -126,21 +84,6 @@ export function apply(ctx: Context, config: KnowledgeConfig): void {
     runtime.logger.warn(`dsh-knowledge: ignored invalid service settings: ${error instanceof Error ? error.message : String(error)}`)
   }
   if (resolved.backend === 'remote') { publicApiEnabled = false; clientSettings = { ...clientSettings, publicApiEnabled: false } }
-  const applyAutomationSettings = (): void => {
-    if (clientSettings.autoApprovePendingEnabled !== undefined) resolved.autoApprovePendingEnabled = clientSettings.autoApprovePendingEnabled
-    if (clientSettings.autoOrganizeTrigger !== undefined) resolved.autoOrganizeTrigger = clientSettings.autoOrganizeTrigger
-    if (clientSettings.autoOrganizeIntervalMinutes !== undefined) resolved.autoOrganizeIntervalMinutes = clientSettings.autoOrganizeIntervalMinutes
-    if (clientSettings.worklogAutoUpdateTrigger !== undefined) resolved.worklogAutoUpdateTrigger = clientSettings.worklogAutoUpdateTrigger
-    if (clientSettings.worklogAutoUpdateIntervalMinutes !== undefined) resolved.worklogAutoUpdateIntervalMinutes = clientSettings.worklogAutoUpdateIntervalMinutes
-    const saving = clientSettings.tokenSavingEnabled ?? config.tokenSavingEnabled ?? true
-    resolved.tokenSavingEnabled = saving
-    const ceiling = (value: number | undefined, fallback: number, cap: number): number => Math.min(value ?? fallback, saving ? cap : Number.POSITIVE_INFINITY)
-    resolved.extractionMaxTokens = ceiling(config.extractionMaxTokens, 4096, 3072)
-    resolved.extractionMaxInputChars = ceiling(config.extractionMaxInputChars, 30_000, 12_000)
-    resolved.autoRecallLimit = Math.min(config.autoRecallLimit ?? 3, saving ? 2 : 10)
-    resolved.recallMaxChars = Math.min(config.recallMaxChars ?? 5000, saving ? 3000 : 20_000)
-  }
-  applyAutomationSettings()
   const baseConnection = connectionSettingsBase(resolved)
   let initialConnection = baseConnection
   try {
@@ -155,6 +98,14 @@ export function apply(ctx: Context, config: KnowledgeConfig): void {
   const managementProvider = resolved.databasePath === undefined || resolved.databasePath.trim().length === 0
     ? undefined
     : new LocalKnowledgeProvider(resolved.databasePath)
+  const localNoteVault=managementProvider&&resolved.databasePath&&resolved.databasePath!==':memory:' ? new NoteVault(resolved.databasePath+'.note-workspaces/local/vault',{
+    all:()=>managementProvider.notes.syncManifest().nodes,
+    read:id=>managementProvider.readNote(id),
+    readVersion:(id,version)=>managementProvider.readNoteVersion(id,version),
+    relocate:(id,name,parent,expected)=>managementProvider.notes.relocate(id,name,parent,expected),
+    update:(id,bytes,version)=>managementProvider.updateNoteContent(id,bytes,undefined,version,'外部文件修改'),
+    create:(kind,name,parentId,bytes)=>kind==='folder'?managementProvider.createNoteFolder(name,parentId):managementProvider.createNoteDocument(name,parentId,Buffer.from(bytes).toString('utf8')),
+  },resolved.databasePath+'.note-workspaces/local/vault-index.json'):undefined
   const connectionProvider = (settings: KnowledgeConnectionSettings): { provider: KnowledgeProvider; owned: boolean } => {
     if (settings.backend === 'local' && managementProvider !== undefined) {
       return { provider: managementProvider, owned: false }
@@ -167,7 +118,6 @@ export function apply(ctx: Context, config: KnowledgeConfig): void {
   let activeConnection = initialConnection
   let connectionChanging = false
   let journalRuntime: JournalRuntime | undefined
-  const writeBus = createKnowledgeWriteBus(runtime)
   ctx.inject?.(['connection'], journal => {
     const connection = journal.get('connection') as { requestRejection?: unknown } | undefined
     if (typeof connection?.requestRejection !== 'function') return
@@ -175,41 +125,18 @@ export function apply(ctx: Context, config: KnowledgeConfig): void {
     if (!base) return
     const legacy = join(dirname(dirname(base)), 'worklog', 'worklog.sqlite')
     const databasePath = base === ':memory:' ? ':memory:' : existsSync(legacy) ? legacy : `${base}.worklog.sqlite`
-    journalRuntime = registerWorklog(journal, {
-      databasePath,
-      current: () => ({ ...activeConnection, paused: connectionChanging }),
-      autoUpdate: {
-        get trigger() { return resolved.worklogAutoUpdateTrigger },
-        get intervalMinutes() { return resolved.worklogAutoUpdateIntervalMinutes },
-      },
-      onDispose: () => { journalRuntime = undefined },
-    })
+    journalRuntime = registerWorklog(journal, { databasePath, current: () => ({ ...activeConnection, paused: connectionChanging }), onDispose: () => { journalRuntime = undefined } })
   })
   const journalDispatch = (method: string, path: string, data: Record<string, unknown>, query: URLSearchParams): Promise<unknown> => {
     if (!journalRuntime) throw connectionError(503, '中央日报服务尚未就绪')
     return journalRuntime.dispatch(method, path, data, query)
-  }
-  const knowledgeWatcher = resolved.worklogAutoUpdateEnabled && provider.mode === 'local' ? createKnowledgeWatcher({
-    provider,
-    emit: event => {
-      writeBus.emit(event)
-      journalRuntime?.recordKnowledge(event)
-    },
-    logger: runtime.logger,
-  }) : undefined
-  if (knowledgeWatcher) {
-    knowledgeWatcher.start()
-    runtime.effect(() => () => knowledgeWatcher.stop(), 'dsh-knowledge.knowledge-watcher')
   }
 
   const coordinator = new ExtractionCoordinator(runtime, provider, resolved, () => (
     clientSettings.writebackProvider && clientSettings.writebackModel
       ? { provider: clientSettings.writebackProvider, model: clientSettings.writebackModel }
       : undefined
-  ), event => {
-    writeBus.emit(event)
-    if (resolved.worklogAutoUpdateEnabled) journalRuntime?.recordKnowledge(event)
-  })
+  ))
   const writebackStatuses = new Map<string, WritebackStatus>()
   const writebackSources = new Map<string, WritebackWork>()
   const destination = (): string => activeConnection.backend === 'local' ? `local:${resolved.databasePath}` : `remote:${activeConnection.remoteUrl}`
@@ -225,32 +152,11 @@ export function apply(ctx: Context, config: KnowledgeConfig): void {
     if (job?.status === 'completed') return statusFromExtractionJob(job, false)
     if (job?.status === 'running') throw new WritebackDeferred('上一次远端回写租约尚未释放，等待恢复')
     throw new Error(job?.lastError ?? '未能确认远端回写状态，请重试')
-  }, message => runtime.logger.warn(message)) : undefined
-  const pendingOrganize: WritebackWork[] = []
-  const flushOrganize = (): void => {
-    if (writebackQueue === undefined) return
-    for (const work of pendingOrganize.splice(0)) {
-      try { writebackQueue.enqueue(work) } catch (error) {
-        runtime.logger.warn(`dsh-knowledge: 定时知识整理入队失败: ${error instanceof Error ? error.message : String(error)}`)
-      }
-    }
-  }
-  const queueOrganize = (work: WritebackWork, key: string): void => {
-    if (resolved.autoOrganizeTrigger === 'interval') {
-      pendingOrganize.push(work)
-      if (pendingOrganize.length > 200) {
-        pendingOrganize.shift()
-        runtime.logger.warn('dsh-knowledge: 待整理快照超过 200 条，已丢弃最旧的一条')
-      }
-      return
-    }
-    writebackQueue?.enqueue(work)
-    writebackStatuses.delete(key)
-    writebackSources.delete(key)
-  }
-  const handleCodec = new KnowledgeHandleCodec(randomBytes(32))
+  }, message => runtime.logger.warn(message), () => ({everyTurns:clientSettings.extractionEveryTurns??1,idleSeconds:clientSettings.extractionIdleSeconds??180,maxChars:resolved.extractionMaxInputChars})) : undefined
+  const handleCodec = new KnowledgeHandleCodec(randomBytes(32), () => createHash('sha256').update(destination()).digest('hex'))
   const noteHandleCodec = new KnowledgeNoteHandleCodec(randomBytes(32))
   const tencentDocs = createTencentDocsBridge(runtime, provider)
+  const knowledgeShares = new KnowledgeShareStore(resolved.databasePath ?? join(process.cwd(), '.knowledge-shares'))
   const meetingSnapshot = async (): Promise<{ available: boolean; tool?: string; summary?: string; error?: string }> => {
     const tools = (runtime.get('tools') ?? runtime.tools) as {
       schemas?: () => Array<{ name: string }>
@@ -285,101 +191,19 @@ export function apply(ctx: Context, config: KnowledgeConfig): void {
     const meeting = await meetingSnapshot()
     return { day: resolvedDay, brief, meeting }
   }
-  const optimizeDocument = async (documentId: string, signal: AbortSignal): Promise<{ id: string; version: number; title: string; body: string }> => {
-    const entry = await provider.get(documentId)
-    if (entry === undefined || entry.status !== 'active') throw connectionError(404, '知识文档不存在或已归档')
-    const route = clientSettings.writebackProvider && clientSettings.writebackModel
-      ? { provider: clientSettings.writebackProvider, model: clientSettings.writebackModel }
-      : resolved.extractionProvider && resolved.extractionModel
-        ? { provider: resolved.extractionProvider, model: resolved.extractionModel }
-        : undefined
-    if (route === undefined) throw connectionError(409, '请先在设置中选择回写模型，再优化文档')
-    const updated = await optimizeKnowledgeDocument(provider, runtime.llm, entry, route, signal)
-    return { id: updated.id, version: updated.version, title: updated.title, body: updated.body }
-  }
   const managementEmbedToken = randomBytes(32).toString('base64url')
-  const artifactArchiver = resolved.artifactArchiveEnabled ? new ArtifactArchiver({
-    root: resolved.artifactArchivePath ?? join(
-      dirname(resolved.databasePath ?? resolved.connectionPath ?? join(homedir(), '.dsh', 'knowledge', 'knowledge.sqlite')),
-      'artifacts',
-    ),
-    provider,
-    baseName: resolved.artifactArchiveBaseName,
-    extensions: resolved.artifactArchiveExtensions,
-    excludePatterns: resolved.artifactArchiveExclude,
-    maxFileBytes: resolved.artifactArchiveMaxFileBytes,
-    maxContentChars: resolved.artifactArchiveMaxChars,
-    storeContent: resolved.artifactArchiveStoreContent,
-    paperEnabled: resolved.artifactArchivePaperEnabled,
-    paperBaseName: resolved.artifactArchivePaperBaseName,
-    maxEntries: resolved.artifactArchiveMaxEntries,
-    autoMount: resolved.artifactArchiveAutoMount,
-    resolveUpload: createUploadReader({
-      get: name => runtime.get(name),
-      maxBytes: resolved.artifactArchiveMaxFileBytes,
-      logger: runtime.logger,
-    }),
-    onArchived: event => {
-      writeBus.emit(event)
-      if (resolved.worklogAutoUpdateEnabled) journalRuntime?.recordKnowledge(event)
-    },
-    logger: runtime.logger,
-  }) : undefined
-  const pendingAutoApprover = createPendingAutoApprover({
-    provider,
-    logger: runtime.logger,
-    intervalMinutes: resolved.autoApprovePendingIntervalMinutes,
-    enabled: () => resolved.autoApprovePendingEnabled,
-  })
-  if (pendingAutoApprover) {
-    pendingAutoApprover.start()
-    runtime.on('agent/turn-stopping', () => { void pendingAutoApprover.run() })
-    runtime.effect(() => () => pendingAutoApprover.stop(), 'dsh-knowledge.pending-auto-approve')
-  }
-  const writableMountGuard = resolved.autoWritableMountEnabled ? createWritableMountGuard(provider, {
-    mode: resolved.autoWritableMountWriteMode,
-    logger: runtime.logger,
-    revision: () => providerRouter.revision,
-  }) : undefined
-  if (writableMountGuard) {
-    const ensureWritable = writableMountGuard
-    runtime.on('agent/pre-step', async (payload, next) => {
-      try {
-        await ensureWritable(payload.agent)
-      } catch (error) {
-        runtime.logger.warn(`dsh-knowledge: 自动挂载可写知识库失败: ${error instanceof Error ? error.message : String(error)}`)
-      }
-      return next()
-    })
-    runtime.on('agent/turn-stopping', ({ agent }) => {
-      void ensureWritable(agent).catch(error => {
-        runtime.logger.warn(`dsh-knowledge: 自动挂载可写知识库失败: ${error instanceof Error ? error.message : String(error)}`)
-      })
-    })
-  }
   registerKnowledgeRecall(runtime, provider, resolved, handleCodec)
   registerKnowledgeCatalog(runtime, provider, resolved)
-  registerKnowledgeTools(runtime, provider, handleCodec, noteHandleCodec)
+  registerKnowledgeTools(runtime, provider, handleCodec, noteHandleCodec, (path,query,signal) => {
+    if (!journalRuntime) throw connectionError(503, '工作日报读取服务尚未就绪')
+    return journalRuntime.read(path,query,signal)
+  }, (method,path,data,query,signal) => {
+    if (!journalRuntime) throw connectionError(503, '工作日历服务尚未就绪')
+    return journalRuntime.calendar(method,path,data,query,signal)
+  })
   runtime.provide?.(KNOWLEDGE_TRACKING_SERVICE, createKnowledgeTrackingService(provider))
   runtime.provide?.(KNOWLEDGE_MOUNT_MANAGEMENT_SERVICE, createKnowledgeMountManagement(provider, () => providerRouter.revision))
   runtime.provide?.('dshKnowledgeNoteRecording', createNoteRecording(provider))
-  runtime.provide?.(KNOWLEDGE_INTEGRATION_SERVICE, createKnowledgeIntegration({
-    provider,
-    ...artifactArchiver === undefined ? {} : { archive: artifactArchiver },
-    bus: writeBus,
-  }))
-
-  const autoOrganizer = managementProvider !== undefined ? new NoteAutoOrganizer(
-    runtime,
-    resolved,
-    managementProvider.notes,
-    managementProvider.proposalStore,
-    () => (
-      clientSettings.writebackProvider && clientSettings.writebackModel
-        ? { provider: clientSettings.writebackProvider, model: clientSettings.writebackModel }
-        : undefined
-    ),
-  ) : undefined
 
   let refreshManagementApi = (): void => {}
   let switching: Promise<unknown> = Promise.resolve()
@@ -452,31 +276,15 @@ export function apply(ctx: Context, config: KnowledgeConfig): void {
       sourceKey: () => createHash('sha256').update(destination()).digest('hex'),
     })
     httpRuntime.effect(() => disposeActivityControl, 'dsh-knowledge.activity-control')
-    const disposeBackgroundStatus = registerBackgroundStatusControl(httpRuntime, {
-      archive: () => artifactArchiver?.status() ?? { queued: 0, active: false, total: 0, done: 0 },
-      writeback: () => writebackQueue?.counts() ?? { queued: 0, running: 0, failed: 0 },
-      worklog: () => journalRuntime?.isRunning() ?? false,
-      enabled: () => ({
-        archive: artifactArchiver !== undefined,
-        writeback: writebackQueue !== undefined,
-        worklog: resolved.worklogAutoUpdateEnabled,
-        approvals: resolved.autoApprovePendingEnabled,
-      }),
-    })
-    httpRuntime.effect(() => disposeBackgroundStatus, 'dsh-knowledge.background-status')
     let disposePublicApi: (() => void) | undefined
     const publicApiView = () => ({
       publicApiEnabled,
       publicApiPrefix: resolved.apiPrefix,
+      extractionEveryTurns:clientSettings.extractionEveryTurns??1,
+      extractionIdleSeconds:clientSettings.extractionIdleSeconds??180,
       ...clientSettings.writebackProvider && clientSettings.writebackModel
         ? { writebackProvider: clientSettings.writebackProvider, writebackModel: clientSettings.writebackModel }
         : {},
-      autoApprovePendingEnabled: resolved.autoApprovePendingEnabled,
-      autoOrganizeTrigger: resolved.autoOrganizeTrigger,
-      autoOrganizeIntervalMinutes: resolved.autoOrganizeIntervalMinutes,
-      worklogAutoUpdateTrigger: resolved.worklogAutoUpdateTrigger,
-      worklogAutoUpdateIntervalMinutes: resolved.worklogAutoUpdateIntervalMinutes,
-      tokenSavingEnabled: resolved.tokenSavingEnabled,
     })
     const applyPublicApiRoute = (enabled: boolean): void => {
       disposePublicApi?.()
@@ -486,23 +294,13 @@ export function apply(ctx: Context, config: KnowledgeConfig): void {
         disposePublicApi = registerKnowledgeApi(httpRuntime, managementProvider, resolved.apiPrefix, {
           worklog: journalDispatch,
           shareRequestPolicy: () => ({ trustedPrivateOrigins: trustedShareOrigins }),
-          optimize: optimizeDocument,
           tencentDocs,
           morning: morningBrief,
+          knowledgeShares,
         })
       }
     }
-    const updateClientSettings = async (patch: {
-      publicApiEnabled?: boolean
-      writebackProvider?: string | null
-      writebackModel?: string | null
-      autoApprovePendingEnabled?: boolean
-      autoOrganizeTrigger?: 'turn' | 'interval'
-      autoOrganizeIntervalMinutes?: number
-      worklogAutoUpdateTrigger?: 'turn' | 'interval'
-      worklogAutoUpdateIntervalMinutes?: number
-      tokenSavingEnabled?: boolean
-    }): Promise<ReturnType<typeof publicApiView>> => {
+    const updateClientSettings = async (patch: { publicApiEnabled?: boolean; writebackProvider?: string | null; writebackModel?: string | null; extractionEveryTurns?:number; extractionIdleSeconds?:number }): Promise<ReturnType<typeof publicApiView>> => {
       const enabled = patch.publicApiEnabled ?? publicApiEnabled
       if (enabled && activeConnection.backend !== 'local') throw connectionError(409, '请先把知识库来源切换为本地，再开启远程 API。')
       if (persistedServicePath === undefined) throw connectionError(409, '当前插件没有配置持久化路径，无法保存远程 API 状态。')
@@ -517,29 +315,16 @@ export function apply(ctx: Context, config: KnowledgeConfig): void {
       const previous = clientSettings
       const next: KnowledgeServiceSettings = {
         publicApiEnabled: enabled,
+        ...normalizeWritebackFrequency({...clientSettings,...patch}),
         ...!clearRoute && provider && model ? { writebackProvider: provider, writebackModel: model } : {},
-        ...clientSettings.autoApprovePendingEnabled === undefined ? {} : { autoApprovePendingEnabled: clientSettings.autoApprovePendingEnabled },
-        ...clientSettings.autoOrganizeTrigger === undefined ? {} : { autoOrganizeTrigger: clientSettings.autoOrganizeTrigger },
-        ...clientSettings.autoOrganizeIntervalMinutes === undefined ? {} : { autoOrganizeIntervalMinutes: clientSettings.autoOrganizeIntervalMinutes },
-        ...clientSettings.worklogAutoUpdateTrigger === undefined ? {} : { worklogAutoUpdateTrigger: clientSettings.worklogAutoUpdateTrigger },
-        ...clientSettings.worklogAutoUpdateIntervalMinutes === undefined ? {} : { worklogAutoUpdateIntervalMinutes: clientSettings.worklogAutoUpdateIntervalMinutes },
-        ...clientSettings.tokenSavingEnabled === undefined ? {} : { tokenSavingEnabled: clientSettings.tokenSavingEnabled },
-        ...patch.autoApprovePendingEnabled === undefined ? {} : { autoApprovePendingEnabled: patch.autoApprovePendingEnabled },
-        ...patch.autoOrganizeTrigger === undefined ? {} : { autoOrganizeTrigger: patch.autoOrganizeTrigger },
-        ...patch.autoOrganizeIntervalMinutes === undefined ? {} : { autoOrganizeIntervalMinutes: patch.autoOrganizeIntervalMinutes },
-        ...patch.worklogAutoUpdateTrigger === undefined ? {} : { worklogAutoUpdateTrigger: patch.worklogAutoUpdateTrigger },
-        ...patch.worklogAutoUpdateIntervalMinutes === undefined ? {} : { worklogAutoUpdateIntervalMinutes: patch.worklogAutoUpdateIntervalMinutes },
-        ...patch.tokenSavingEnabled === undefined ? {} : { tokenSavingEnabled: patch.tokenSavingEnabled },
       }
       if (enabled !== publicApiEnabled) applyPublicApiRoute(enabled)
       publicApiEnabled = enabled
       clientSettings = next
-      applyAutomationSettings()
       try {
         await storeServiceSettings(persistedServicePath, next)
       } catch (error) {
         clientSettings = previous
-        applyAutomationSettings()
         if (publicApiEnabled !== previous.publicApiEnabled) applyPublicApiRoute(previous.publicApiEnabled)
         publicApiEnabled = previous.publicApiEnabled
         throw error
@@ -560,15 +345,16 @@ export function apply(ctx: Context, config: KnowledgeConfig): void {
         disposeManagementApi = registerRemoteManagementProxy(httpRuntime, LOCAL_MANAGEMENT_API_PREFIX, () => activeConnection, {
           current: publicApiView,
           update: updateClientSettings,
-        })
+        },()=>({replica:(provider as import('./remote-provider.js').RemoteKnowledgeProvider).noteReplica,vault:(provider as import('./remote-provider.js').RemoteKnowledgeProvider).noteVault}))
       } else if (managementProvider !== undefined) {
         disposeManagementApi = registerKnowledgeApi(httpRuntime, managementProvider, LOCAL_MANAGEMENT_API_PREFIX, {
           authMode: 'same-origin',
+          ...(localNoteVault?{noteWorkspace:{vault:localNoteVault}}:{}),
           service: { current: publicApiView, update: updateClientSettings },
           shareRequestPolicy: () => ({ trustedPrivateOrigins: trustedShareOrigins }),
-          optimize: optimizeDocument,
           tencentDocs,
           morning: morningBrief,
+          knowledgeShares,
         })
       }
     }
@@ -634,7 +420,7 @@ export function apply(ctx: Context, config: KnowledgeConfig): void {
           if (req.method === 'POST') {
             if (!writebackQueue) throw connectionError(409, '知识库回写已停用')
             const source = writebackSources.get(key)
-            state = source ? writebackQueue.enqueue(source) : writebackQueue.retry(key)
+            state = source ? writebackQueue.enqueue(source) : writebackQueue.status(key)?.buffered ? writebackQueue.flush(key) : writebackQueue.retry(key)
             writebackSources.delete(key)
             writebackStatuses.delete(key)
           }
@@ -649,158 +435,6 @@ export function apply(ctx: Context, config: KnowledgeConfig): void {
       },
     })
     if (disposeWritebackStatus !== undefined) httpRuntime.effect(() => disposeWritebackStatus, 'dsh-knowledge.writeback-status')
-    if (artifactArchiver) {
-      const archive = artifactArchiver
-      const folderImportJobs = new Map<string, FolderImportJob>()
-      const disposeArtifacts = httpRuntime.webServer?.register({
-        kind: 'prefix',
-        path: '/knowledge-control/v1/artifacts',
-        async handler(req, res) {
-          try {
-            const url = new URL(req.url ?? '/', 'http://localhost')
-            const rest = url.pathname.replace(/^\/knowledge-control\/v1\/artifacts\/?/u, '')
-            if (req.method === 'POST' && rest === 'import') {
-              assertKnowledgeBrowserRequest(req, 'management-web')
-              const body = await readControlJson(req)
-              const folder = typeof body.path === 'string' ? body.path.trim() : ''
-              if (folder.length === 0) throw connectionError(400, '请选择要导入的文件夹')
-              const projectId = typeof body.projectId === 'string' && body.projectId.trim().length > 0 ? body.projectId.trim() : undefined
-              const archiveRoot = resolved.artifactArchivePath ?? join(
-                dirname(resolved.databasePath ?? resolved.connectionPath ?? join(homedir(), '.dsh', 'knowledge', 'knowledge.sqlite')),
-                'artifacts',
-              )
-              const scan = await scanFolder(folder, {
-                maxFiles: 800,
-                excludePatterns: resolved.artifactArchiveExclude.map(globToRegExp),
-                excludeRoots: [archiveRoot, dirname(resolved.databasePath ?? resolved.connectionPath ?? archiveRoot)],
-              })
-              const candidates = scan.files.map(path => ({ path, source: 'folder' as const }))
-              if (candidates.length === 0) {
-                res.writeHead(202, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' })
-                  .end(JSON.stringify({ accepted: 0, root: scan.root, truncated: scan.truncated, skipped: scan.skipped }))
-                return
-              }
-              const context = {
-                sessionId: `folder-${randomBytes(8).toString('hex')}`,
-                cwd: projectId ?? scan.root,
-                turn: 0,
-              }
-              const job: FolderImportJob = {
-                id: `folder-${randomBytes(6).toString('hex')}`,
-                root: scan.root,
-                status: 'running',
-                accepted: candidates.length,
-                processed: 0,
-                startedAt: new Date().toISOString(),
-                truncated: scan.truncated,
-                skippedByScan: scan.skipped,
-                counts: { created: 0, updated: 0, unchanged: 0, skipped: 0, failed: 0 },
-                items: [] as ArtifactIngestItem[],
-              }
-              folderImportJobs.set(job.id, job)
-              void (async () => {
-                try {
-                  for (let offset = 0; offset < candidates.length; offset += 256) {
-                    const summary = await archive.ingest(candidates.slice(offset, offset + 256), context)
-                    job.processed += summary.items.length
-                    job.counts.created += summary.captured
-                    job.counts.updated += summary.updated
-                    job.counts.unchanged += summary.unchanged
-                    job.counts.skipped += summary.skipped
-                    job.counts.failed += summary.failed
-                    job.items.push(...summary.items)
-                    if (job.items.length > 1000) job.items = job.items.slice(-1000)
-                  }
-                  job.status = 'done'
-                } catch (error) {
-                  job.status = 'failed'
-                  job.error = error instanceof Error ? error.message : String(error)
-                } finally {
-                  job.finishedAt = new Date().toISOString()
-                  while (folderImportJobs.size > 12) {
-                    const oldest = folderImportJobs.keys().next().value
-                    if (oldest === undefined || oldest === job.id) break
-                    folderImportJobs.delete(oldest)
-                  }
-                }
-              })()
-              res.writeHead(202, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' })
-                .end(JSON.stringify({ accepted: candidates.length, jobId: job.id, root: scan.root, truncated: scan.truncated, skipped: scan.skipped }))
-              return
-            }
-            if (req.method !== 'GET') {
-              res.writeHead(405, { allow: 'GET, POST' }).end()
-              return
-            }
-            assertKnowledgeBrowserRequest(req, 'management-web')
-            if (rest === '') {
-              const artifacts = (await archive.list()).slice(0, 500)
-              res.writeHead(200, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' })
-                .end(JSON.stringify({ artifacts }))
-              return
-            }
-            if (rest.startsWith('imports/')) {
-              const jobId = rest.slice('imports/'.length).replace(/\/+$/u, '')
-              const job = folderImportJobs.get(jobId)
-              if (job === undefined) {
-                res.writeHead(404, { 'content-type': 'application/json; charset=utf-8' }).end(JSON.stringify({ error: 'import job not found' }))
-                return
-              }
-              res.writeHead(200, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' })
-                .end(JSON.stringify({ ...job, items: job.items, itemsTruncated: job.items.length >= 1000 }))
-              return
-            }
-            const id = rest.replace(/\/+$/u, '')
-            if (!/^[a-f0-9]{8,64}$/u.test(id)) {
-              res.writeHead(400, { 'content-type': 'application/json; charset=utf-8' }).end(JSON.stringify({ error: 'invalid artifact id' }))
-              return
-            }
-            const found = await archive.read(id)
-            if (found === undefined) {
-              res.writeHead(404, { 'content-type': 'application/json; charset=utf-8' }).end(JSON.stringify({ error: 'artifact not found' }))
-              return
-            }
-            const name = basename(found.record.path) || `artifact-${id}`
-            const asciiName = name.replace(/[^\x20-\x7e]/gu, '_').replace(/["\\]/gu, '_')
-            res.writeHead(200, {
-              'content-type': found.record.mediaType,
-              'content-length': found.bytes.length,
-              'cache-control': 'no-store',
-              'content-disposition': `attachment; filename="${asciiName}"; filename*=UTF-8''${encodeURIComponent(name)}`,
-            }).end(found.bytes)
-          } catch (error) {
-            sendControlError(res, error)
-          }
-        },
-      })
-      if (disposeArtifacts !== undefined) httpRuntime.effect(() => disposeArtifacts, 'dsh-knowledge.artifacts-api')
-    }
-    const disposeFolders = httpRuntime.webServer?.register({
-      kind: 'prefix', path: '/knowledge-control/v1/folders',
-      async handler(req, res) {
-        try {
-          if (req.method !== 'GET') { res.writeHead(405, { allow: 'GET' }).end(); return }
-          assertKnowledgeBrowserRequest(req, 'management-web')
-          const url = new URL(req.url ?? '/', 'http://localhost')
-          const requested = url.searchParams.get('path')?.trim() || homedir()
-          const path = resolve(requested)
-          const info = await stat(path).catch(() => undefined)
-          if (info === undefined || !info.isDirectory()) throw connectionError(400, '文件夹不存在或不可访问')
-          const entries = await readdir(path, { withFileTypes: true })
-          const directories = entries
-            .filter(entry => entry.isDirectory() && !entry.isSymbolicLink())
-            .sort((left, right) => left.name.localeCompare(right.name))
-            .slice(0, 300)
-            .map(entry => ({ name: entry.name, path: join(path, entry.name) }))
-          const parent = dirname(path)
-          res.writeHead(200, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' })
-            .end(JSON.stringify({ path, parent: parent === path ? '' : parent, directories }))
-        } catch (error) {
-          sendControlError(res, error)
-        }
-      },
-    })
-    if (disposeFolders !== undefined) httpRuntime.effect(() => disposeFolders, 'dsh-knowledge.folders-api')
     const disposeModelCatalog = httpRuntime.webServer?.register({
       kind: 'exact', path: '/knowledge-control/v1/models',
       async handler(req, res) {
@@ -817,72 +451,6 @@ export function apply(ctx: Context, config: KnowledgeConfig): void {
       },
     })
     if (disposeModelCatalog !== undefined) httpRuntime.effect(() => disposeModelCatalog, 'dsh-knowledge.model-catalog')
-
-    const disposeNoteOrganizeApi = httpRuntime.webServer?.register({
-      kind: 'prefix', path: '/knowledge-control/v1/note-organize',
-      async handler(req, res) {
-        try {
-          if (!autoOrganizer) throw connectionError(409, '本地笔记整理服务不可用')
-          const url = new URL(req.url ?? '/', 'http://localhost')
-          const path = url.pathname.replace(/^\/knowledge-control\/v1\/note-organize\/?/, '')
-          if (req.method === 'POST' && (path === '' || path === 'run')) {
-            const result = await autoOrganizer.organize({ force: true })
-            res.writeHead(200, { 'content-type': 'application/json; charset=utf-8' }).end(JSON.stringify(result))
-            return
-          }
-          res.writeHead(404).end()
-        } catch (error) {
-          sendControlError(res, error)
-        }
-      },
-    })
-    if (disposeNoteOrganizeApi !== undefined) httpRuntime.effect(() => disposeNoteOrganizeApi, 'dsh-knowledge.note-organize-api')
-
-    const disposeNoteProposalApi = httpRuntime.webServer?.register({
-      kind: 'prefix', path: '/knowledge-control/v1/note-proposals',
-      async handler(req, res) {
-        try {
-          if (!managementProvider) throw connectionError(409, '本地笔记草案服务不可用')
-          const url = new URL(req.url ?? '/', 'http://localhost')
-          const path = url.pathname.replace(/^\/knowledge-control\/v1\/note-proposals\/?/, '')
-          const parts = path.split('/').filter(Boolean)
-
-          if (req.method === 'GET' && parts.length === 0) {
-            const status = url.searchParams.get('status') as any
-            const list = managementProvider.proposalStore.listProposals(status)
-            res.writeHead(200, { 'content-type': 'application/json; charset=utf-8' }).end(JSON.stringify({ proposals: list }))
-            return
-          }
-
-          const proposalId = parts[0]
-          if (!proposalId) { res.writeHead(400).end(); return }
-
-          if (req.method === 'GET' && parts.length === 1) {
-            const proposal = managementProvider.proposalStore.getProposal(proposalId)
-            if (!proposal) { res.writeHead(404).end(); return }
-            res.writeHead(200, { 'content-type': 'application/json; charset=utf-8' }).end(JSON.stringify({ proposal }))
-            return
-          }
-
-          if (req.method === 'POST' && parts.length === 2 && parts[1] === 'approve') {
-            const approved = await managementProvider.proposalStore.approveProposal(proposalId, managementProvider.notes)
-            res.writeHead(200, { 'content-type': 'application/json; charset=utf-8' }).end(JSON.stringify(approved))
-            return
-          }
-
-          if (req.method === 'POST' && parts.length === 2 && parts[1] === 'reject') {
-            const rejected = managementProvider.proposalStore.rejectProposal(proposalId)
-            res.writeHead(200, { 'content-type': 'application/json; charset=utf-8' }).end(JSON.stringify({ proposal: rejected }))
-            return
-          }
-
-          res.writeHead(404).end()
-        } catch (error) {
-          sendControlError(res, error)
-        }
-      },
-    })
-    if (disposeNoteProposalApi !== undefined) httpRuntime.effect(() => disposeNoteProposalApi, 'dsh-knowledge.note-proposal-api')
   }
 
   if (runtime.inject !== undefined) {
@@ -893,66 +461,6 @@ export function apply(ctx: Context, config: KnowledgeConfig): void {
     runtime.logger.warn('dsh-knowledge: webServer is unavailable; management and connection settings are disabled')
   }
 
-  if (autoOrganizer && resolved.noteOrganizeEnabled && resolved.noteOrganizeIntervalMinutes > 0) {
-    const intervalMs = resolved.noteOrganizeIntervalMinutes * 60 * 1000
-    const timer = setInterval(() => {
-      autoOrganizer.organize().catch(err => {
-        runtime.logger.warn(`dsh-knowledge: 定时自动整理笔记异常: ${String(err)}`)
-      })
-    }, intervalMs)
-    timer.unref()
-    runtime.effect(() => () => clearInterval(timer), 'dsh-knowledge.auto-organizer-interval')
-  }
-
-  runtime.on('agent/turn-stopping', ({ agent, turn }) => {
-    if (autoOrganizer && resolved.noteOrganizeEnabled) {
-      try {
-        const snapshot = coordinator.capture(agent.session, turn)
-        if (snapshot) {
-          autoOrganizer.organize({
-            conversationContext: {
-              sessionId: agent.session.id,
-              userText: snapshot.userText,
-              assistantText: snapshot.assistantText,
-            },
-          }).catch(err => {
-            runtime.logger.warn(`dsh-knowledge: 对话后自动笔记整理异常: ${String(err)}`)
-          })
-        }
-      } catch (err) {
-        runtime.logger.warn(`dsh-knowledge: 对话后自动笔记整理捕获异常: ${String(err)}`)
-      }
-    }
-  })
-
-  if (artifactArchiver) {
-    const archive = artifactArchiver
-    runtime.on('agent/turn-stopping', ({ agent, turn }) => {
-      void (async () => {
-        try {
-          const candidates = archive.collectTurn(agent.session, turn)
-          try {
-            await appendWorkspaceChangeCandidates(runtime, agent.session, turn, candidates)
-          } catch (error) {
-            runtime.logger.warn(`dsh-knowledge: 读取任务变更文件失败: ${error instanceof Error ? error.message : String(error)}`)
-          }
-          if (candidates.length === 0) return
-          const cwd = agent.session.header.cwd
-          const route = lastAssistantRoute(agent.session)
-          archive.schedule(candidates, {
-            sessionId: agent.session.id,
-            ...cwd === undefined || cwd.trim().length === 0 ? {} : { cwd },
-            turn,
-            ...route === undefined ? {} : { route },
-          })
-        } catch (error) {
-          runtime.logger.warn(`dsh-knowledge: 制品采集失败: ${error instanceof Error ? error.message : String(error)}`)
-        }
-      })()
-    })
-    runtime.effect(() => async () => { await archive.close() }, 'dsh-knowledge.artifact-archiver')
-  }
-
   if (resolved.extractionEnabled) {
     runtime.on('agent/turn-stopping', ({ agent, turn }) => {
       const key = `${agent.session.id}:${turn}`
@@ -960,7 +468,7 @@ export function apply(ctx: Context, config: KnowledgeConfig): void {
       try {
         const snapshot = coordinator.capture(agent.session, turn)
         if (snapshot) work = { snapshot, destination: destination() }
-        if (work) queueOrganize(work, key)
+        if (work) writebackQueue!.enqueue(work)
         else writebackQueue!.completeEmpty(key, agent.session.id)
         writebackStatuses.delete(key)
         writebackSources.delete(key)
@@ -975,23 +483,13 @@ export function apply(ctx: Context, config: KnowledgeConfig): void {
       }
     })
     writebackQueue?.start()
-    if (writebackQueue) {
-      let lastOrganizeFlush = Date.now()
-      const timer = setInterval(() => {
-        if (resolved.autoOrganizeTrigger !== 'interval') return
-        if (Date.now() - lastOrganizeFlush < Math.max(1, resolved.autoOrganizeIntervalMinutes) * 60_000) return
-        lastOrganizeFlush = Date.now()
-        flushOrganize()
-      }, 60_000)
-      timer.unref()
-      runtime.effect(() => () => clearInterval(timer), 'dsh-knowledge.auto-organize-interval')
-    }
   }
 
   runtime.effect(() => async () => {
     await writebackQueue?.close()
     await coordinator.close()
     await providerRouter.close()
+    await localNoteVault?.close()
     await managementProvider?.close()
   }, 'dsh-knowledge.close')
 
@@ -1080,77 +578,6 @@ function publicConnectionError(error: unknown): Error {
     if (/databasePath/i.test(error.message)) return connectionError(409, '当前 DSH 没有可用的本地知识库。')
   }
   return error instanceof Error ? error : new Error(String(error))
-}
-
-interface WorkspaceChangeSummaryLike {
-  files?: Array<{ path?: unknown; display?: unknown }>
-}
-
-interface WorkspaceChangesServiceLike {
-  summary?(sessionId: string, seq: number): WorkspaceChangeSummaryLike | Promise<WorkspaceChangeSummaryLike | undefined> | undefined
-}
-
-/** Add files the workspace-changes plugin recorded for this turn (shell edits included). */
-async function appendWorkspaceChangeCandidates(
-  runtime: RuntimeContextLike,
-  session: SessionLike,
-  turn: number,
-  candidates: ArtifactCandidate[],
-): Promise<void> {
-  const service = runtime.get('workspaceChanges') as WorkspaceChangesServiceLike | undefined
-  if (service === undefined || typeof service.summary !== 'function') return
-  let seq = workspaceChangeSeq(session, turn)
-  // The workspace-changes recorder may append its event in its own turn-stopping
-  // listener; give it one short moment when our listener ran first.
-  if (seq === undefined) {
-    await new Promise(resolve => setTimeout(resolve, 400))
-    seq = workspaceChangeSeq(session, turn)
-  }
-  if (seq === undefined) return
-  let summary = service.summary(session.id, seq)
-  if (summary instanceof Promise) summary = await summary
-  if (summary === undefined) {
-    await new Promise(resolve => setTimeout(resolve, 400))
-    summary = service.summary(session.id, seq)
-    if (summary instanceof Promise) summary = await summary
-  }
-  const files = Array.isArray(summary?.files) ? summary.files : []
-  for (const file of files) {
-    const path = typeof file?.path === 'string' ? file.path : undefined
-    if (path === undefined || path.length === 0 || path.length > 1000) continue
-    if (candidates.some(candidate => candidate.path === path)) continue
-    candidates.push({ path, source: 'workspace-change' })
-    if (candidates.length >= 160) break
-  }
-}
-
-function workspaceChangeSeq(session: SessionLike, turn: number): number | undefined {
-  const events = session.snapshotEvents()
-  for (let index = events.length - 1; index >= 0; index -= 1) {
-    const event = events[index]
-    if (event?.type === 'workspace/changes' && (event.data.turn === turn || event.data.turn === undefined)) return event.seq
-    if (event?.type === 'turn/start' && event.data.turn === turn) break
-  }
-  return undefined
-}
-
-async function readControlJson(req: IncomingMessage): Promise<Record<string, unknown>> {
-  const chunks: Buffer[] = []
-  let size = 0
-  for await (const chunk of req) {
-    const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk as string)
-    size += buffer.length
-    if (size > 64 * 1024) throw connectionError(413, '请求内容过大')
-    chunks.push(buffer)
-  }
-  if (size === 0) return {}
-  try {
-    const value: unknown = JSON.parse(Buffer.concat(chunks).toString('utf8'))
-    if (value === null || typeof value !== 'object' || Array.isArray(value)) throw new Error('object required')
-    return value as Record<string, unknown>
-  } catch {
-    throw connectionError(400, '请求 JSON 格式无效')
-  }
 }
 
 function connectionError(status: number, message: string): Error {

@@ -4,6 +4,7 @@ import type { KnowledgeProvider } from './provider.js'
 import type { RuntimeContextLike } from './runtime.js'
 import { isEditableNoteNode, isNoteId, noteReferenceMarkdown } from './notes/domain.js'
 import type { KnowledgeNoteHandleCodec } from './note-reference-handle.js'
+import { readCitation } from './citation-reader.js'
 
 export interface NoteMentionOptions {
   codec: KnowledgeNoteHandleCodec
@@ -31,32 +32,31 @@ export function registerKnowledgeActivityControl(
 }
 
 async function dispatch(req: IncomingMessage, res: ServerResponse, provider: KnowledgeProvider, mentions?: NoteMentionOptions): Promise<void> {
-  if (req.method !== 'GET' && req.method !== 'POST') {
-    res.setHeader('allow', 'GET, POST')
-    throw httpError(405, '会话知识侧栏只支持读取和引入知识库。')
+  if (req.method !== 'GET') {
+    res.setHeader('allow', 'GET')
+    throw httpError(405, '会话知识侧栏只支持读取。')
   }
   assertKnowledgeBrowserRequest(req, 'conversation-web')
   const url = new URL(req.url ?? '/', 'http://knowledge.local')
   const relative = url.pathname.slice(KNOWLEDGE_ACTIVITY_PATH.length).replace(/^\/+|\/+$/g, '')
   let segments: string[]
   try { segments = relative ? relative.split('/').map(decodeURIComponent) : [] } catch { throw httpError(400, '知识侧栏路径格式无效。') }
-  const introducesKnowledgeBase = segments[0] === 'knowledge-bases' && segments.length === 3 && segments[2] === 'introduce'
-  if (req.method !== 'GET' && !introducesKnowledgeBase) {
-    res.setHeader('allow', 'GET')
-    throw httpError(405, '会话知识侧栏只支持读取和引入知识库。')
-  }
   const sessionId = url.searchParams.get('sessionId')?.trim()
   if (!sessionId) throw httpError(400, 'sessionId is required')
   const projectId = url.searchParams.get('projectId')?.trim() || undefined
+
+  if (segments[0] === 'citation' && segments.length === 1 && mentions) {
+    return sendJson(res, 200, await readCitation(provider, url.searchParams.get('citation') || '', sessionId, mentions.sourceKey))
+  }
 
   if (segments[0] === 'note-mentions' && mentions) {
     const sourceKey = mentions.sourceKey()
     if (segments.length === 1) {
       const query = url.searchParams.get('q')?.trim() ?? ''
       if (query.length > 255) throw httpError(400, '笔记搜索词过长。')
-      const notes = await provider.listNotes({ query, kind: 'document', recursive: true, limit: 20 })
+      const notes = await provider.listNotes({ query, editableOnly: true, recursive: true, limit: 20 })
       // Defense in depth for older remote services that ignore the new filter.
-      const documents = notes.filter(node => node.kind === 'document').slice(0, 20)
+      const documents = notes.filter(isEditableNoteNode).slice(0, 20)
       const parents = new Map<string, Promise<string>>()
       const pathFor = (id: string | null): Promise<string> => {
         if (id === null) return Promise.resolve('根目录')
@@ -78,63 +78,13 @@ async function dispatch(req: IncomingMessage, res: ServerResponse, provider: Kno
       if (!isNoteId(id)) throw httpError(400, '笔记引用格式无效。')
       if (url.searchParams.get('sourceKey') !== sourceKey) throw httpError(409, '知识库连接已切换，请重新选择笔记引用。')
       const node = await provider.getNote(id)
-      if (!node || node.kind !== 'document') throw httpError(404, '引用的笔记文档已不存在，请重新选择。')
+      if (!node || !isEditableNoteNode(node)) throw httpError(404, '引用的笔记或文本文件已不存在或不再支持引用，请重新选择。')
       if (sourceKey !== mentions.sourceKey()) throw httpError(409, '知识库连接已切换，请重新选择笔记引用。')
       // Mint at submission, not search time: drafts survive server restarts and renames.
       const handle = mentions.codec.encode(sessionId, node.id)
       return sendJson(res, 200, { text: `${noteReferenceMarkdown(node)}\n（笔记文档引用；使用 knowledge_note_read 读取，noteHandle: ${handle}；此引用不授权修改或删除。）` })
     }
     throw httpError(404, '笔记引用接口不存在。')
-  }
-
-  if (segments[0] === 'knowledge-bases') {
-    if (segments.length === 1 && (req.method === 'GET' || req.method === undefined)) {
-      const query = url.searchParams.get('q')?.trim() ?? ''
-      const bases = (await provider.listKnowledgeBases()).filter(base => base.status === 'active')
-      const mounts = await provider.resolveMounts(sessionId, projectId)
-      const mountedIds = new Set(mounts.filter(mount => mount.enabled && mount.recallEnabled).map(mount => mount.knowledgeBaseId))
-      const items = bases
-        .filter(base => query.length === 0 || `${base.name} ${base.description}`.toLocaleLowerCase('zh-CN').includes(query.toLocaleLowerCase('zh-CN')))
-        .slice(0, 50)
-        .map(base => ({
-          id: base.id,
-          name: base.name,
-          description: base.description,
-          mounted: mountedIds.has(base.id),
-        }))
-      return sendJson(res, 200, {
-        sourceKey: mentions?.sourceKey() ?? '',
-        items,
-      })
-    }
-    if (segments.length === 3 && segments[2] === 'introduce') {
-      if (req.method !== 'POST') throw httpError(405, '引入知识库只支持 POST。')
-      const knowledgeBaseId = segments[1]!
-      const bases = await provider.listKnowledgeBases()
-      const base = bases.find(item => item.id === knowledgeBaseId && item.status === 'active')
-      if (base === undefined) throw httpError(404, '这个知识库不存在或已归档。')
-      const existing = await provider.listMounts('session', sessionId)
-      const mount = existing.find(item => item.knowledgeBaseId === knowledgeBaseId)
-      const mountId = mount !== undefined && mount.enabled && mount.recallEnabled
-        ? mount.id
-        : (await provider.upsertMount({
-          targetKind: 'session',
-          targetId: sessionId,
-          knowledgeBaseId,
-          enabled: true,
-          recallEnabled: true,
-          writeMode: 'none',
-          includeTags: [],
-          excludeTags: [],
-          extractionInstructions: '',
-        })).id
-      return sendJson(res, 200, {
-        knowledgeBase: { id: base.id, name: base.name },
-        mountId,
-        introduced: true,
-      })
-    }
-    throw httpError(404, '知识库引入接口不存在。')
   }
 
   if (segments[0] === 'notes' && segments.length === 1) {

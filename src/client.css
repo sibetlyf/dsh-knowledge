@@ -1,5 +1,4 @@
-﻿.dsh-knowledge-trigger,
-.dsh-knowledge-folder-entry,
+.dsh-knowledge-trigger,
 .dsh-knowledge-activity-panel,
 .dsh-knowledge-workspace,
 .dsh-knowledge-settings-card,
@@ -20,9 +19,6 @@
   --knowledge-text-secondary: var(--text-secondary);
   --knowledge-text-tertiary: var(--text-tertiary);
   --knowledge-hover: var(--surface-hover);
-  --knowledge-card-surface: #ffffff;
-  --knowledge-card-accent: #4d6bfe;
-  --knowledge-card-shadow: 0 10px 30px rgb(16 24 40 / 8%);
   --knowledge-glare-light: rgb(255 255 255 / 70%);
   --knowledge-glare-rim: rgb(60 60 67 / 11%);
   --knowledge-glass-filter: saturate(1.22) contrast(1.03) blur(32px);
@@ -36,7 +32,6 @@
 
 body[data-ds-dark-theme] :is(
   .dsh-knowledge-trigger,
-  .dsh-knowledge-folder-entry,
   .dsh-knowledge-activity-panel,
   .dsh-knowledge-workspace,
   .dsh-knowledge-settings-card,
@@ -49,18 +44,15 @@ body[data-ds-dark-theme] :is(
   --knowledge-on-accent: var(--on-accent);
   --knowledge-danger: var(--danger);
   --knowledge-success: var(--success);
-  --knowledge-pane: rgb(25 33 35 / 90%);
+  --knowledge-pane: rgb(25 33 35 / 20%);
   --knowledge-header-surface: rgb(25 33 35 / 16%);
-  --knowledge-raised: rgb(32 41 43 / 94%);
-  --knowledge-control: rgb(39 50 53 / 92%);
+  --knowledge-raised: rgb(32 41 43 / 48%);
+  --knowledge-control: rgb(39 50 53 / 56%);
   --knowledge-border: var(--border);
   --knowledge-text: var(--text);
   --knowledge-text-secondary: var(--text-secondary);
   --knowledge-text-tertiary: var(--text-tertiary);
   --knowledge-hover: var(--surface-hover);
-  --knowledge-card-surface: #1c1c1f;
-  --knowledge-card-accent: #7d93ff;
-  --knowledge-card-shadow: 0 14px 36px rgb(0 0 0 / 35%);
   --knowledge-glare-light: rgb(255 255 255 / 16%);
   --knowledge-glare-rim: rgb(0 0 0 / 30%);
   --knowledge-glass-shadow: inset 0 1px 0 rgb(255 255 255 / 16%), inset 0 -1px 0 rgb(0 0 0 / 30%), 0 12px 32px rgb(0 0 0 / 30%);
@@ -103,6 +95,7 @@ body[data-ds-dark-theme] :is(
 .dsh-knowledge-activity-panel button,
 .dsh-knowledge-activity-panel input,
 .dsh-knowledge-panel-state button,
+.dsh-knowledge-connection-warning button,
 .dsh-knowledge-settings-card button,
 .dsh-knowledge-writeback-notice button {
   -webkit-appearance: none;
@@ -351,6 +344,27 @@ body[data-ds-dark-theme] :is(
   font-weight: 600;
 }
 
+.dsh-knowledge-connection-warning {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 8px 16px;
+  color: var(--knowledge-text-secondary);
+  font-size: 13px;
+}
+.dsh-knowledge-connection-warning span { min-width: 0; overflow-wrap: anywhere; }
+.dsh-knowledge-connection-warning button {
+  flex-shrink: 0;
+  min-width: 56px;
+  min-height: 32px;
+  padding: 4px 12px;
+  border: 1px solid var(--knowledge-border);
+  border-radius: 10px;
+  background: var(--knowledge-hover);
+  color: var(--knowledge-text);
+  cursor: pointer;
+}
 .dsh-knowledge-panel-state > div { max-width: 560px; }
 .dsh-knowledge-panel-state h3 { margin: 0 0 6px; font-size: 17px; line-height: 24px; font-weight: 600; }
 .dsh-knowledge-panel-state p { margin: 0; color: var(--knowledge-text-secondary); font-size: 13px; line-height: 20px; }
@@ -541,6 +555,7 @@ body[data-ds-dark-theme] :is(
   font: inherit;
 }
 .dsh-knowledge-settings-actions { display: flex; justify-content: flex-end; gap: 8px; }
+.dsh-knowledge-hint { margin: 0; color: var(--knowledge-text-secondary); font-size: 12px; line-height: 1.55; }
 .dsh-knowledge-settings-actions button {
   min-height: 34px;
   padding: 7px 13px;
@@ -687,25 +702,18 @@ body[data-ds-dark-theme] :is(
   .dsh-knowledge-settings-card input::before,
   .dsh-knowledge-writeback-notice button { transition: none; }
 }
-
-/* Composer entry: compact folder-import affordance beside attach/model controls. */
-.dsh-knowledge-folder-entry {
-  display: inline-grid;
-  place-items: center;
-  width: 30px;
-  height: 30px;
-  flex: none;
-  border: 0;
-  border-radius: 8px;
-  padding: 0;
-  background: transparent;
-  color: var(--text-secondary);
-  cursor: pointer;
-  transition: background .12s ease, color .12s ease;
+/* Material belongs to this plugin; accessibility can explicitly make it solid. */
+@media (prefers-reduced-transparency: reduce), (forced-colors: active) {
+  :is(body, body[data-ds-dark-theme]) :is(.dsh-knowledge-trigger, .dsh-knowledge-activity-panel, .dsh-knowledge-workspace, .dsh-knowledge-settings-card, .dsh-knowledge-writeback-notice, .dsh-knowledge-morning-card) {
+    --knowledge-pane: var(--surface);
+    --knowledge-header-surface: var(--surface);
+    --knowledge-raised: var(--surface-raised);
+    --knowledge-control: var(--surface);
+    --knowledge-glass-filter: none;
+  }
 }
-.dsh-knowledge-folder-entry:hover { background: var(--surface-hover); color: var(--text); }
-.dsh-knowledge-folder-entry:focus-visible { outline: 2px solid color-mix(in srgb, var(--accent) 55%, transparent); outline-offset: 1px; }
-/* Welcome-page morning card, sized and placed like the daily-report morning card. */
+
+
 .dsh-knowledge-morning-brand {
   display: inline-flex; align-items: center; justify-content: center;
   width: 34px; height: 34px; overflow: hidden; padding: 0; border: 0; background: transparent;

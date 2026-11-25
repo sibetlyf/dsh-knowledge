@@ -1,6 +1,6 @@
 import type { ResolvedConfig } from './config.js'
-import type { KnowledgeBase, ResolvedKnowledgeMount } from './domain.js'
 import type { KnowledgeProvider } from './provider.js'
+import { usageRecorder } from './recall-usage.js'
 import {
   formatAutomaticRecall,
   formatMountCatalog,
@@ -39,11 +39,9 @@ export function registerKnowledgeRecall(
     if (config.autoRecallLimit === 0) return sanitized
     const query = automaticRecallQuery(payload, sanitized)
     if (!shouldRecall(query)) return sanitized
+    const recordUsage = usageRecorder(provider, payload.agent, payload.turn)
     try {
-      let mounts = await resolveRecallMounts(provider, payload.agent, payload.signal)
-      if (mounts.length === 0 && config.autoRecallAllEnabled) {
-        mounts = await autoRecallMounts(provider, payload.agent, payload.signal)
-      }
+      const mounts = await resolveRecallMounts(provider, payload.agent, payload.signal)
       if (mounts.length === 0) return sanitized
       const searched = await searchMountedKnowledge(
         provider,
@@ -55,8 +53,10 @@ export function registerKnowledgeRecall(
         payload.signal,
       )
       const hits = selectAutomaticRecallHits(searched, config.autoRecallLimit, config.autoRecallMinScore)
-      const text = formatAutomaticRecall(hits, config.recallMaxChars)
+      const included: string[] = []
+      const text = formatAutomaticRecall(hits, config.recallMaxChars, included)
       if (text.length === 0) return sanitized
+      recordUsage('auto', included)
       return { kind: 'enter', messages: [...messages, createRecallMessage(text)] }
     } catch (error) {
       if (!payload.signal.aborted) {
@@ -97,32 +97,6 @@ export function registerKnowledgeCatalog(
       return transformed
     }
   })
-}
-
-/** Zero-setup recall: no explicit mount means search every active base read-only. */
-async function autoRecallMounts(
-  provider: KnowledgeProvider,
-  agent: { session: { id: string; header: { cwd?: string } } },
-  signal: AbortSignal,
-): Promise<ResolvedKnowledgeMount[]> {
-  const bases = await provider.listKnowledgeBases(signal)
-  return bases
-    .filter((base: KnowledgeBase) => base.status === 'active')
-    .map(base => ({
-      id: `auto-recall:${base.id}`,
-      targetKind: 'session' as const,
-      targetId: agent.session.id,
-      knowledgeBaseId: base.id,
-      enabled: true,
-      recallEnabled: true,
-      writeMode: 'none' as const,
-      includeTags: [],
-      excludeTags: [],
-      extractionInstructions: '',
-      createdAt: '',
-      updatedAt: '',
-      base,
-    }))
 }
 
 function isKnowledgeSurfaceMessage(message: { source: { kind: string; plugin?: string; form?: string } }): boolean {

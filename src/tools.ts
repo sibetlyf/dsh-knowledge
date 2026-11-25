@@ -23,6 +23,12 @@ import { registerKnowledgeNoteTools } from './note-tools.js'
 import type { KnowledgeNoteHandleCodec } from './note-reference-handle.js'
 import { documentLifecycleTool } from './document-lifecycle-tool.js'
 import { documentGroupTools } from './document-group-tools.js'
+import { recallIncidentTool } from './recall-incident-tool.js'
+import { usageRecorder } from './recall-usage.js'
+import { knowledgeEntry } from './tool-entry.js'
+import { calendarTools } from './calendar-tools.js'
+import { worklogTools } from './worklog-tools.js'
+import type { JournalRuntime } from './worklog-runtime.js'
 
 const textOutput = {
   schema: { type: 'string' },
@@ -35,16 +41,28 @@ export function registerKnowledgeTools(
   provider: KnowledgeProvider,
   codec: KnowledgeHandleCodec,
   noteCodec: KnowledgeNoteHandleCodec,
+  readWorklog?: JournalRuntime['read'],
+  calendar?: JournalRuntime['calendar'],
 ): void {
-  ctx.tools.register(searchKnowledgeBaseTool(provider))
-  ctx.tools.register(searchTool(provider, codec))
-  ctx.tools.register(readTool(provider, codec))
-  ctx.tools.register(documentLifecycleTool(provider, codec))
-  for (const tool of documentGroupTools(provider, codec)) ctx.tools.register(tool)
-  ctx.tools.register(createKnowledgeBaseTool(provider, ctx.llm))
-  ctx.tools.register(updateKnowledgeBaseTool(provider, ctx.llm))
-  registerKnowledgeNoteTools(ctx, provider, noteCodec, codec)
-  registerKnowledgeNoteReferenceTools(ctx, provider, codec, noteCodec)
+  const operations = new Map<string, ToolDefinitionLike>()
+  const register = (tool: ToolDefinitionLike): (() => void) => {
+    if (operations.has(tool.name)) throw new Error(`Duplicate knowledge operation: ${tool.name}`)
+    operations.set(tool.name, tool)
+    return () => { operations.delete(tool.name) }
+  }
+  register(searchKnowledgeBaseTool(provider))
+  register(searchTool(provider, codec))
+  register(readTool(provider, codec))
+  register(documentLifecycleTool(provider, codec))
+  register(recallIncidentTool(provider, codec))
+  for (const tool of documentGroupTools(provider, codec)) register(tool)
+  register(createKnowledgeBaseTool(provider, ctx.llm))
+  register(updateKnowledgeBaseTool(provider, ctx.llm))
+  registerKnowledgeNoteTools(ctx, provider, noteCodec, codec, register)
+  registerKnowledgeNoteReferenceTools(ctx, provider, codec, noteCodec, register)
+  for (const tool of worklogTools(readWorklog)) register(tool)
+  for (const tool of calendarTools(calendar)) register(tool)
+  ctx.tools.register(knowledgeEntry(operations))
 }
 
 function searchKnowledgeBaseTool(provider: KnowledgeProvider): ToolDefinitionLike {
@@ -212,10 +230,13 @@ function searchTool(provider: KnowledgeProvider, codec: KnowledgeHandleCodec): T
       const query = requireNonEmptyString(args.query, 'query', 6000)
       const base = requireNonEmptyString(args.base, 'base', 200)
       const limit = optionalInteger(args.limit, 'limit', 1, 20) ?? 8
+      const recordUsage = usageRecorder(provider, agent)
       const mounts = selectMounts(await resolveRecallMounts(provider, agent, exec.signal), base)
       if (mounts.length === 0) return 'No knowledge bases are mounted for recall in this session.'
       const hits = await searchMountedKnowledge(provider, agent, mounts, query, limit, codec, exec.signal)
-      return formatSearchResults(query, hits)
+      const result = formatSearchResults(query, hits)
+      recordUsage('search', hits.map(hit => hit.entry.id))
+      return result
     },
   }
 }
@@ -231,6 +252,7 @@ function readTool(provider: KnowledgeProvider, codec: KnowledgeHandleCodec): Too
         handle: { type: 'string', description: 'Exact opaque handle returned by knowledge_search. Do not reconstruct it.' },
         offset: { type: 'integer', description: 'Character offset for continuing a long section; default 0.' },
         maxChars: { type: 'integer', description: 'Characters to return, default 12000 and maximum 20000.' },
+        expectedVersion: { type: 'integer', description: 'Version returned by search; use when reading a passage offset. If changed, search again for its new location.' },
       },
       required: ['handle'],
     },
@@ -242,8 +264,18 @@ function readTool(provider: KnowledgeProvider, codec: KnowledgeHandleCodec): Too
       const handle = requireNonEmptyString(args.handle, 'handle', 4096)
       const offset = optionalInteger(args.offset, 'offset', 0, 1_000_000) ?? 0
       const maxChars = optionalInteger(args.maxChars, 'maxChars', 500, 20_000) ?? 12_000
+      const expectedVersion = optionalInteger(args.expectedVersion, 'expectedVersion', 1, Number.MAX_SAFE_INTEGER)
+      const recordUsage = usageRecorder(provider, agent)
       const { entry, mount } = await readMountedKnowledge(provider, agent, handle, codec, exec.signal)
-      return formatKnowledgeEntry(entry, mount, offset, maxChars)
+      if (expectedVersion !== undefined && entry.version !== expectedVersion) {
+        throw new Error('[DOCUMENT_VERSION_CHANGED] 文档已更新，请重新搜索获取新的段落位置；不要重试旧 offset。')
+      }
+      const chars = Array.from(entry.body), start = Math.min(offset, chars.length), end = Math.min(chars.length, start + maxChars)
+      const startLine = 1 + (chars.slice(0, start).join('').match(/\n/g)?.length ?? 0)
+      const endLine = startLine + (chars.slice(start, end).join('').replace(/\n$/, '').match(/\n/g)?.length ?? 0)
+      const result = formatKnowledgeEntry(entry, mount, offset, maxChars, codec.citation(agent, entry, startLine, endLine))
+      recordUsage('read', [entry.id])
+      return result
     },
   }
 }

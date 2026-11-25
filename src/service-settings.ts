@@ -7,12 +7,8 @@ export interface KnowledgeServiceSettings {
   publicApiEnabled: boolean
   writebackProvider?: string
   writebackModel?: string
-  autoApprovePendingEnabled?: boolean
-  autoOrganizeTrigger?: 'turn' | 'interval'
-  autoOrganizeIntervalMinutes?: number
-  worklogAutoUpdateTrigger?: 'turn' | 'interval'
-  worklogAutoUpdateIntervalMinutes?: number
-  tokenSavingEnabled?: boolean
+  extractionEveryTurns?: number
+  extractionIdleSeconds?: number
 }
 
 export function serviceSettingsPath(connectionPath: string | undefined): string | undefined {
@@ -29,59 +25,28 @@ export function loadServiceSettings(path: string | undefined): KnowledgeServiceS
   if (value === null || typeof value !== 'object' || Array.isArray(value)) {
     throw new Error('stored knowledge service settings must be a JSON object')
   }
-  const stored = value as {
-    publicApiEnabled?: unknown
-    writebackProvider?: unknown
-    writebackModel?: unknown
-    autoApprovePendingEnabled?: unknown
-    autoOrganizeTrigger?: unknown
-    autoOrganizeIntervalMinutes?: unknown
-    worklogAutoUpdateTrigger?: unknown
-    worklogAutoUpdateIntervalMinutes?: unknown
-    tokenSavingEnabled?: unknown
-  }
+  const stored = value as { publicApiEnabled?: unknown; writebackProvider?: unknown; writebackModel?: unknown }
+  const frequency = normalizeWritebackFrequency(value as Record<string,unknown>)
   const enabled = stored.publicApiEnabled
   if (typeof enabled !== 'boolean') throw new Error('stored public API setting must be a boolean')
   const provider = typeof stored.writebackProvider === 'string' ? stored.writebackProvider.trim() : undefined
   const model = typeof stored.writebackModel === 'string' ? stored.writebackModel.trim() : undefined
   if ((provider === undefined) !== (model === undefined)) throw new Error('stored client writeback provider and model must be configured together')
-  const booleanValue = (key: string, fallback: boolean | undefined): boolean | undefined => {
-    const current = stored[key as keyof typeof stored]
-    if (current === undefined) return fallback
-    if (typeof current !== 'boolean') throw new Error(`stored ${key} must be a boolean`)
-    return current
-  }
-  const triggerValue = (key: string, fallback: 'turn' | 'interval' | undefined): 'turn' | 'interval' | undefined => {
-    const current = stored[key as keyof typeof stored]
-    if (current === undefined) return fallback
-    if (current !== 'turn' && current !== 'interval') throw new Error(`stored ${key} must be turn or interval`)
-    return current
-  }
-  const minutesValue = (key: string, fallback: number | undefined): number | undefined => {
-    const current = stored[key as keyof typeof stored]
-    if (current === undefined) return fallback
-    if (typeof current !== 'number' || !Number.isFinite(current) || current < 1 || current > 1440) throw new Error(`stored ${key} must be between 1 and 1440`)
-    return Math.trunc(current)
-  }
-  const autoApprovePendingEnabled = booleanValue('autoApprovePendingEnabled', undefined)
-  const autoOrganizeTrigger = triggerValue('autoOrganizeTrigger', undefined)
-  const autoOrganizeIntervalMinutes = minutesValue('autoOrganizeIntervalMinutes', undefined)
-  const worklogAutoUpdateTrigger = triggerValue('worklogAutoUpdateTrigger', undefined)
-  const worklogAutoUpdateIntervalMinutes = minutesValue('worklogAutoUpdateIntervalMinutes', undefined)
-  const tokenSavingEnabled = booleanValue('tokenSavingEnabled', undefined)
-  return {
-    publicApiEnabled: enabled,
-    ...provider && model ? { writebackProvider: provider, writebackModel: model } : {},
-    ...autoApprovePendingEnabled === undefined ? {} : { autoApprovePendingEnabled },
-    ...autoOrganizeTrigger === undefined ? {} : { autoOrganizeTrigger },
-    ...autoOrganizeIntervalMinutes === undefined ? {} : { autoOrganizeIntervalMinutes },
-    ...worklogAutoUpdateTrigger === undefined ? {} : { worklogAutoUpdateTrigger },
-    ...worklogAutoUpdateIntervalMinutes === undefined ? {} : { worklogAutoUpdateIntervalMinutes },
-    ...tokenSavingEnabled === undefined ? {} : { tokenSavingEnabled },
-  }
+  return { publicApiEnabled: enabled, ...frequency, ...provider && model ? { writebackProvider: provider, writebackModel: model } : {} }
 }
 
 export async function storeServiceSettings(path: string, settings: KnowledgeServiceSettings): Promise<void> {
   await mkdir(dirname(path), { recursive: true, mode: 0o700 })
   await atomicWriteFile(path, `${JSON.stringify(settings, null, 2)}\n`, { mode: 0o600 })
+}
+
+/** Shared validation for local settings, remote-client settings and persisted state. */
+export function normalizeWritebackFrequency(value: Record<string,unknown>): {extractionEveryTurns?:number;extractionIdleSeconds?:number} {
+  const out: {extractionEveryTurns?:number;extractionIdleSeconds?:number}={}
+  for(const [key,min,max] of [['extractionEveryTurns',1,20],['extractionIdleSeconds',30,3600]] as const){
+    const n=value[key];if(n===undefined)continue
+    if(typeof n!=='number'||!Number.isInteger(n)||n<min||n>max)throw Object.assign(Error(`${key} 必须是 ${min}～${max} 的整数`),{status:400})
+    out[key]=n
+  }
+  return out
 }

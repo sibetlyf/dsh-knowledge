@@ -15,11 +15,20 @@ export class Worker {
     if (this.isEnabled && !this.isEnabled()) return
     this.scheduler.tick()
     const job = this.store.next()
-    if (!job) return
+    if (!job) {
+      if (!this.store.reportProgress?.enabled()) return
+      this.progressController = new AbortController()
+      try {
+        await this.store.reportProgress.tick(this.llm, AbortSignal.any([this.progressController.signal, AbortSignal.timeout(90_000)]),
+          () => !this.closed && (this.isEnabled?.() ?? true))
+      } finally { this.progressController = undefined }
+      return
+    }
     const payload = JSON.parse(job.body), attempts = job.attempts + 1, started = Date.now()
     this.active = job.id; this.controller = new AbortController()
     const timeout = setTimeout(() => this.controller?.abort(new Error('整理超时')), 180000)
     this.store.status(job.id, 'running', payload, attempts)
+    let step
     try {
       const valid = () => {
         const current = new Set(this.store.records(job.day).map(r => r.id))
@@ -27,7 +36,7 @@ export class Worker {
         if (this.store.report(job.day).revision !== payload.revision) throw fail('日报已被修改，请重新整理；你的草稿仍保留。', 409)
       }
       valid()
-      const step = nextBatch(payload)
+      step = nextBatch(payload)
       const result = await this.render(this.llm, step.payload, this.controller.signal)
       if (this.closed || this.store.job(job.id).status === 'cancelled') return
       valid()
@@ -37,7 +46,7 @@ export class Worker {
         this.store.status(job.id, 'queued', { ...payload, error: '' }, 0)
         return
       }
-      this.store.save(job.day, result, payload.revision, payload.records.map(r => r.id), false)
+      this.store.save(job.day, result, payload.revision, payload.records.map(r => r.id), false, payload.route)
       this.store.status(job.id, 'done', { ...payload, error: '' }, attempts)
     } catch (e) {
       if (this.closed) this.store.status(job.id, 'queued', payload, job.attempts)
@@ -47,7 +56,8 @@ export class Worker {
         const diagnostic = { ...(e.worklogDiagnostic || { code: this.controller.signal.aborted ? 'timeout' : 'request_error' }), retryable, elapsedMs: Date.now() - started, attempt: attempts, httpStatus: Number.isInteger(e.status) ? e.status : null }
         const message = e.worklogDiagnostic || [409, 413].includes(e.status) ? e.message : diagnostic.code === 'timeout' ? '整理超过 180 秒，已中止' : '模型请求或流式读取失败'
         const progress = retryable ? `第 ${attempts}/3 次` : `第 ${attempts} 次，已停止自动重试`
-        this.store.status(job.id, retry ? 'queued' : 'failed', { ...payload, diagnostic, failedAt: Date.now(), error: `${message}（${progress}，${diagnostic.code}）` }, attempts, Date.now() + attempts * 10000)
+        const failure = e.worklogFailure ? { ...e.worklogFailure, phase: payload.batch ? (payload.batch.level ? '合并摘要' : '分批整理') : '整理日报', batch: payload.batch ? payload.batch.index + 1 : null, sourceIds: step?.payload.records.map(record => record.id) || [] } : undefined
+        this.store.status(job.id, retry ? 'queued' : 'failed', { ...payload, diagnostic, failure, failedAt: Date.now(), error: `${message}（${progress}，${diagnostic.code}）` }, attempts, Date.now() + attempts * 10000)
         this.onError({ jobId: job.id, day: job.day, ...diagnostic })
       }
     } finally { clearTimeout(timeout); this.active = null; this.controller = null }
@@ -58,5 +68,5 @@ export class Worker {
     this.store.status(id, 'cancelled', JSON.parse(job.body), job.attempts)
     if (this.active === id) this.controller.abort(new Error('已取消'))
   }
-  async close() { this.closed = true; clearInterval(this.timer); this.controller?.abort(new Error('服务停止')); await this.running }
+  async close() { this.closed = true; clearInterval(this.timer); this.controller?.abort(new Error('服务停止')); this.progressController?.abort(new Error('服务停止')); await this.running }
 }

@@ -4,15 +4,16 @@ import {mkdtemp,rm} from 'node:fs/promises'
 import {tmpdir} from 'node:os'
 import {join} from 'node:path'
 import {LocalKnowledgeProvider} from '../lib/local-provider.js'
-import {registerKnowledgeNoteTools} from '../lib/note-tools.js'
+import {registerKnowledgeTools} from '../lib/tools.js'
+import {ToolMap} from './fixtures/tool-map.mjs'
 import {KnowledgeNoteHandleCodec} from '../lib/note-reference-handle.js'
 import {KnowledgeHandleCodec} from '../lib/retrieval.js'
 
 async function fixture(t,content='# 甲\n旧甲\n# 乙\n旧乙'){
   const root=await mkdtemp(join(tmpdir(),'note-batch-')),provider=new LocalKnowledgeProvider(join(root,'db.sqlite'))
   t.after(async()=>{await provider.close();await rm(root,{recursive:true,force:true})})
-  const tools=new Map(),codec=new KnowledgeNoteHandleCodec(Buffer.alloc(32,1))
-  registerKnowledgeNoteTools({tools:{register(tool){tools.set(tool.name,tool)}}},provider,codec,new KnowledgeHandleCodec(Buffer.alloc(32,2)))
+  const tools=new ToolMap(),codec=new KnowledgeNoteHandleCodec(Buffer.alloc(32,1))
+  registerKnowledgeTools({tools:{register(tool){tools.set(tool.name,tool)}},llm:{}},provider,new KnowledgeHandleCodec(Buffer.alloc(32,2)),codec)
   const session={id:'batch-test',events:[],snapshotEvents(){return this.events},header:{}}
   const exec={agent:{session},signal:new AbortController().signal}
   const user=text=>session.events.push({type:'turn/start',seq:session.events.length,data:{}},{type:'user/message',seq:session.events.length+1,data:{source:{kind:'user'},content:[{type:'text',text}]}})
@@ -86,4 +87,28 @@ test('expired previews and aborted preview requests cannot be used to write',asy
   f.user('确认')
   await assert.rejects(()=>f.call('knowledge_note_confirm',{confirmationId:plan.confirmationId}),/失效/)
   assert.equal(await f.read(),'# 甲\n旧甲\n# 乙\n旧乙')
+})
+
+test('new folders and documents batch writes immediately; invalid batch writes nothing',async t=>{
+ const f=await fixture(t)
+ const before=(await f.provider.listNotes({recursive:true,limit:500})).length
+ await assert.rejects(()=>f.call('knowledge_note_create',{items:[{kind:'folder',name:'new'},{kind:'document',name:'bad',parentIndex:1}]}),/earlier folder/)
+ assert.equal((await f.provider.listNotes({recursive:true,limit:500})).length,before)
+ const result=await f.call('knowledge_note_create',{items:[{kind:'folder',name:'new'},{kind:'document',name:'one',content:'one',parentIndex:0},{kind:'document',name:'two',content:'two',parentIndex:0}]})
+ assert.equal(result.status,'completed');assert.equal(result.created.length,3)
+ const read=await f.call('knowledge_note_read',{noteHandle:result.created[1].note.handle});assert.equal(read.content,'one')
+ const partial=await f.call('knowledge_note_create',{items:[{kind:'document',name:'unique',content:'ok'},{kind:'document',name:'测试',content:'must not overwrite'},{kind:'document',name:'not-attempted'}]})
+ assert.equal(partial.status,'incomplete');assert.equal(partial.created.length,1);assert.equal(partial.failed.index,1);assert.equal(partial.notAttempted[0].index,2);assert.equal(await f.read(),'# 甲\n旧甲\n# 乙\n旧乙')
+})
+test('delete requires next-turn confirmation and rejects changed folder contents',async t=>{
+ const f=await fixture(t)
+ const result=await f.call('knowledge_note_create',{items:[{kind:'folder',name:'delete-parent'},{kind:'document',name:'child',parentIndex:0}]})
+ const handle=result.created[0].note.handle
+ const plan=await f.call('knowledge_note_delete',{noteHandle:handle});assert.equal(plan.status,'pending_confirmation');assert.match(plan.preview,/child/)
+ await assert.rejects(()=>f.call('knowledge_note_confirm',{confirmationId:plan.confirmationId}),/下一轮/)
+ const folder=(await f.provider.listNotes({parentId:null})).find(n=>n.name==='delete-parent')
+ await f.provider.createNoteDocument('new-child',folder.id,'new')
+ f.user('确认');await assert.rejects(()=>f.call('knowledge_note_confirm',{confirmationId:plan.confirmationId}),/变化/)
+ assert.ok(await f.provider.getNote(folder.id))
+ const again=await f.call('knowledge_note_delete',{noteHandle:handle});f.user('确认');await f.call('knowledge_note_confirm',{confirmationId:again.confirmationId});assert.equal(await f.provider.getNote(folder.id),undefined)
 })

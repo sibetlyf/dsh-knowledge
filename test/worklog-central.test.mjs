@@ -70,6 +70,23 @@ test('new source APIs remain central and preserve read/write permissions', async
   await assert.rejects(requestCentral(readOnly, 'POST', '/exclude-batch', { ids: [id], excluded: true }), e => e.status === 403)
 })
 
+test('report reading follows the central HTTP read permission without requiring write access',async t=>{
+  const c=await central(t)
+  c.store.save('2026-11-14','中央已生成的日报',0)
+  const reader=client(t,{...c.connection,remoteToken:c.tokens.read})
+  const signal=new AbortController().signal
+  const list=await reader.service.read('/reports',new URLSearchParams(),signal)
+  assert.equal(list.source,'remote');assert.equal(list.items[0].day,'2026-11-14')
+  const report=await reader.service.read('/report',new URLSearchParams({day:'2026-11-14'}),signal)
+  assert.equal(report.markdown,'中央已生成的日报')
+  const writer=client(t,{...c.connection,remoteToken:c.tokens.write})
+  assert.equal((await writer.service.read('/reports',new URLSearchParams(),signal)).total,1,'existing write permission includes read')
+  const denied=client(t,{...c.connection,remoteToken:'invalid-or-revoked-token'})
+  await assert.rejects(denied.service.read('/reports',new URLSearchParams(),signal),error=>error.status===401)
+  await assert.rejects(requestCentral({...c.connection,remoteToken:c.tokens.read},'POST','/generate',{day:'2026-11-14'}),error=>error.status===403)
+  assert.equal(c.calls(),0,'reading must not schedule or run a model')
+})
+
 test('multiple collectors share central records, model catalog and report; never run local models', async t => {
   const c = await central(t), a = client(t, c.connection), b = client(t, c.connection)
   a.service.collect(session('same-id'), 1); b.service.collect(session('same-id'), 1)
@@ -116,7 +133,7 @@ test('central settings are shared while local capture scope stays local', async 
   const publicState = await requestCentral(c.connection, 'GET', '/state')
   assert.equal(publicState.config.enabled, undefined, 'central API must not disclose central local capture settings')
   assert.equal(publicState.config.recursiveProjects, undefined)
-  await a.service.browser('POST', '/settings', { ...state.config, sharedRevision: state.sharedRevision, enabled: false, projects: ['/only-a'], recursiveProjects: true, timezone: 'UTC', scheduleEnabled: true, scheduleTime: '22:30' })
+  await a.service.browser('POST', '/settings', { ...state.config, sharedRevision: state.sharedRevision, enabled: false, projects: ['/only-a'], recursiveProjects: true, timezone: 'UTC', scheduleEnabled: true, scheduleTime: '22:30', scheduleFallbackEnabled: true })
   const bs = await b.service.browser('GET', '/state')
   assert.equal(bs.config.timezone, 'UTC'); assert.equal(bs.config.scheduleTime, '22:30')
   assert.equal(bs.config.enabled, true); assert.deepEqual(bs.config.projects, [])
@@ -128,6 +145,8 @@ test('central settings are shared while local capture scope stays local', async 
   assert.equal(a.store.config().scheduleEnabled, false, 'central scheduler is not installed locally')
   assert.equal(c.store.config().enabled, true, 'remote UI cannot alter central collection authorization')
   await assert.rejects(b.service.browser('POST', '/settings', { ...state.config, sharedRevision: state.sharedRevision, scheduleTime: '21:00' }), e => e.status === 409)
+  assert.equal(c.store.config().scheduleFallbackEnabled, true)
+  assert.equal(a.calls(), 0, 'remote collectors must not run local models')
   assert.equal(c.store.config().scheduleTime, '22:30', 'stale settings must not overwrite another client')
 })
 
@@ -275,4 +294,37 @@ test('central redirect is rejected without forwarding authorization to another s
   t.after(async () => { for (const server of [redirect, target]) { server.closeAllConnections(); await new Promise(resolve => server.close(resolve)) } })
   await assert.rejects(requestCentral({ backend: 'remote', remoteUrl: `http://127.0.0.1:${redirect.address().port}`, remoteToken: 'private-token-for-test', remoteTimeoutMs: 1000 }, 'GET', '/state'), /重定向/)
   assert.equal(leaked, false)
+})
+
+test('calendar HTTP respects remote read/write permissions and selected central identity', async t => {
+  const c = await central(t), a = client(t, c.connection)
+  const info = await a.service.browser('GET', '/calendar-info')
+  assert.equal(info.calendarId, c.store.calendar.calendarId)
+  assert.notEqual(info.calendarId, a.store.calendar.calendarId)
+  const data = { requestId: 'http-create', calendarId: info.calendarId, event: { title: '每天目标', day: '2026-11-17' } }
+  const read = { ...c.connection, remoteToken: c.tokens.read }, write = { ...c.connection, remoteToken: c.tokens.write }
+  await assert.rejects(requestCentral(read, 'POST', '/calendar-create', data), e => e.status === 403)
+  const first = await requestCentral(write, 'POST', '/calendar-create', data)
+  assert.equal(first.event.title, '每天目标')
+  const page = await requestCentral(read, 'GET', '/calendar', undefined, new URLSearchParams({ from: '2026-11-17', to: '2026-11-18' }))
+  assert.equal(page.total, 1); assert.equal(a.store.calendar.info().cursor, 0)
+  await assert.rejects(requestCentral(read, 'GET', '/calendar-event', undefined, new URLSearchParams({ id: 'missing' })), e => e.status === 404 && /目标不存在/.test(e.message))
+  await assert.rejects(requestCentral(read, 'POST', '/calendar-delete', { requestId: 'http-delete', id: first.event.id, revision: 1 }), e => e.status === 403)
+  assert.equal((await requestCentral(read, 'GET', '/calendar-export', undefined, new URLSearchParams({ from: '2026-11-17', to: '2026-11-18' }))).count, 1)
+})
+
+test('calendar automation settings require central admin and never change the collector', async t => {
+  const c = await central(t), a = client(t, c.connection)
+  const writer = { ...c.connection, remoteToken: c.tokens.write }
+  await assert.rejects(requestCentral(writer, 'GET', '/calendar-settings'), e => e.status === 403)
+  await assert.rejects(requestCentral(writer, 'POST', '/calendar-report-settings', { enabled: true }), e => e.status === 403)
+  await assert.rejects(requestCentral(writer, 'POST', '/calendar-workdays-settings', { revision: 0, weekdays: [1, 2, 3, 4, 5], overrides: [] }), e => e.status === 403)
+  await assert.rejects(requestCentral(writer, 'POST', '/calendar-report-recheck', { from: '2026-11-20', to: '2026-11-23' }), e => e.status === 403)
+  const custom = await a.service.browser('POST', '/calendar-workdays-settings', { revision: 0, weekdays: [1, 3, 5], overrides: [] })
+  assert.deepEqual(custom.workdays.weekdays, [1, 3, 5])
+  assert.deepEqual(a.store.calendar.workdaySettings().weekdays, [1, 2, 3, 4, 5])
+  assert.equal((await a.service.browser('GET', '/calendar-settings')).report.enabled, false)
+  assert.equal((await a.service.browser('POST', '/calendar-report-settings', { enabled: true })).report.enabled, true)
+  assert.equal(c.store.reportProgress.enabled(), true)
+  assert.equal(a.store.reportProgress.enabled(), false)
 })

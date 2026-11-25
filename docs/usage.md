@@ -3,7 +3,8 @@
 # 使用与配置
 
 
-[![GitHub release](https://img.shields.io/github/v/release/sibetlyf/dsh-knowledge)](https://github.com/sibetlyf/dsh-knowledge/releases/latest)
+[![npm](https://img.shields.io/npm/v/%40lemoncat7%2Fdsh-knowledge)](https://www.npmjs.com/package/@lemoncat7/dsh-knowledge)
+[![GitHub Release](https://img.shields.io/github/v/release/lemoncat7/dsh-knowledge)](https://github.com/lemoncat7/dsh-knowledge/releases/latest)
 [![awesome · DSH plugin](https://awesome-dsh-plugin.com/badge.svg)](https://awesome-dsh-plugin.com)
 
 `dsh-knowledge` 是面向 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) 的知识库插件。它不修改 DSH Agent Loop，同一个插件既能使用本地 SQLite，也能连接远程中央知识库。
@@ -41,7 +42,7 @@
 - 未挂载知识库时，不召回、不提取、不回写。
 - 全局与项目范围，以及偏好、事实、决策、流程、经验五类知识。
 - SQLite WAL、FTS5 全文搜索、原子事务、完整版本历史和幂等提取任务。
-- 回答前通过 DSH 官方提示组装接口提供有界的挂载库地图，并自动召回最多 3 条达到相关性门槛的摘要；不自动注入完整文档。模型可继续按“`knowledge_base_search` 找库 → `knowledge_search` 搜索指定库 → `knowledge_read` 读取文档”的顺序核对完整内容。
+- 回答前通过 DSH 官方提示组装接口提供有界的挂载库地图，并自动召回最多 3 条达到相关性门槛的摘要；不自动注入完整文档。模型可继续按“`knowledge_base_search` 找库 → `knowledge_search` 搜索指定库 → `knowledge_read` 读取文档”的顺序核对完整内容。这些是 `knowledge` 统一入口下的操作名，先 `action=describe` 查询参数，再 `action=call` 执行；详见[统一工具入口](tool-entry.md)。
 - 普通知识沉淀独立于主 Agent：主模型不暴露通用 `knowledge_write`，在回答结束后由独立提取调用处理，真实回写状态显示在回答下方。
 - 用户明确确认“问题已解决”或“收集完成／结束”时，Agent 可通过 `knowledge_document_status` 更新对应知识状态，也支持回答后的自动提取。工具先搜索并读取目标文档，提交当前版本、用户确认原话和结论；仅解决其中一个问题时只修订对应段落，整篇保持开放。整篇结束保留正文和结论、生成历史版本并停止后续回写，可在界面重新打开。
 - 状态更新遵循挂载权限：仅召回不能写，审核模式产生待审核候选，直接模式在版本核验通过后生效；敏感内容转人工审核。Agent 只能按实际工具结果说明“已标记”或“待审核”。不能用模型自述、疑问或普通“好了”封存文档，过期版本也不能确认结束。远程使用同一候选协议，服务端需同步升级到支持文档状态候选的版本，不会在远端失败后回退写本地。
@@ -57,7 +58,6 @@
 - 每个生效主题对应一篇真实 Markdown 文档；相似知识作为章节或增量内容写入同一文档。创建、改名、保存、归档和删除会同步 SQLite、全文索引、版本历史与物理文件。
 - 独立的笔记工作区：在知识工作区上方提供可无限嵌套的目录树，支持 Markdown 与常见文本文件直接编辑，图片和 PDF 就地浏览，以及任意文件的拖拽移动、复制、重命名、下载和只读分享。主侧栏中的独立“已分享”页面集中管理本机链接，也能读取其他 DSH 的分享清单并将文档或完整目录复制到指定笔记目录。Markdown 编辑器提供标题大纲定位、文内查找与替换、选择结束后出现的浮动格式菜单和 `Ctrl/Cmd + F` 快捷键；每次保存会形成按需读取的页面历史，可预览、比较并恢复为新版本。笔记默认不参与知识检索、自动召回或 AI 回写。
 - 分享导入保留 SSRF 防护；域名解析到内网或使用内网 IP 时，导入弹窗提示目标 Origin，管理员点击「允许本次内网分享并读取」后即可继续，无需预先配置白名单。确认仅绑定当前分享链接，修改链接或关闭弹窗即清除，不持久化；不允许借此访问回环、链路本地/云元数据地址或其他分享和接口，重定向仍逐跳校验。原有 `trustedShareOrigins` 和远程访问插件的可信 Origin 配置继续兼容。
-- 知识文档自动生成双向链接：文档底部显示「关联文档」与「反向链接」，按共同标签、同一分组和标题主题计算同知识库内的关联；只读/定稿文档的预览中，正文里的 `[[文档标题]]` 会渲染为可点击链接，并在目标文档中显示反向链接；点击任意链接即可在文档间跳转。链接由读取时实时计算，不写入正文，不产生额外版本。
 - 知识文档使用独立的“关联笔记”列表引用笔记文档或文件，正文不再插入引用语法。关系绑定稳定编号，笔记移动或改名不会失效；旧 `note://` 引用会在升级时安全回填为结构化关系。
 - AI 可使用 `knowledge_note_list / search / read` 浏览和读取笔记，无需额外的语义授权；创建、更新、改名和移动先生成提案，展示变更后等待用户在下一轮对话确认。所有目标都使用当前会话签名句柄，远程操作继续服从令牌权限，删除仍有独立的明确授权边界，被知识文档引用的笔记不能直接删除。
 - `knowledge_note_references` 单独负责查看、添加或移除知识文档与笔记的结构化关联，并在执行时重新检查知识挂载范围、写入模式和文档封存状态。
@@ -66,103 +66,31 @@
 - 随插件安装的响应式 Web 管理台，覆盖概览、文档树与编辑器、AI 候选审核和客户端令牌管理。
 - DSH 浏览器端插件：在左侧工作区下方显示“知识库”，并在当前页面内打开管理面板。
 - 明暗主题、键盘操作、窄屏布局以及不依赖颜色的状态标签。
-- 制品自动归档：每轮对话结束自动归档**任务中涉及的所有文件**，包括 `present` 交付物、工具读写的文件、shell/workspace 变更、用户上传与 `@` 引用；归档副本内容寻址保存，并在自动创建/挂载的“制品归档”知识库中按文件类别生成可检索、可版本回溯、可双向链接的知识文档，无需上传、确认或审批。
-- 可写知识库自动补齐：项目没有任何可写挂载时，自动把「默认知识库」以可写模式挂载到项目，避免“未挂载可写知识库”而无法写入。
-- 自动分类与免审核：AI 提取优先复用已有知识库和文档分组，必要时自动新建知识栏目并直接写入；后台自动批准非冲突的待审核候选，笔记整理草案直接落盘。
-- 制品文件浏览：管理台新增「制品文件」页面，支持按格式预览、下载任意文件，并打开对应知识文档进行编辑、调整分组或移动。
-
-## 制品自动归档
-
-`artifactArchiveEnabled` 默认开启。插件在 `agent/turn-stopping` 读取本轮会话事件，收集任务涉及的所有文件：成功 `present` 声明的文件（含 shell 生成后声明的文件）、所有工具参数中出现的文件（`read` / `read_image` / `str_replace_editor view` 读取，`write` / `edit` 写入，以及其他工具的输入输出）、shell 命令中的路径与 workspace-changes 记录的本轮变更、用户 `@` 引用的文件，以及用户上传的附件（通过 Host `attachments` 服务读取）。每个候选都会校验存在性、常规文件、大小与排除规则；归档与知识写入在后台串行执行，不阻塞对话，也不进入模型上下文。
-
-- 归档副本位于知识库数据库相邻的 `artifacts/`（可用 `artifactArchivePath` 修改），按 SHA-256 内容寻址；相同内容只保存一份，每次内容变化都保留旧版本字节。**具体文件保存在归档文件夹**，数据库中的知识文档只保存文件路径、归档副本链接、元数据、关键词与读取提示，默认不复制正文（`artifactArchiveStoreContent: false`；设为 `true` 才把抽取正文写入数据库）。
-- 每个制品对应一篇知识文档（标题形如 `制品 · reports/q4.md`，上传附件为 `制品 · 用户上传/<文件名>`，类型 `fact`），按文件类别归入 `制品 · 文档 / 表格 / 演示 / 图片 / 压缩包 / 音视频 / 代码 / 其他` 栏目；内容变化时原地更新并形成新版本，删除源文件后归档副本仍可读。
-- **PDF 论文**：自动识别后提取标题、摘要、关键词、年份、arXiv/DOI 与类别，标题为 `论文 · <标题>`，归入 `论文 · <类别>` 分组；首次出现论文时只创建一个「论文库」，摘要与关键词写入数据库并立即进入全文索引。非论文 PDF 不触发论文库。可用 `artifactArchivePaperEnabled: false` 关闭。
-- 默认归档所有格式（`artifactArchiveExtensions: ['*']`）；可改成扩展名列表收窄文件工具写入的范围，读取/引用/变更/交付/上传仍按“任务涉及即归档”处理。所有来源都受单文件大小上限与排除模式约束。
-- 源码文件会归档并参与双向链接，但不写入工作日报素材，避免日报被代码文件淹没。
-- 每篇知识文档包含文件路径、关键词与读取提示；PDF、Office/ODF、文本会抽取文字用于生成关键词（默认不写入正文），图片、压缩包、音视频和其他二进制保留元数据并以归档副本为准。
-- 管理台「制品文件」页面可预览图片、PDF、纯文本、音视频并下载任意格式，或一键打开对应知识文档进行编辑、调整分组与跨库移动；归档副本保持不可变。
-- 首次归档时自动创建 `artifactArchiveBaseName`（默认 `制品归档`）知识库，并以“仅召回、不参与对话回写”（`writeMode: none`）的方式挂载到当前项目，后续搜索与自动召回直接命中制品内容。已有挂载设置不会被覆盖；知识库被人工归档后停止自动归档。
-- 每轮第一个模型步骤检查项目挂载：没有任何可写挂载时，自动把「默认知识库」以 `autoWritableMountWriteMode`（默认 `direct`）挂载到项目；已有可写挂载、被显式关闭或设为仅召回的默认挂载都保持原样。可用 `autoWritableMountEnabled: false` 关闭该行为。
-- 对话知识提取优先复用已有文档分组；现有知识栏目都不适合时，`autoCreateKnowledgeBases` 允许模型自动新建一个知识栏目（知识库）并直接挂载写入；每日自动新建知识库数量由 `autoCreateKnowledgeBasesMaxPerDay`（默认 3，0 表示只复用）限制，同名栏目复用。
-- `autoApprovePendingEnabled` 开启时，后台自动批准非冲突的待审核候选（默认 2 分钟一次，且每轮结束触发），提取完成时也会立即补跑一次；`noteOrganizeAutoApprove` 让笔记整理草案直接落盘；真实冲突与凭据类内容仍保留人工确认。
-- 自动整理触发方式：`autoOrganizeTrigger: turn` 每轮对话后整理；`interval` 按 `autoOrganizeIntervalMinutes`（默认 30 分钟）批量整理，归档仍按轮执行，只有知识提取会合并到间隔窗口。
-- 自动工作纪要触发方式：`worklogAutoUpdateTrigger: turn` 每轮/每次知识更新后刷新；`interval` 按 `worklogAutoUpdateIntervalMinutes`（默认 30 分钟）批量刷新。日报的每日定时生成仍由工作日报自身的 `scheduleEnabled` / `scheduleTime` 控制。
-- `tokenSavingEnabled` 默认开启：提取输入上限 12000 字符、输出 3072 tokens，自动召回最多 2 条、上下文字符上限 3000；关闭后使用配置中的原始值，适合需要更高精度的场景。
-- `autoRecallAllEnabled` 默认开启：会话没有任何召回挂载时，自动检索所有生效知识库并注入当前对话；无需手工挂载，知识只在对话上下文和工具读取中展示。
-- 管理台「自动化」页可以图形化设置上述自动审核、两种触发模式、间隔和 token 节省；保存后立即更新运行参数。
-- 自动整理只读取既有文档的标题、标签、分组和约 600 字摘要；自动双向链接由本地元数据/关键词推导，不调用模型；需要完整正文时再通过 `knowledge_read` 读取，避免把整库文档塞进上下文。
-- 知识文档工具栏的「优化格式」和工作日报的「优化排版」调用编辑模型只改格式/表达，要求保留事实、数字、路径、链接与依据编号，并去掉重复和 AI 腔；优化结果作为新版本保存。
-- 默认排除 `node_modules`、`.git`、`.dsh`、`.env`、证书私钥、SQLite 数据库等路径；单文件超过 `artifactArchiveMaxFileBytes` 或正文超过 `artifactArchiveMaxChars` 时跳过或截断。
-- 只读接口 `GET /knowledge-control/v1/artifacts`（最近 500 条记录）和 `GET /knowledge-control/v1/artifacts/<id>`（下载副本），与其他管理接口一样要求同源管理台请求头。
-- **选择文件夹导入**：在「制品文件」点击「导入文件夹」，可逐级浏览本机目录或直接输入路径；确认后递归扫描（默认最多 800 个文件），跳过依赖/版本库/构建目录与符号链接，进入后台归档队列，继续自动分类、论文识别、双向链接与索引。接口为 `GET /knowledge-control/v1/folders` 与 `POST /knowledge-control/v1/artifacts/import`。
-- **插件联动**：宿主提供 `dshKnowledge` 服务，其他插件可调用 `ingestRecord` / `ingestFiles` / `search` / `listBases` / `introduceBase`，或订阅 `knowledge/write` 事件；未安装知识库插件时应降级。
-
-完整配置、解析规则与限制见 [制品自动归档](artifacts.md)。
-
-## 对话中引入知识库
-
-在对话输入框键入 `@`，候选菜单会多出「引入知识库」分组，列出当前连接下所有生效知识库；可继续输入名称/说明过滤，已挂载的库会标注“已挂载”。
-
-同一个 `@` 菜单还提供「导入文件夹…」：选择后直接打开知识库的文件夹浏览器，确认当前目录即可递归导入；输入框工具行的文件夹按钮也执行同一操作。文件继续走归档、分类、论文识别、双向链接与索引流程，完成后右下角弹出气泡显示新增/更新/跳过等汇总，点「查看明细」可逐项查看文件、类别、目标知识库、分组和论文分类。
-
-- 选中后会插入一个「知识库 · <名称>」引用块，可在发送前删除或继续输入问题；
-- 发送时插件把该知识库以**仅召回（`writeMode: none`）的会话挂载**加入当前会话，因此本轮及后续自动召回、`knowledge_search`、`knowledge_read` 都能使用它；
-- 不会把本轮对话或提取的知识写回被引入的知识库；
-- 远程只读令牌没有挂载写权限时，发送会被阻止并提示错误，不会静默降级；
-- 可在管理台「知识库与挂载」中查看或关闭该会话挂载。
-
-## 后台状态与思维链接图
-
-界面采用阅读优先布局：正文、导航、知识目录与工具栏字号整体放大；知识目录是可滑出的抽屉（顶部目录按钮或空状态里的「浏览知识目录」打开），默认不占用第三列，文档区域占满宽度；主导航已去掉冗余序号。
-
-减少重复操作：再次进入「知识文档」会自动恢复上次打开的文档；没有历史时自动打开当前知识库中最近更新的一篇文档；编辑既有文档后停止输入约 1.4 秒会自动保存（状态栏显示“自动保存中…/已自动保存”），不再必须点击保存；保存按钮仍保留作为手动兜底。
-
-- **后台状态卡**：管理台顶栏右侧常驻一张后台状态卡（窄屏自动隐藏），每 3 秒读取 `GET /knowledge-control/v1/background-status`。点击展开任务面板，显示自动归档的当前文件/已完成数量、知识回写队列与失败数、工作日报整理状态，并用圆形进度或不定进度环表示；可从面板跳转到「制品文件」「回写任务」或「工作日报」。
-- **从腾讯文档导入**：知识目录顶部「从腾讯文档导入」，粘贴 `https://docs.qq.com/doc/...`、`sheet/...` 或 `slide/...` 链接，自动读取云端正文并创建本地知识文档（正文保留来源链接，分组默认「腾讯文档」）。
-- **发布到腾讯文档**：知识文档工具栏「发布到腾讯文档」，把当前 Markdown 作为智能文档（MDX）发布到腾讯文档，成功后返回并打开云端链接。
-
-- **腾讯文档 token 配置**：管理台「自动化 → 腾讯文档」可输入 32 位 `space_secret` 并保存到本地 vault；不会写入知识库数据库或配置明文。保存后桥插件约 15 秒内自动重连；环境变量 `TDOC_OAUTH_ACCESS_TOKEN` 优先级更高，界面会提示被覆盖。
-- **思维链接图**：左侧「思维链接」页按层级浏览关系图。默认只显示一级分组；点击分组依次展开其直接子分组与文档，点击文档才打开正文。顶部提供「返回上一级」「全部」和可点击面包屑，不需要重新加载整库；节点颜色按分组，大小按链接数，支持拖动、滚轮缩放、悬停高亮和导出 PNG。
-- **从文档进入**：每篇文档底部「双向链接」面板右上角提供「关系图」，直接打开该知识库的整图。
 
 ## 安装
 
-推荐使用 GitRef 安装，直接从仓库的指定 ref 获取：
+从 npm 安装正式版：
 
 ```bash
-# 固定发布标签；PowerShell 中 # 后的 ref 需要引号
-dsh plugin --profile web add "github:sibetlyf/dsh-knowledge#v2.15.14"
+dsh plugin --profile web add @lemoncat7/dsh-knowledge
 ```
 
-跟踪主分支：
+需要固定版本时，将 `<version>` 替换为对应的发布版本：
 
 ```bash
-dsh plugin --profile web add "github:sibetlyf/dsh-knowledge#main"
+dsh plugin --profile web add @lemoncat7/dsh-knowledge@<version>
 ```
 
-固定到某个 commit：
+也可以从 [GitHub Releases](https://github.com/lemoncat7/dsh-knowledge/releases) 下载对应版本的完整预构建包后安装：
 
 ```bash
-dsh plugin --profile web add "github:sibetlyf/dsh-knowledge#089ca65"
-```
-
-也可以从 [GitHub Releases](https://github.com/sibetlyf/dsh-knowledge/releases) 下载对应版本的预构建 tgz 后安装：
-
-```bash
-dsh plugin --profile web add ./dsh-knowledge-<version>.tgz
-```
-
-npm 仍可作为备用源（仅当当前 registry 已发布 `dsh-knowledge`）：
-
-```bash
-dsh plugin --profile web add dsh-knowledge
+dsh plugin --profile web add ./lemoncat7-dsh-knowledge-<version>.tgz
 ```
 
 卸载：
 
 ```bash
-dsh plugin --profile web remove dsh-knowledge
+dsh plugin --profile web remove @lemoncat7/dsh-knowledge
 ```
 
 插件是标准 DSH profile bundle：`package.json` 的 `dsh.bundle.patch` 指向 `cordis.patch.yml`。安装后不需要单独运行知识库容器。
@@ -175,19 +103,20 @@ pnpm dsh web
 
 ## DSH 插件商店
 
-本仓库符合 DSH 社区目录的安装要求：声明了 `dsh.bundle`，提供 GitRef 安装入口，并使用 GitHub `dsh-plugin` Topic。目录收录完成后，可在 DSH 的插件市场搜索 `dsh-knowledge` 或“知识库”，安装源为 GitRef。
+本仓库符合 DSH 社区目录的安装要求：声明了 `dsh.bundle`、发布了 npm 预构建包，并使用 GitHub `dsh-plugin` Topic。目录收录完成后，可在 DSH 的插件市场搜索 `dsh-knowledge` 或“知识库”，安装源为 `@lemoncat7/dsh-knowledge`。
 
-插件商店的数据来自 [awesome-dsh-plugin.com](https://awesome-dsh-plugin.com)，不是单靠 npm 标签自动生成。若商店尚未刷新，可先使用上面的 GitRef 命令安装。
+插件商店的数据来自 [awesome-dsh-plugin.com](https://awesome-dsh-plugin.com)，不是单靠 npm 标签自动生成。若商店尚未刷新，可先使用上面的 npm 命令安装。
 
 ## 本地模式
 
-默认数据目录不再固定写入 C 盘用户目录：Windows 上优先使用插件所在非系统盘（例如插件在 `G:` 时使用 `G:\dsh-knowledge`），也可以用环境变量 `DSH_KNOWLEDGE_HOME` 指定目录。首次启动若发现旧目录 `C:\Users\<用户>\.dsh\knowledge`，会复制到新目录（旧目录保留为备份）。通常无需显式配置路径：
+默认配置使用 DSH 持久目录中的 SQLite 文件：
 
 ```yaml
 - id: knowledge
-  name: 'dsh-knowledge'
+  name: '@lemoncat7/dsh-knowledge'
   config:
     backend: local
+    databasePath: !!js dshHomePath('knowledge/knowledge.sqlite')
     extractionEnabled: true
     defaultScope: project
     autoRecallLimit: 3
@@ -218,6 +147,7 @@ pnpm dsh web
 
 ```yaml
     backend: local
+    databasePath: !!js dshHomePath('knowledge/knowledge.sqlite')
     exposeApi: true
     apiToken: !!js process.env.DSH_KNOWLEDGE_API_TOKEN
     apiPrefix: /knowledge-api/v1
@@ -298,6 +228,11 @@ pnpm dsh web
 | GET | `/shared/:token` | public | 打开只读分享页；目录分享只允许访问对应子树 |
 | GET | `/shared/:token/content` | public | 读取分享范围内的文件内容，支持 `noteId` 与 `download=1` |
 | GET | `/shared/:token/manifest` | public | 返回供导入使用的只读目录清单与内容摘要 |
+| GET/POST | `/knowledge-shares` | admin | 列出或创建知识文档只读分享 |
+| DELETE | `/knowledge-shares/:token` | admin | 撤销知识文档分享 |
+| GET | `/shared-knowledge/:token` | public | 打开知识文档只读分享页，无需 DSH 或 Bearer Token |
+| GET | `/shared-knowledge/:token/raw` | public | 下载当前文档 Markdown，支持 `download=1` |
+| GET | `/shared-knowledge/:token/manifest` | public | 返回标题、版本、更新时间和正文长度 |
 | GET/POST | `/entries` | read/write | 列表和直接创建 |
 | GET/PUT/DELETE | `/entries/:id` | read/write/admin | 详情、更新、彻底删除 |
 | GET/POST | `/entries/:id/note-references` | read/write | 查看或添加结构化笔记关联 |
@@ -324,7 +259,7 @@ pnpm dsh web
 
 ```yaml
 - id: knowledge
-  name: 'dsh-knowledge'
+  name: '@lemoncat7/dsh-knowledge'
   config:
     backend: remote
     remoteUrl: 'https://knowledge.example.com/knowledge-api/v1'
@@ -372,8 +307,15 @@ docker build \
 - 这是自动同步与冲突保护，不是多人逐字协同。远端知识服务也需要更新到支持版本校验的版本。
 # 内置工作日报
 
-在「知识库 → 工作记录 → 工作日报」使用，无需独立日报插件。适配 DSH 0.1.7-rc.2。
-采集默认关闭；但知识库发生自动写入（对话回写、制品归档）后，插件会为该写入所在项目自动开启采集、加入项目范围并启用每日生成，无需手动配置；也可随时在采集设置中调整或关闭。
+在「知识库 → 工作记录 → 工作日报」使用，无需独立日报插件。
+
+AI 通过 `knowledge` 统一入口读取已生成或手动保存的日报，无需挂载知识库：
+
+- `action: "call", tool: "knowledge_worklog_list", arguments: {"from":"2026-11-01","to":"2026-11-14","query":"部署","limit":20}` 按日期范围和关键词检索。日期和关键词均可省略；返回日报时区、日期及版本，不包含原始会话。
+- `action: "call", tool: "knowledge_worklog_read", arguments: {"day":"2026-11-14"}` 读取正文。返回 `nextOffset` 时，携带该偏移及同一个 `revision` 继续读取；版本变化则从第一页重读。
+
+读取跟随当前本地/远程连接和令牌权限；远端故障不会悄悄读本地。中央服务也需提供新版日报读取接口。`exists:false` 表示该日没有保存的日报，并不表示没有工作素材。读取不会生成或修改日报，也不会自动将正文注入所有会话。
+采集默认关闭；支持全部目录、树状勾选当前/已记录的工作目录、手写路径，以及从 DSH 已配置模型中选择整理模型。
 
 「采集设置 → 选择目录」提供可展开的工作目录树。目录树仅根据当前 DSH 实例的默认工作目录、观察到的会话工作目录、当前会话和手动添加的路径构建，不读取磁盘目录，也不把中央接收的其他机器路径或手工补记当成本机项目；自动补出父级节点，父目录没有会话也能勾选。这里的“本机”是运行 DSH 的实例，并非浏览器所在电脑。展开与勾选相互独立；方向键浏览/展开，空格勾选。旧版混合目录表会按来源修复，本地与远端同时出现的路径需有本机会话依据才能恢复；历史配置不删除、不重写，缺少本机依据的已选路径单独收在“其他已保存目录”中。
 
@@ -384,43 +326,7 @@ docker build \
 子目录匹配按路径层级处理末尾分隔符及 `.` / `..`；支持 POSIX 绝对路径（区分大小写）、Windows 盘符和 UNC 共享路径（不区分大小写、兼容正反斜杠）。相对路径只精确匹配，不按服务进程目录推算，也不解析符号链接。该开关只保存在当前 DSH 实例，远程模式和中央离线时也可通过「仅保存本机采集」修改，不改变其他实例的范围。
 
 支持日期、补记、来源核对、编辑、导出、历史版本和持久化重试；日报数据独立存储，不混入知识文档。
-试用版升级会复用原 worklog/worklog.sqlite；部署时应先移除旧 dsh-worklog 捆绑注册，保留数据库，防止双重执行。
-
-### 早晨卡片、每日待办与周月报
-
-**欢迎页**（无会话时的鲸鱼 logo 上方）显示「早晨卡片」：
-
-- 卡片按 dsh-widgets 的卡片语言设计：白色/深色面、细边框、蓝色标题、环形完成率和大数字；
-- 卡片悬浮在视口中，可拖动标题栏移动；位置保存在本机，双击标题栏恢复默认位置；
-- 今日待办按工作 / 生活列出，可直接勾选完成或快速添加一条；
-- 每分钟自动刷新，不阻塞对话；
-- 通过 DSH 公共工具接口读取会议助手状态，显示「会议助手正在听」「会议助手 · 会议标题」「会议助手已就绪」或「会议助手未连接」；
-- 卡片读取失败只在卡片内提示，不影响欢迎页与对话。
-
-工作日报页保留日报正文、来源核对、编辑、导出、历史版本和「优化排版」。
-
-待办相关规则：
-
-- 待办按日期保存在工作记录数据库，切换日期不会丢失；
-- 生成日报时会把当天待办一并发给模型，在日报中保留「今日待办」分组、完成状态和承接日期。
-
-日报操作栏的「周报」「月报」按当前日期所在周/月汇总每日日报和待办：
-
-- 工作记录未显式配置模型时，默认使用 DSH `agentDefaultModel` 当前选择（通常是云端模型）；
-- 云端模型生成失败或不可用时自动回退为本地 Markdown 汇总，并在弹窗说明原因；
-- 周报/月报不写回日报，可在弹窗中复制。
-
-### 知识库更新触发自动日报
-
-知识库每次自动写入都会同步成为当天日报的素材，并在后台实时刷新日报：
-
-- 触发来源包括对话知识回写（新建或更新知识文档）、制品自动归档（新增或更新制品文档），以及管理台手工编辑等任何内容变化；手工变更由后台巡检（约 1 分钟）发现并纳入。
-- 每次写入记录一条 `知识库更新：<文档标题>` 来源，包含知识库、文档、动作、项目、会话与轮次，可在日报「来源」中核对或排除。
-- 连续多次写入按 8 秒防抖合并为一次后台整理，由原有整理队列调用模型生成/更新当天日报；页面可查看进度，失败沿用既有重试策略。
-- 手工编辑过的日报不会被自动覆盖，自动整理检测到手工正文后跳过本次刷新；可在日报中手动重新整理。
-- 首次触发时会为该写入所在项目开启采集并加入项目范围：原有选择范围保持不变，仅追加该项目；若日报采集原本关闭，则同时启用每日生成（默认 23:00，沿用日报设置中的时区与模型）。
-- 远程中央模式下，知识库更新作为来源进入上传队列，由中央按自己的整理配置生成；本机不运行生成队列。
-- 可用插件配置 `worklogAutoUpdateEnabled: false` 关闭「知识库更新 → 日报」联动；关闭后日报仍可按原有手动/定时方式使用。
+试用版升级会复用原 worklog/worklog.sqlite；部署时应先移除旧 dsh-worklog bundle 注册，保留数据库，防止双重执行。
 
 ### 中央统一日报
 

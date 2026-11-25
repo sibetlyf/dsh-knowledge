@@ -52,6 +52,16 @@ try {
   })
   await page.locator('.ProseMirror').waitFor()
   await verifySelectionMaterial(page)
+  await page.setViewportSize({ width: 1440, height: 850 })
+  const sidebarLeft = (await page.locator('.sidebar').boundingBox()).x
+  await page.locator('.pane-toggle-button[data-pane="main"]').click()
+  await page.waitForFunction(() => Math.abs(document.querySelector('.main').getBoundingClientRect().x - 8) < 0.1)
+  const collapsedMain = await page.locator('.main').boundingBox()
+  assert.equal(collapsedMain.x, sidebarLeft, 'collapsed panel must align with sidebar outer edge')
+  assert.equal(1440 - collapsedMain.x - collapsedMain.width, sidebarLeft, 'collapsed gutters must be symmetric')
+  await page.locator('.pane-toggle-button[data-pane="main"]').click()
+
+  await page.setViewportSize({ width: 1280, height: 850 })
   // Exercise ordinary motion, not only the accessibility override.
   await page.emulateMedia({ reducedMotion: 'no-preference' })
   await page.evaluate(() => { window.resizeEditor = document.querySelector('.ProseMirror') })
@@ -75,6 +85,18 @@ try {
     await page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))))
     assert.ok(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth + 1), 'horizontal page overflow')
     if (width === 375) assert.equal(await page.locator('.notes-editor-outline').evaluate(node => getComputedStyle(node).backgroundColor), 'rgb(244, 244, 244)', 'mobile outline must occlude the document')
+    const directoryLayout = await page.locator('.notes-browser').evaluate(node => {
+      const search = node.querySelector('.notes-search').getBoundingClientRect()
+      const tree = node.querySelector('.notes-tree').getBoundingClientRect()
+      const buttons = [...node.querySelectorAll('.notes-browser-actions .button')]
+      const bounds = node.getBoundingClientRect()
+      return { gap: tree.top - search.bottom, searchHeight: search.height, treeHeight: tree.height,
+        clipped: buttons.some(button => button.getBoundingClientRect().right > bounds.right + 1) }
+    })
+    assert.ok(directoryLayout.searchHeight < 60 && directoryLayout.gap < 12 && directoryLayout.treeHeight > 80,
+      `${width}: directory pushed below search: ${JSON.stringify(directoryLayout)}`)
+    assert.equal(directoryLayout.clipped, false, `${width}: directory actions clipped`)
+    assert.equal(await page.getByRole('button', { name: '会话指令', exact: true }).count(), 0)
     const toolbar = page.locator('.notes-document-toolbar')
     assert.equal(await page.locator('.notes-document-scroll').evaluate(node => getComputedStyle(node).backgroundColor),
       scheme === 'dark' ? 'rgba(0, 0, 0, 0.08)' : 'rgba(255, 255, 255, 0.12)', 'reading tint must follow the color scheme')

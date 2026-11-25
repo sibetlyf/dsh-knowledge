@@ -1,8 +1,7 @@
-import { useCallback, useEffect, useRef, useState, type FormEvent } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
+import { createConnectionClient, ConnectionRequestError, type KnowledgeConnectionView } from './connection-client.js'
 import { WritebackStatusClient } from './writeback/status-client.js'
 import { createNoteMentionSource } from './note-mention-source.js'
-import { createKnowledgeBaseMentionSource } from './knowledge-base-mention-source.js'
-import { createFolderImportSource } from './folder-import-source.js'
 import type {} from '@deepseek-ai/dsh-client-ui-input-trigger/client'
 import { observeWritebackVisibility } from './writeback/status-visibility.js'
 import { subscribeWritebackChanges } from '../web/writeback-live.js'
@@ -22,10 +21,8 @@ import { activatePluginWorkspace, observePluginWorkspace } from './workspace-own
 // DSH 0.1.7 renamed size-suffixed icon exports to weight-suffixed ones;
 // aliases keep every call site (and the contract tests) on legacy names.
 import {
-  BrandWordmark,
   IconChevronLeftOutlineRegular as IconChevronLeftOutline14,
   IconDataOutlineRegular as IconDataOutline16,
-  IconFolderOpenOutlineRegular as IconFolderOpenOutline16,
   IconPanelLeftOutlineRegular as IconPanelLeftOutline16,
 } from '@deepseek-ai/dsh-client-ui-primitives'
 import { HeroMorningCard } from './morning-card.js'
@@ -35,6 +32,7 @@ import { supportsDockedPanels } from './docked-panel-compat.js'
 import cssText from './client.css'
 import { settingsSurfaceCss } from './settings-surface.js'
 import { registerMainPanel } from './main-panel-compat.js'
+import { installCitationLinks } from './citation-links.js'
 import activityCss from './knowledge-activity.css'
 import { createKnowledgeActivityController, type KnowledgeActivityController } from './knowledge-activity-controller.js'
 import {
@@ -44,22 +42,11 @@ import {
   type ThemeSnapshotLike,
 } from './theme-bridge.js'
 
-const PLUGIN_ID = 'dsh-knowledge'
+const PLUGIN_ID = '@lemoncat7/dsh-knowledge'
 const STYLE_ID = `${PLUGIN_ID}/client`
 
 type SidebarActionProps = PropsRuntime<'sidebar.footer.action'>
 type ConversationSlotProps = PropsRuntime<'conversation'>
-
-interface KnowledgeConnectionView {
-  backend: 'local' | 'remote'
-  remoteUrl?: string
-  remoteTimeoutMs: number
-  tokenConfigured: boolean
-  canSwitchRemote: boolean
-  writable: boolean
-  managementAvailable: boolean
-  managementPath?: string
-}
 
 export interface KnowledgeWorkspaceController {
   isOpen(): boolean
@@ -75,11 +62,11 @@ export type KnowledgeDocumentTarget =
   | { view?: 'entries'; knowledgeBaseId: string; documentId: string }
   | { view: 'notes'; noteId?: string }
   | { view: 'writeback'; sessionId: string }
-  | { view: 'files'; folderImport?: number }
+  | { view: 'citation'; citation: string }
 
 
-const CONNECTION_CONTROL_PATH = '/knowledge-control/v1/connection'
-let cachedConnectionView: KnowledgeConnectionView | undefined
+const connectionClient = createConnectionClient()
+const requestConnection = connectionClient.request
 
 /** Cordis services needed by the browser half. */
 export const inject = ['slots', 'theme', 'layout', 'sessions']
@@ -90,15 +77,11 @@ export function apply(ctx: ClientContext): void {
   const docked = supportsDockedPanels(ctx)
   let activity: KnowledgeActivityController | undefined
   const workspace = createKnowledgeWorkspaceController(ctx, () => { if (!docked) activity?.close(undefined, true) })
+  ctx.effect(() => installCitationLinks(citation => workspace.openDocument({ view: 'citation', citation: JSON.stringify(citation) })), 'dsh-knowledge: inline source navigation')
   ctx.inject(['inputTriggers'], scoped => {
     scoped.effect(() => scoped.inputTriggers.registerSource(createNoteMentionSource(
       noteId => workspace.openDocument({ view: 'notes', noteId }),
     )), 'dsh-knowledge: @ note documents')
-    scoped.effect(() => scoped.inputTriggers.registerSource(createKnowledgeBaseMentionSource()),
-      'dsh-knowledge: @ knowledge bases')
-    scoped.effect(() => scoped.inputTriggers.registerSource(createFolderImportSource(
-      () => { window.setTimeout(() => workspace.openDocument({ view: 'files', folderImport: Date.now() }), 0) },
-    )), 'dsh-knowledge: @ folder import')
   })
   activity = createKnowledgeActivityController(ctx, {
     beforeOpen: () => { workspace.close(); if (!docked) activatePluginWorkspace(PLUGIN_ID) },
@@ -109,7 +92,7 @@ export function apply(ctx: ClientContext): void {
   ctx.slots.inject('sidebar.footer.action', () => ctx.slots.register({
     name: 'sidebar.footer.action',
     id: 'knowledge',
-    order: -10,
+    order: 21, // Immediately after the appearance entry (order 20).
   }, props => <KnowledgeLauncher {...props} workspace={workspace} activity={activity!} docked={supportsDockedPanels(ctx)} />))
 
   // DSH 0.1.7 retired `settings.plugin.item`; `settings.plugins.tab` exists on
@@ -120,100 +103,20 @@ export function apply(ctx: ClientContext): void {
     order: 20,
     label: () => '知识库',
   }, KnowledgeConnectionCard))
+  ctx.slots.inject('settings.plugins.tab', () => ctx.slots.register({
+    name: 'settings.plugins.tab',
+    id: 'knowledge-tencent-docs',
+    order: 21,
+    label: () => '腾讯文档',
+  }, TencentDocsSettings))
 
   ctx.slots.inject('conversation.chat.turnTail', () => ctx.slots.register({
     name: 'conversation.chat.turnTail',
     id: 'knowledge-writeback-status',
   }, props => <KnowledgeWritebackStatus sessionId={String(props.sessionId)} turn={props.turn.turn} workspace={workspace} />))
-  ctx.slots.inject('conversation.input.left', () => ctx.slots.register({
-    name: 'conversation.input.left',
-    id: 'knowledge-folder-import',
-    order: 20,
-  }, () => <KnowledgeFolderEntry workspace={workspace} />))
   ctx.slots.inject('conversation.hero.brand.mark', () => ctx.slots.register({
     name: 'conversation.hero.brand.mark',
   }, props => <HeroMorningCard {...props} />))
-}
-
-interface MorningTodo {
-  id: string
-  text: string
-  cat: 'work' | 'life'
-  done: boolean
-  carriedFrom?: string
-}
-
-interface MorningResponse {
-  day: string
-  brief?: {
-    counts?: { total?: number; done?: number; unfinished?: number }
-    todos?: MorningTodo[]
-    yesterday?: string
-  }
-  meeting?: { available: boolean; tool?: string; summary?: string; status?: unknown; error?: string }
-}
-
-function LegacyMorningCard({ size = 34, className }: { size?: number; className?: string }) {
-  const [data, setData] = useState<MorningResponse>()
-  const [error, setError] = useState('')
-  const [draft, setDraft] = useState('')
-  const [cat, setCat] = useState<'work' | 'life'>('work')
-  const load = useCallback(async () => {
-    try {
-      const response = await fetch('/knowledge-local/v1/morning', {
-        credentials: 'same-origin',
-        headers: { 'x-dsh-knowledge-client': 'management-web' },
-      })
-      if (!response.ok) throw new Error(`HTTP ${response.status}`)
-      setData(await response.json() as MorningResponse)
-      setError('')
-    } catch (reason) {
-      setError(reason instanceof Error ? reason.message : String(reason))
-    }
-  }, [])
-  useEffect(() => {
-    void load()
-    const timer = window.setInterval(() => { void load() }, 60_000)
-    return () => window.clearInterval(timer)
-  }, [load])
-  const todos = data?.brief?.todos ?? []
-  const meeting = data?.meeting
-  const meetingText = !meeting?.available
-    ? '会议助手未连接'
-    : meeting.summary || '会议助手已就绪'
-  const mutate = async (body: Record<string, unknown>) => {
-    const response = await fetch('/worklog-control/v1/todos', {
-      method: 'POST',
-      credentials: 'same-origin',
-      headers: { 'content-type': 'application/json', 'x-dsh-worklog-client': 'workspace' },
-      body: JSON.stringify({ ...body, day: data?.day }),
-    })
-    if (!response.ok) throw new Error(`HTTP ${response.status}`)
-    await load()
-  }
-  const add = async (event: FormEvent) => {
-    event.preventDefault()
-    if (!draft.trim()) return
-    try { await mutate({ action: 'add', text: draft.trim(), cat }); setDraft('') } catch (reason) { setError(reason instanceof Error ? reason.message : String(reason)) }
-  }
-  return <span className="dsh-knowledge-morning-wrap">
-    <section className="dsh-knowledge-morning-card" aria-label="早晨卡片">
-      <header><strong>早安</strong><span>{data?.day || '今天'}</span></header>
-      <p className="dsh-knowledge-morning-meta">{error ? `早晨卡片暂不可用 · ${error}` : meetingText}</p>
-      {data?.brief?.counts ? <p className="dsh-knowledge-morning-counts">{data.brief.counts.unfinished ?? 0} 项待办 · {data.brief.counts.done ?? 0} 项完成</p> : null}
-      {todos.length > 0 ? <ul className="dsh-knowledge-morning-todos">
-        {todos.slice(0, 5).map(todo => <li key={todo.id} className={todo.done ? 'is-done' : ''}>
-          <label><input type="checkbox" checked={todo.done} onChange={() => { void mutate({ action: 'toggle', id: todo.id }).catch(reason => setError(String(reason))) }} /><span>{todo.text}</span></label>
-        </li>)}
-      </ul> : <p className="dsh-knowledge-morning-empty">今天还没有待办</p>}
-      <form className="dsh-knowledge-morning-add" onSubmit={e => { void add(e) }}>
-        <select value={cat} onChange={event => setCat(event.target.value === 'life' ? 'life' : 'work')} aria-label="待办分类"><option value="work">工作</option><option value="life">生活</option></select>
-        <input value={draft} onChange={event => setDraft(event.target.value)} maxLength={500} placeholder="加一件今天要做的事" aria-label="新待办" />
-        <button type="submit" disabled={!draft.trim()}>添加</button>
-      </form>
-    </section>
-    <span className="dsh-knowledge-morning-brand" aria-hidden="true"><BrandWordmark size={size} includeMark className={className} /></span>
-  </span>
 }
 
 function KnowledgeWritebackStatus({
@@ -252,7 +155,7 @@ function KnowledgeWritebackStatus({
   return <div ref={container} className="dsh-knowledge-writeback-notice" data-status={state.status}>
     <div className="dsh-knowledge-writeback-summary" role="status" aria-atomic="true">
       <span>知识库回写</span><strong>@lemoncat7/dsh-knowledge</strong><span title={state.error}>{summary}</span>
-      {state.status === 'failed' && state.retryable && <button type="button" disabled={retrying} onClick={() => { void retry() }}>{retrying ? '重试中…' : '重试'}</button>}
+      {(state.buffered || state.status === 'failed' && state.retryable) && <button type="button" disabled={retrying} onClick={() => { void retry() }}>{retrying ? '处理中…' : state.buffered ? '立即回写' : '重试'}</button>}
       {state.status !== 'completed' && <button type="button" onClick={() => workspace.openDocument({ view: 'writeback', sessionId })}>管理回写</button>}
     </div>
     {destinations.length > 0 && <ul className="dsh-knowledge-writeback-destinations" aria-label="回写目标">
@@ -321,16 +224,77 @@ function createKnowledgeWorkspaceController(client: ClientContext, beforeOpen: (
   return controller
 }
 
-function KnowledgeFolderEntry({ workspace }: { workspace: KnowledgeWorkspaceController }) {
-  return <button
-    type="button"
-    className="dsh-knowledge-folder-entry"
-    aria-label="导入文件夹到知识库"
-    title="导入文件夹"
-    onClick={() => workspace.openDocument({ view: 'files', folderImport: Date.now() })}
-  >
-    <IconFolderOpenOutline16 size={16} />
-  </button>
+function TencentDocsSettings() {
+  const [status, setStatus] = useState<{
+    connected?: boolean
+    tools?: string[]
+    token?: { configured?: boolean; source?: string; fingerprint?: string; overriddenByEnv?: boolean }
+    error?: string
+  }>()
+  const [token, setToken] = useState('')
+  const [busy, setBusy] = useState(false)
+  const [message, setMessage] = useState('')
+  const load = useCallback(async () => {
+    try {
+      const response = await fetch('/knowledge-local/v1/tencent-docs/status', {
+        credentials: 'same-origin',
+        headers: { 'x-dsh-knowledge-client': 'management-web' },
+      })
+      const body = await response.json()
+      setStatus(body)
+      setMessage('')
+    } catch (error) {
+      setStatus({ error: error instanceof Error ? error.message : String(error) })
+    }
+  }, [])
+  useEffect(() => { void load() }, [load])
+  const save = async () => {
+    if (!token.trim()) return
+    setBusy(true)
+    try {
+      const response = await fetch('/knowledge-local/v1/tencent-docs/token', {
+        method: 'POST', credentials: 'same-origin',
+        headers: { 'content-type': 'application/json', 'x-dsh-knowledge-client': 'management-web' },
+        body: JSON.stringify({ token: token.trim() }),
+      })
+      const body = await response.json()
+      if (!response.ok) throw new Error(body.error || `HTTP ${response.status}`)
+      setStatus(body); setToken(''); setMessage('已保存到本地 vault，桥插件会自动重连。')
+    } catch (error) { setMessage(error instanceof Error ? error.message : String(error)) } finally { setBusy(false) }
+  }
+  const clear = async () => {
+    setBusy(true)
+    try {
+      const response = await fetch('/knowledge-local/v1/tencent-docs/token', {
+        method: 'DELETE', credentials: 'same-origin',
+        headers: { 'x-dsh-knowledge-client': 'management-web' },
+      })
+      const body = await response.json()
+      if (!response.ok) throw new Error(body.error || `HTTP ${response.status}`)
+      setStatus(body); setMessage('已清除腾讯文档 token。')
+    } catch (error) { setMessage(error instanceof Error ? error.message : String(error)) } finally { setBusy(false) }
+  }
+  const tokenState = status?.token
+  return <section className="dsh-knowledge-settings-card">
+    <header><h3>腾讯文档</h3><p>导入腾讯文档到知识库，或把知识文档发布回腾讯文档。凭据只保存在本机 vault，接口不返回明文。</p></header>
+    <div className="dsh-knowledge-remote-fields">
+      <label>space_secret
+        <input type="password" value={token} onChange={event => setToken(event.target.value)} placeholder="32 位 space_secret" autoComplete="off" spellCheck={false} />
+      </label>
+      <p className="dsh-knowledge-hint">
+        {status?.error ? `状态读取失败：${status.error}` : tokenState?.configured
+          ? `已配置 · 来源 ${tokenState.source === 'env' ? '环境变量' : 'vault'} · 指纹 ${tokenState.fingerprint}${tokenState.overriddenByEnv ? '（环境变量覆盖）' : ''}`
+          : '尚未配置。环境变量 TDOC_OAUTH_ACCESS_TOKEN 优先。'}
+      </p>
+      {status?.tools?.length ? <p className="dsh-knowledge-hint">已检测到工具：{status.tools.join('、')}</p> : null}
+    </div>
+    {message ? <p className="dsh-knowledge-hint" role="status">{message}</p> : null}
+    <div className="dsh-knowledge-settings-actions">
+      <button type="button" disabled={busy || !token.trim()} onClick={() => { void save() }}>{busy ? '保存中…' : '保存 token'}</button>
+      {tokenState?.configured ? <button type="button" disabled={busy} onClick={() => { void clear() }}>清除</button> : null}
+      <button type="button" disabled={busy} onClick={() => { void load() }}>刷新状态</button>
+    </div>
+  </section>
 }
 
 function KnowledgeConnectionCard() {
@@ -351,6 +315,7 @@ function KnowledgeConnectionCard() {
     setLoadError('')
     try {
       const value = await requestConnection('GET', undefined, signal)
+      if (signal?.aborted) return
       setCurrent(value)
       setLoadState('ready')
     } catch (error) {
@@ -486,45 +451,6 @@ function connectionErrorMessage(error: unknown): string {
   return message || '连接配置操作失败，请检查地址、令牌和 DSH 日志。'
 }
 
-async function requestConnection(
-  method: 'GET' | 'PUT',
-  body?: Record<string, unknown>,
-  signal?: AbortSignal,
-): Promise<KnowledgeConnectionView> {
-  const response = await fetch(CONNECTION_CONTROL_PATH, {
-    method,
-    headers: { accept: 'application/json', ...body === undefined ? {} : { 'content-type': 'application/json' } },
-    ...body === undefined ? {} : { body: JSON.stringify(body) },
-    ...signal === undefined ? {} : { signal },
-  })
-  const payload = await response.json().catch(() => undefined) as unknown
-  if (!response.ok) {
-    const message = payload !== null && typeof payload === 'object' && typeof (payload as { error?: unknown }).error === 'string'
-      ? (payload as { error: string }).error
-      : `连接接口返回 HTTP ${response.status}`
-    throw new Error(message)
-  }
-  if (!isConnectionView(payload)) throw new Error('插件连接接口返回了无效数据。')
-  cachedConnectionView = payload
-  return payload
-}
-
-function isConnectionView(value: unknown): value is KnowledgeConnectionView {
-  if (value === null || typeof value !== 'object') return false
-  const item = value as Partial<KnowledgeConnectionView>
-  return (item.backend === 'local' || item.backend === 'remote')
-    && Number.isInteger(item.remoteTimeoutMs)
-    && typeof item.tokenConfigured === 'boolean'
-    && typeof item.canSwitchRemote === 'boolean'
-    && typeof item.writable === 'boolean'
-    && typeof item.managementAvailable === 'boolean'
-    && (!item.managementAvailable || isManagementPath(item.managementPath))
-}
-
-function isManagementPath(value: unknown): value is string {
-  return typeof value === 'string' && value.startsWith('/') && !value.startsWith('//')
-}
-
 function KnowledgeLauncher({ wide, useSessions, workspace, activity, docked }: SidebarActionProps & { workspace: KnowledgeWorkspaceController; activity: KnowledgeActivityController; docked: boolean }) {
   const [open, setOpen] = useState(workspace.isOpen())
   const currentSessionId = useSessions((state: SessionListState) => availableActivitySession(state, docked))
@@ -573,6 +499,7 @@ function KnowledgeWorkspace({
   client,
   workspace,
 }: ConversationSlotProps & { client: ClientContext; workspace: KnowledgeWorkspaceController }) {
+  const cachedConnectionView = connectionClient.peek()
   const cachedManagementPath = cachedConnectionView?.managementAvailable ? cachedConnectionView.managementPath : undefined
   const [panelState, setPanelState] = useState<'loading' | 'ready' | 'unavailable' | 'error'>(cachedConnectionView === undefined ? 'loading' : cachedManagementPath === undefined ? 'unavailable' : 'ready')
   const [managementPath, setManagementPath] = useState<string | undefined>(cachedManagementPath)
@@ -584,12 +511,19 @@ function KnowledgeWorkspace({
   const knowledgeUrl = managementPath === undefined ? undefined : knowledgePanelUrl(managementPath, sessionId, projectId, target)
   const frame = useRef<HTMLIFrameElement | null>(null)
   const themeFrame = useRef(0)
+  const connectionRequest = useRef<AbortController | null>(null)
+  const managementPathRef = useRef(managementPath)
+  managementPathRef.current = managementPath
 
   const loadManagement = useCallback(async (background = false): Promise<void> => {
+    connectionRequest.current?.abort()
+    const controller = new AbortController()
+    connectionRequest.current = controller
     if (!background) setPanelState('loading')
     setPanelError('')
     try {
-      const connection = await requestConnection('GET')
+      const connection = await requestConnection('GET', undefined, controller.signal)
+      if (controller.signal.aborted) return
       if (!connection.managementAvailable || connection.managementPath === undefined) {
         setManagementPath(undefined)
         setPanelState('unavailable')
@@ -598,14 +532,30 @@ function KnowledgeWorkspace({
       setManagementPath(connection.managementPath)
       setPanelState('ready')
     } catch (error) {
+      if (controller.signal.aborted) return
+      // A temporary metadata outage must not destroy an editor already on screen.
+      // Access revocation and a removed endpoint must still fail closed.
+      if (background && managementPathRef.current !== undefined
+        && !(error instanceof ConnectionRequestError && [401, 403, 404].includes(error.status))) {
+        setPanelError(connectionErrorMessage(error))
+        return
+      }
       setManagementPath(undefined)
       setPanelError(connectionErrorMessage(error))
       setPanelState('error')
+    } finally {
+      if (connectionRequest.current === controller) connectionRequest.current = null
     }
   }, [])
 
   useEffect(() => {
-    void loadManagement(cachedConnectionView !== undefined)
+    void loadManagement(managementPathRef.current !== undefined)
+    const reconnect = (): void => { void loadManagement(managementPathRef.current !== undefined) }
+    window.addEventListener('online', reconnect)
+    return () => {
+      connectionRequest.current?.abort()
+      window.removeEventListener('online', reconnect)
+    }
   }, [loadManagement])
 
   useEffect(() => workspace.subscribe(() => { setTarget(workspace.currentTarget()) }), [workspace])
@@ -661,6 +611,10 @@ function KnowledgeWorkspace({
           <span><h2 id="dsh-knowledge-workspace-title">知识库</h2><p>文档、审核、挂载与访问管理</p></span>
         </div>
       </header>
+      {panelState === 'ready' && panelError && <div className="dsh-knowledge-connection-warning" role="status">
+        <span>连接复查暂未完成，当前页面已保留。{panelError}</span>
+        <button type="button" onClick={() => { void loadManagement(true) }}>重试</button>
+      </div>}
       {panelState === 'ready' && knowledgeUrl !== undefined
         ? <iframe ref={frame} className="dsh-knowledge-frame" src={knowledgeUrl} title="知识库管理台" onLoad={sendTheme} />
         : <div className="dsh-knowledge-panel-state" role={panelState === 'error' ? 'alert' : 'status'} aria-live="polite">
@@ -684,15 +638,14 @@ function knowledgePanelUrl(managementPath: string, sessionId?: string, projectId
   if (sessionId !== undefined) params.set('sessionId', sessionId)
   if (projectId !== undefined) params.set('projectId', projectId)
   if (target !== undefined) {
-    if (target.view === 'writeback') {
+    if (target.view === 'citation') {
+      params.set('citation', target.citation)
+    } else if (target.view === 'writeback') {
       params.set('view', 'writeback')
       params.set('sessionId', target.sessionId)
     } else if (target.view === 'notes') {
       params.set('view', 'notes')
       if (target.noteId !== undefined) params.set('noteId', target.noteId)
-    } else if (target.view === 'files') {
-      params.set('view', 'files')
-      if (target.folderImport !== undefined) params.set('importFolder', String(target.folderImport))
     } else {
       params.set('knowledgeBaseId', target.knowledgeBaseId)
       params.set('documentId', target.documentId)

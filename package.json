@@ -1,6 +1,6 @@
 {
-  "name": "dsh-knowledge",
-  "version": "2.15.14",
+  "name": "@lemoncat7/dsh-knowledge",
+  "version": "2.22.10-custom.1",
   "description": "Local and remote knowledge bases for DeepSeek Harness, with scoped recall, controlled write-back, and a Web management console",
   "keywords": [
     "deepseek-harness",
@@ -26,9 +26,15 @@
       "default": "./lib/client.js"
     },
     "./cordis.patch.yml": "./cordis.patch.yml",
-    "./package.json": "./package.json"
+    "./package.json": "./package.json",
+    "./calendar": {
+      "types": "./lib/calendar-protocol.d.ts",
+      "default": "./lib/calendar-protocol.js"
+    }
   },
   "files": [
+    "docs/releases/2.15.5.md",
+    "docs/recall-feedback.md",
     "docs/releases/2.13.7.md",
     "docs/releases/2.13.6.md",
     "docs/releases/2.13.3.md",
@@ -47,7 +53,21 @@
     "LICENSE",
     "docs/releases/2.11.2.md",
     "docs/dsh-021-compatibility.md",
-    "docs/releases/2.14.1.md"
+    "docs/releases/2.14.1.md",
+    "docs/compatibility-0.2.2-rc.1.md",
+    "docs/compatibility-0.2.2-rc.2.md",
+    "docs/releases/2.19.5.md",
+    "docs/host-compatibility-policy.md",
+    "docs/releases/2.19.6.md",
+    "docs/releases/2.19.7.md",
+    "docs/releases/2.19.8.md",
+    "docs/releases/2.20.0.md",
+    "docs/releases/2.21.0.md",
+    "docs/releases/2.21.1.md",
+    "docs/releases/2.21.2.md",
+    "docs/releases/2.21.3.md",
+    "docs/work-calendar.md",
+    "docs/releases/2.21.10.md"
   ],
   "dsh": {
     "bundle": {
@@ -72,42 +92,47 @@
     }
   },
   "engines": {
-    "node": "^22.19.0 || >=24.0.0"
+    "node": ">=24.9.0"
   },
   "scripts": {
     "build": "node --check web/app.js && tsc -p tsconfig.json && node scripts/build-client.mjs",
     "clean": "node -e \"require('node:fs').rmSync('lib', { recursive: true, force: true })\"",
     "prepare": "npm run clean && npm run build",
     "test": "npm run build && node --test test/*.test.mjs",
+    "eval:retrieval": "npm run build && node scripts/evaluate-retrieval.mjs",
     "pack:check": "npm pack --dry-run"
   },
   "dependencies": {
-    "@deepseek-ai/schemastery": "~3.18.5",
+    "@deepseek-ai/schemastery": "~3.19.0",
+    "ajv": "^8.20.0",
     "marked": "^18.0.10",
     "yaml": "^2.9.0"
   },
   "peerDependencies": {
-    "@deepseek-ai/cordis": "^4.0.5",
-    "@deepseek-ai/dsh-agent": ">=0.2.1-alpha.1",
-    "@deepseek-ai/dsh-client-ui-renderer": ">=0.2.1-alpha.1",
-    "@deepseek-ai/dsh-settings": ">=0.2.1-alpha.1",
-    "@deepseek-ai/dsh-tools": ">=0.2.1-alpha.1"
+    "@deepseek-ai/cordis": "^4.1.0",
+    "@deepseek-ai/dsh-agent": "*",
+    "@deepseek-ai/dsh-client-ui-renderer": "*",
+    "@deepseek-ai/dsh-settings": "*",
+    "@deepseek-ai/dsh-tools": "*"
   },
   "devDependencies": {
-    "@deepseek-ai/cordis": "~4.0.5",
-    "@deepseek-ai/dsh-api-session-controller": "0.2.1-rc.2",
-    "@deepseek-ai/dsh-client-ui-chat": "0.2.1-rc.2",
-    "@deepseek-ai/dsh-client-ui-conversation": "0.2.1-rc.2",
-    "@deepseek-ai/dsh-client-ui-input-trigger": "0.2.1-rc.2",
-    "@deepseek-ai/dsh-client-ui-layout": "0.2.1-rc.2",
-    "@deepseek-ai/dsh-client-ui-primitives": "0.2.1-rc.2",
-    "@deepseek-ai/dsh-client-ui-renderer": "0.2.1-rc.2",
-    "@deepseek-ai/dsh-client-ui-session": "0.2.1-rc.2",
-    "@deepseek-ai/dsh-client-ui-settings": "0.2.1-rc.2",
-    "@deepseek-ai/dsh-client-ui-settings-plugins": "0.2.1-rc.2",
-    "@deepseek-ai/dsh-client-ui-sidebar": "0.2.1-rc.2",
-    "@deepseek-ai/dsh-client-ui-slots": "0.2.1-rc.2",
-    "@deepseek-ai/dsh-client-ui-theme": "0.2.1-rc.2",
+    "@deepseek-ai/cordis": "~4.1.0",
+    "@deepseek-ai/dsh-agent": "0.2.2-rc.1",
+    "@deepseek-ai/dsh-api-session-controller": "0.2.2-rc.1",
+    "@deepseek-ai/dsh-client-ui-chat": "0.2.2-rc.1",
+    "@deepseek-ai/dsh-client-ui-conversation": "0.2.2-rc.1",
+    "@deepseek-ai/dsh-client-ui-input-trigger": "0.2.2-rc.1",
+    "@deepseek-ai/dsh-client-ui-layout": "0.2.2-rc.1",
+    "@deepseek-ai/dsh-client-ui-primitives": "0.2.2-rc.1",
+    "@deepseek-ai/dsh-client-ui-renderer": "0.2.2-rc.1",
+    "@deepseek-ai/dsh-client-ui-session": "0.2.2-rc.1",
+    "@deepseek-ai/dsh-client-ui-settings": "0.2.2-rc.1",
+    "@deepseek-ai/dsh-client-ui-settings-plugins": "0.2.2-rc.1",
+    "@deepseek-ai/dsh-client-ui-sidebar": "0.2.2-rc.1",
+    "@deepseek-ai/dsh-client-ui-slots": "0.2.2-rc.1",
+    "@deepseek-ai/dsh-client-ui-theme": "0.2.2-rc.1",
+    "@deepseek-ai/dsh-settings": "0.2.2-rc.1",
+    "@deepseek-ai/dsh-tools": "0.2.2-rc.1",
     "@tiptap/core": "^3.30.5",
     "@tiptap/extension-document": "^3.30.5",
     "@tiptap/extension-image": "^3.30.5",
@@ -123,8 +148,10 @@
     "@types/react": "18.3.28",
     "dompurify": "^3.4.14",
     "esbuild": "^0.25.0",
+    "ical.js": "2.2.1",
     "react": "18.3.1",
     "react-dom": "18.3.1",
+    "saxes": "6.0.0",
     "typescript": "^5.9.3"
   },
   "publishConfig": {
@@ -132,10 +159,10 @@
   },
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/sibetlyf/dsh-knowledge.git"
+    "url": "git+https://github.com/lemoncat7/dsh-knowledge.git"
   },
   "bugs": {
-    "url": "https://github.com/sibetlyf/dsh-knowledge/issues"
+    "url": "https://github.com/lemoncat7/dsh-knowledge/issues"
   },
-  "homepage": "https://github.com/sibetlyf/dsh-knowledge#readme"
+  "homepage": "https://github.com/lemoncat7/dsh-knowledge#readme"
 }
