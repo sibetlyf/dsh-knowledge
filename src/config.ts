@@ -1,7 +1,9 @@
 import Schema from '@deepseek-ai/schemastery'
 import { isIP } from 'node:net'
+import { existsSync, realpathSync } from 'node:fs'
 import { homedir } from 'node:os'
-import { join } from 'node:path'
+import { join, parse } from 'node:path'
+import { fileURLToPath } from 'node:url'
 import { normalizeRemoteKnowledgeUrl } from './remote-url.js'
 
 export interface Config {
@@ -71,13 +73,16 @@ export interface ResolvedConfig extends Config {
 }
 
 export function resolveConfig(config: Config): ResolvedConfig {
-  const connectionPath = config.connectionPath ?? deriveConnectionPath(config.databasePath)
+  const preferred = defaultKnowledgeDirectory()
+  const databasePath = config.databasePath ?? (config.backend === 'local' ? join(preferred, 'knowledge.sqlite') : undefined)
+  const connectionPath = config.connectionPath ?? deriveConnectionPath(databasePath) ?? join(preferred, 'connection.json')
   const resolved: ResolvedConfig = {
     ...config,
+    ...databasePath === undefined ? {} : { databasePath },
     remoteTimeoutMs: config.remoteTimeoutMs ?? 10_000,
     ...connectionPath === undefined ? {} : { connectionPath },
-    writebackQueuePath: config.writebackQueuePath ?? (config.databasePath === ':memory:' ? ':memory:' : config.databasePath
-      ? `${config.databasePath}.writeback.sqlite` : connectionPath ? `${connectionPath}.writeback.sqlite` : join(homedir(), '.dsh', 'knowledge', 'writeback.sqlite')),
+    writebackQueuePath: config.writebackQueuePath ?? (databasePath === ':memory:' ? ':memory:' : databasePath
+      ? `${databasePath}.writeback.sqlite` : connectionPath ? `${connectionPath}.writeback.sqlite` : join(preferred, 'writeback.sqlite')),
     apiPrefix: normalizePrefix(config.apiPrefix ?? '/knowledge-api/v1'),
     exposeWeb: config.exposeWeb ?? true,
     webPath: normalizePrefix(config.webPath ?? '/knowledge'),
@@ -135,6 +140,32 @@ export function normalizeTrustedShareOrigins(values: readonly string[]): string[
 
 function deriveConnectionPath(databasePath: string | undefined): string | undefined {
   return databasePath === undefined || databasePath.trim().length === 0 ? undefined : `${databasePath}.connection.json`
+}
+
+/**
+ * Prefer the data directory that the pre-2.22 installation used.
+ *
+ * On Windows, resolve the plugin's real location so a plugin installed on a
+ * non-system drive keeps its database there; existing `dsh-knowledge`
+ * directories are also discovered. `DSH_KNOWLEDGE_HOME` overrides all.
+ */
+export function defaultKnowledgeDirectory(): string {
+  const override = process.env.DSH_KNOWLEDGE_HOME?.trim()
+  if (override !== undefined && override.length > 0) return override
+  if (process.platform === 'win32') {
+    try {
+      const root = parse(realpathSync.native(fileURLToPath(import.meta.url))).root
+      if (/^[A-Za-z]:[\\/]$/u.test(root) && !/^[cC]:[\\/]$/u.test(root)) return join(root, 'dsh-knowledge')
+    } catch {
+      // fall through to a drive scan or the DSH home
+    }
+    for (const letter of 'DEFGHIJKLMNOPQRSTUVWXYZ') {
+      const candidate = `${letter}:\\dsh-knowledge`
+      if (existsSync(candidate)) return candidate
+    }
+  }
+  const home = process.env.DSH_HOME?.trim() || join(homedir(), '.dsh')
+  return join(home, 'knowledge')
 }
 
 function normalizePrefix(value: string): string {
