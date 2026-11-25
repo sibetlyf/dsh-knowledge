@@ -51,7 +51,7 @@ export class KnowledgeShareStore {
   private async flush(): Promise<void> {
     await mkdir(dirname(this.path), { recursive: true })
     const tmp = `${this.path}.${randomUUID()}.tmp`
-    await writeFile(tmp, JSON.stringify(this.rows ?? [], null, 2), 'utf8')
+    await writeFile(tmp, JSON.stringify(this.rows ?? [], null, 2), { encoding: 'utf8', mode: 0o600 })
     await rename(tmp, this.path)
   }
 
