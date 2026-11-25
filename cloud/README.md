@@ -212,6 +212,64 @@ sudo systemctl status team-kb
 
 至少保留一个管理员；管理员不能停用自己。
 
+## 连接本地 DSH
+
+云端服务同时暴露 DSH 远程知识库协议：
+
+```text
+https://你的域名/knowledge-api/v1
+```
+
+本地 DSH 的「设置 → 插件 → 知识库连接」切换到远程，填入这个地址和 Token，点击「验证并连接」。每台 DSH 仍然使用自己的项目/会话挂载知识库。
+
+Token 生成：
+
+1. 云端管理员打开「成员与邀请」；
+2. 在「连接本地 DSH」里输入名称，生成 Token；
+3. Token 只显示一次，复制到本地 DSH；
+4. 不再使用就在同一处撤销。
+
+也可以直接调用 API：
+
+```bash
+curl -sS -X POST https://你的域名/api/admin/tokens \
+  -H "content-type: application/json" \
+  -b cookies.txt -H "x-csrf-token: ..." \
+  -d '{"name":"我的 DSH"}'
+```
+
+**远程地址必须是 HTTPS。** 当前如果只有 `http://www.cmjt.asia:8787`，本地 DSH 会拒绝非回环 HTTP。两种做法：
+
+- 用 Caddy 把域名映射到 8787 并上 HTTPS，然后使用 `https://www.cmjt.asia/knowledge-api/v1`；
+- 或不暴露 HTTP，给本地建 SSH 隧道，再把 DSH 地址填成回环地址：
+
+```bash
+ssh -N -L 8787:127.0.0.1:8787 用户@www.cmjt.asia
+```
+
+```text
+http://127.0.0.1:8787/knowledge-api/v1
+```
+
+`127.0.0.1` 是允许 HTTP 的测试地址；正式使用仍建议 HTTPS。
+
+### 本地 DSH 配置示例
+
+如果不用设置页，也可以直接写 profile 的 `cordis.patch.yml`：
+
+```yaml
+- id: knowledge
+  config:
+    backend: remote
+    remoteUrl: https://www.cmjt.asia/knowledge-api/v1
+    remoteToken: !!js process.env.DSH_KNOWLEDGE_REMOTE_TOKEN
+    extractionEnabled: true
+```
+
+把 Token 放进环境变量 `DSH_KNOWLEDGE_REMOTE_TOKEN`，不要把 Token 写进 Git。
+
+远程模式不会复制一份本地数据库；断网时无法召回或回写。网页端和 DSH 端看到的是同一个云端 `knowledge.sqlite`。
+
 ## 备份与恢复
 
 ```bash

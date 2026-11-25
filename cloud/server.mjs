@@ -4,6 +4,7 @@ import { createReadStream, existsSync, mkdirSync } from 'node:fs'
 import { join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { LocalKnowledgeProvider } from '../lib/local-provider.js'
+import { registerKnowledgeApi } from '../lib/api.js'
 import { renderSharedMarkdown } from '../lib/notes/share-markdown.js'
 import { TeamError, TeamStore } from './team-store.mjs'
 import { renderAppPage, renderErrorPage, renderInvitePage, renderLoginPage, renderSetupPage, roleLabel } from './views.mjs'
@@ -25,6 +26,19 @@ mkdirSync(dataDir, { recursive: true, mode: 0o700 })
 const team = new TeamStore(teamDbPath)
 const provider = new LocalKnowledgeProvider(kbDbPath)
 let closing = false
+
+// DSH 远程客户端使用的 Bearer API；团队网页自身的 Cookie/CSRF API 与它彼此独立。
+let remoteKnowledgeHandler
+const remoteApiContext = {
+  webServer: {
+    register(route) {
+      if (route.path === '/knowledge-api/v1') remoteKnowledgeHandler = route.handler
+      return () => { if (remoteKnowledgeHandler === route.handler) remoteKnowledgeHandler = undefined }
+    },
+  },
+  get() { return undefined },
+}
+registerKnowledgeApi(remoteApiContext, provider, '/knowledge-api/v1', { authMode: 'bearer' })
 
 function integerEnv(name, fallback, min, max) {
   const raw = process.env[name]
@@ -238,6 +252,12 @@ async function handle(req, res) {
   const path = url.pathname
 
   if (path === '/api/health') return sendJson(res, 200, { ok: true, service: 'team-knowledge' })
+
+  if (path === '/knowledge-api/v1' || path.startsWith('/knowledge-api/v1/')) {
+    if (remoteKnowledgeHandler === undefined) throw new HttpError(503, 'DSH 远程 API 尚未就绪')
+    await remoteKnowledgeHandler(req, res)
+    return
+  }
 
   // ---- auth pages ------------------------------------------------------------
   if (path === '/login' && method === 'GET') {
@@ -462,6 +482,29 @@ async function handle(req, res) {
   }
 
   // ---- admin -----------------------------------------------------------------
+  if (path === '/api/admin/tokens' && method === 'GET') {
+    requireRole(session, ['admin'])
+    return sendJson(res, 200, { tokens: provider.listApiTokens(), path: '/knowledge-api/v1' })
+  }
+
+  if (path === '/api/admin/tokens' && method === 'POST') {
+    requireRole(session, ['admin'])
+    const body = await readJson(req)
+    const name = String(body.name ?? '').trim() || 'DSH 本地客户端'
+    if (name.length > 100) throw new HttpError(400, 'Token 名称过长')
+    const created = provider.createApiToken(name, ['read', 'propose', 'write'])
+    team.audit(session.user.id, 'token.create', created.record.id, name)
+    return sendJson(res, 201, { token: created.token, record: created.record })
+  }
+
+  const tokenMatch = /^\/api\/admin\/tokens\/([a-f0-9-]{36})$/u.exec(path)
+  if (tokenMatch !== null && method === 'DELETE') {
+    requireRole(session, ['admin'])
+    provider.revokeApiToken(tokenMatch[1])
+    team.audit(session.user.id, 'token.revoke', tokenMatch[1])
+    return sendJson(res, 200, { ok: true })
+  }
+
   if (path === '/api/admin/users' && method === 'GET') {
     requireRole(session, ['admin'])
     return sendJson(res, 200, { users: team.listUsers(), invitePath: '/invite/' })

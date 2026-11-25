@@ -342,8 +342,11 @@ async function logout() {
 
 async function openAdmin() {
   try {
-    const result = await api('/api/admin/users')
-    state.admin = { open: true, users: result.users, error: '' }
+    const [userResult, tokenResult] = await Promise.all([
+      api('/api/admin/users'),
+      api('/api/admin/tokens'),
+    ])
+    state.admin = { open: true, users: userResult.users, tokens: tokenResult.tokens, error: '' }
     render()
   } catch (error) { toast(error.message, 'error') }
 }
@@ -387,6 +390,39 @@ function renderAdmin() {
         h('button', { type: 'button', class: 'btn primary', onClick: () => void navigator.clipboard.writeText(absolute).then(() => toast('邀请链接已复制')), text: '复制邀请链接' }))
     } catch (error) { toast(error.message, 'error') }
   }
+  const tokenName = h('input', { placeholder: '例如：我的 DSH', maxlength: '100' })
+  const tokenBox = h('div', { class: 'invite-box' })
+  const tokenRows = (state.admin.tokens ?? []).map(token => h('div', { class: 'savebar' },
+    h('span', { class: 'grow', text: `${token.name} · ${new Date(token.createdAt).toLocaleDateString()}${token.revokedAt ? ' · 已撤销' : ''}` }),
+    token.revokedAt ? null : h('button', {
+      type: 'button', class: 'btn danger', text: '撤销',
+      onClick: async () => {
+        try {
+          await api(`/api/admin/tokens/${encodeURIComponent(token.id)}`, { method: 'DELETE' })
+          state.admin.tokens = state.admin.tokens.filter(row => row.id !== token.id)
+          render()
+          toast('Token 已撤销')
+        } catch (error) { toast(error.message, 'error') }
+      },
+    })))
+  const createToken = async () => {
+    try {
+      const result = await api('/api/admin/tokens', { method: 'POST', body: JSON.stringify({ name: tokenName.value || 'DSH 本地客户端' }) })
+      const origin = location.origin
+      tokenBox.innerHTML = ''
+      tokenBox.append(
+        h('label', { class: 'note', text: '这个 Token 只显示一次；复制到本地 DSH 的远程知识库连接设置。' }),
+        h('input', { readonly: true, value: result.token, onFocus: event => event.currentTarget.select() }),
+        h('button', {
+          type: 'button', class: 'btn primary',
+          onClick: () => void navigator.clipboard.writeText(result.token).then(() => toast('Token 已复制')),
+          text: '复制 Token',
+        }),
+        h('label', { class: 'note', text: `远程地址：${origin}/knowledge-api/v1  ·  权限：读取、提出、写入` }),
+      )
+      state.admin.tokens = [result.record, ...(state.admin.tokens ?? [])]
+    } catch (error) { toast(error.message, 'error') }
+  }
   return h('div', { class: 'modal-backdrop', onClick: event => { if (event.target === event.currentTarget) close() } },
     h('div', { class: 'modal', role: 'dialog', 'aria-modal': 'true', 'aria-label': '成员与邀请' },
       h('div', { class: 'modal-head' }, h('h2', { text: '成员与邀请' }), h('button', { type: 'button', class: 'icon-btn', onClick: close, text: '关闭' })),
@@ -395,7 +431,14 @@ function renderAdmin() {
       h('div', { class: 'form-grid' },
         h('label', {}, '邀请角色', roleSelect),
         h('button', { type: 'button', class: 'btn primary', onClick: () => void invite(), text: '生成一次性邀请链接' })),
-      inviteBox))
+      inviteBox,
+      h('div', { class: 'modal-head', style: 'margin-top:18px' }, h('h2', { text: '连接本地 DSH' })),
+      h('p', { class: 'note', text: '本地 DSH 使用 Bearer Token 连接云端；Token 与网页登录密码不同。远程地址必须是 HTTPS，或通过 SSH 隧道映射到 127.0.0.1。' }),
+      h('div', { class: 'form-grid' },
+        h('label', {}, 'Token 名称', tokenName),
+        h('button', { type: 'button', class: 'btn', onClick: () => void createToken(), text: '生成 DSH Token' })),
+      tokenBox,
+      tokenRows.length > 0 ? h('div', { style: 'margin-top:12px' }, h('p', { class: 'note', text: '已签发的 Token' }), ...tokenRows) : null))
 }
 
 window.addEventListener('keydown', event => {
