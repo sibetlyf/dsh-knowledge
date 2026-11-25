@@ -5,6 +5,8 @@ import { createHash, randomBytes } from 'node:crypto'
 import { existsSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { apply as registerWorklog, type JournalRuntime } from './worklog-runtime.js'
+import { ArtifactArchiver } from './artifacts/archive.js'
+import { collectTurnArtifacts, lastAssistantRoute } from './artifacts/collect.js'
 import { assertKnowledgeBrowserRequest, LOCAL_MANAGEMENT_API_PREFIX, registerKnowledgeApi } from './api.js'
 import { registerKnowledgeActivityControl } from './activity-control.js'
 import { registerWritebackControl } from './writeback/control.js'
@@ -135,6 +137,23 @@ export function apply(ctx: Context, config: KnowledgeConfig): void {
     if (!journalRuntime) throw connectionError(503, '工作日报服务尚未就绪')
     return journalRuntime.browser(method, path, data, query)
   }
+  const artifactArchiver = resolved.databasePath !== undefined && resolved.databasePath !== ':memory:'
+    ? new ArtifactArchiver({
+        root: join(dirname(resolved.databasePath), 'artifacts'),
+        provider,
+        baseName: '制品归档',
+        extensions: ['*'],
+        excludePatterns: [],
+        maxFileBytes: 32 * 1024 * 1024,
+        maxContentChars: 46_000,
+        storeContent: false,
+        maxEntries: 20_000,
+        autoMount: true,
+        paperEnabled: true,
+        paperBaseName: '论文库',
+        logger: runtime.logger,
+      })
+    : undefined
 
   const coordinator = new ExtractionCoordinator(runtime, provider, resolved, () => (
     clientSettings.writebackProvider && clientSettings.writebackModel
@@ -205,6 +224,19 @@ export function apply(ctx: Context, config: KnowledgeConfig): void {
     if (!journalRuntime) throw connectionError(503, '工作日历服务尚未就绪')
     return journalRuntime.calendar(method,path,data,query,signal)
   })
+  if (artifactArchiver !== undefined) {
+    const archive = artifactArchiver
+    runtime.on('agent/turn-stopping', ({ agent, turn }) => {
+      const candidates = collectTurnArtifacts(agent.session, turn)
+      if (candidates.length === 0) return
+      void archive.ingest(candidates, {
+        sessionId: agent.session.id,
+        ...(agent.session.header.cwd === undefined ? {} : { cwd: agent.session.header.cwd }),
+        turn,
+        ...lastAssistantRoute(agent.session) === undefined ? {} : { route: lastAssistantRoute(agent.session)! },
+      }).catch(error => runtime.logger.warn(`dsh-knowledge: 制品归档失败: ${error instanceof Error ? error.message : String(error)}`))
+    })
+  }
   runtime.provide?.(KNOWLEDGE_TRACKING_SERVICE, createKnowledgeTrackingService(provider))
   runtime.provide?.(KNOWLEDGE_MOUNT_MANAGEMENT_SERVICE, createKnowledgeMountManagement(provider, () => providerRouter.revision))
   runtime.provide?.('dshKnowledgeNoteRecording', createNoteRecording(provider))

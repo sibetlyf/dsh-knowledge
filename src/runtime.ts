@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto'
 
-export interface TextBlockLike { type: string; text?: string }
+export interface TextBlockLike { type: string; text?: string; attachment?: unknown }
+export type ContentBlockLike = TextBlockLike
 
 export interface MessageLike {
   id: string
