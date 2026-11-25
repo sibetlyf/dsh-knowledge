@@ -30,6 +30,7 @@ export function nextBatch(payload) {
   const final = state.level > 0 && groups.length === 1
   const records = state.level ? [...new Set(group.flatMap(n => n.ids))].map(id => ({ id })) : group
   return { final, groups: groups.length, payload: { route: payload.route, records,
+    ...(Array.isArray(payload.todos) && payload.todos.length > 0 ? { todos: payload.todos } : {}),
     ...(state.level ? { material: group } : {}), partial: !final } }
 }
 export function finishBatch(payload, step, markdown) {

@@ -35,7 +35,7 @@ export async function complete(llm, payload, signal, instructions, material, max
 export async function generate(llm, payload, signal) {
   const context = referenceContext(payload)
   const instructions = system + (payload.partial ? '\n本次是分批整理：简洁提取有证据的事实、决定、交付和待办，保留准确依据编号，供后续合并；不要声称这是完整日报。' : '') + (payload.material ? '\n输入是各批已整理的摘要，合并去重为日报，保留本次短编号；没有证据的内容不能补写。' : '')
-  const material = !payload.material && Array.isArray(payload.todos) && payload.todos.length > 0
+  const material = Array.isArray(payload.todos) && payload.todos.length > 0
     ? { records: context.material, todos: payload.todos }
     : context.material
   const budgets = payload.partial ? [4000, 16000] : [32768, 65536]
