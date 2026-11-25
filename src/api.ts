@@ -17,6 +17,7 @@ import { renderKnowledgeSharePage } from './knowledge-share-page.js'
 import { renderKnowledgeBaseSharePage } from './knowledge-base-share-page.js'
 import { renderWorklogSharePage } from './worklog-share-page.js'
 import type { KnowledgeShareStore } from './knowledge-share.js'
+import type { CloudSyncControl } from './cloud-sync.js'
 import type { RecallUsage, RecallPreferencePatch, FrictionInput } from './recall-ranking.js'
 import type { RetrievalIndexScope } from './retrieval-index.js'
 
@@ -32,6 +33,7 @@ export interface KnowledgeApiOptions {
   worklogBrowser?: (method: string, path: string, data: Record<string, unknown>, query: URLSearchParams) => Promise<unknown>
   shareRequestPolicy?: () => NoteShareRequestPolicy
   knowledgeShares?: KnowledgeShareStore
+  cloudSync?: CloudSyncControl
   tencentDocs?: {
     status(signal?: AbortSignal): Promise<unknown>
     saveToken(token: string): Promise<unknown>
@@ -247,6 +249,31 @@ async function dispatch(
   }
 
   const actor = options.authMode === 'same-origin' ? authenticateSameOrigin(req) : authenticateBearer(provider, req)
+
+  if (segments[0] === 'cloud-sync' && options.cloudSync !== undefined) {
+    requirePermission(actor.permissions, 'admin')
+    if (method === 'GET' && segments.length === 1) return sendJson(res, 200, await options.cloudSync.status())
+    if (method === 'PUT' && segments.length === 1) {
+      const body = await readObject(req)
+      return sendJson(res, 200, await options.cloudSync.configure({
+        ...(typeof body.url === 'string' ? { url: body.url } : {}),
+        ...(typeof body.token === 'string' ? { token: body.token } : {}),
+        ...(typeof body.userName === 'string' ? { userName: body.userName } : {}),
+        ...(typeof body.autoSync === 'boolean' ? { autoSync: body.autoSync } : {}),
+        ...(typeof body.intervalMinutes === 'number' ? { intervalMinutes: body.intervalMinutes } : {}),
+        ...(typeof body.filesDir === 'string' ? { filesDir: body.filesDir } : {}),
+        ...(typeof body.filesOut === 'string' ? { filesOut: body.filesOut } : {}),
+        ...(typeof body.base === 'string' ? { base: body.base } : {}),
+      }))
+    }
+    if (method === 'POST' && segments.length === 2 && segments[1] === 'run') {
+      const body = await readObject(req)
+      const mode = body.mode
+      if (mode !== 'push' && mode !== 'pull' && mode !== 'sync') throw httpError(400, 'sync mode must be push, pull or sync')
+      return sendJson(res, 202, await options.cloudSync.run(mode))
+    }
+    throw httpError(404, 'cloud sync route was not found')
+  }
 
   if(options.authMode==='same-origin' && options.noteWorkspace && await handleNoteWorkspace(options.noteWorkspace,relative,url,req,res))return
 

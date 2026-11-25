@@ -109,6 +109,12 @@ export function apply(ctx: ClientContext): void {
     order: 21,
     label: () => '腾讯文档',
   }, TencentDocsSettings))
+  ctx.slots.inject('settings.plugins.tab', () => ctx.slots.register({
+    name: 'settings.plugins.tab',
+    id: 'knowledge-cloud-sync',
+    order: 22,
+    label: () => '云端同步',
+  }, CloudSyncSettings))
 
   ctx.slots.inject('conversation.chat.turnTail', () => ctx.slots.register({
     name: 'conversation.chat.turnTail',
@@ -449,6 +455,153 @@ function connectionErrorMessage(error: unknown): string {
   const message = error instanceof Error ? error.message : String(error)
   if (message.includes('Failed to fetch')) return '无法访问插件连接接口，请确认插件服务已加载。'
   return message || '连接配置操作失败，请检查地址、令牌和 DSH 日志。'
+}
+
+interface CloudSyncStatusView {
+  configured: boolean
+  url: string
+  userName: string
+  autoSync: boolean
+  intervalMinutes: number
+  filesDir: string
+  filesOut: string
+  base: string
+  running: boolean
+  mode?: string
+  lastRunAt?: string
+  lastError?: string
+  lastOutput?: string
+}
+
+async function cloudSyncRequest(method: 'GET' | 'PUT' | 'POST', body?: Record<string, unknown>): Promise<CloudSyncStatusView> {
+  const path = method === 'POST' ? '/knowledge-local/v1/cloud-sync/run' : '/knowledge-local/v1/cloud-sync'
+  const response = await fetch(path, {
+    method,
+    headers: {
+      'x-dsh-knowledge-client': 'management-web',
+      ...(body === undefined ? {} : { 'content-type': 'application/json' }),
+    },
+    ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+  })
+  const payload = await response.json().catch(() => ({}))
+  if (!response.ok) throw new Error(payload?.error ?? `云端同步请求失败 (${response.status})`)
+  return payload as CloudSyncStatusView
+}
+
+function CloudSyncSettings() {
+  const [status, setStatus] = useState<CloudSyncStatusView>()
+  const [url, setUrl] = useState('')
+  const [token, setToken] = useState('')
+  const [userName, setUserName] = useState('')
+  const [autoSync, setAutoSync] = useState(false)
+  const [interval, setIntervalValue] = useState('5')
+  const [filesDir, setFilesDir] = useState('')
+  const [filesOut, setFilesOut] = useState('')
+  const [base, setBase] = useState('')
+  const [message, setMessage] = useState<{ kind: 'success' | 'error'; text: string }>()
+  const [busy, setBusy] = useState(false)
+
+  const apply = useCallback((value: CloudSyncStatusView) => {
+    setStatus(value)
+    setUrl(value.url)
+    setUserName(value.userName)
+    setAutoSync(value.autoSync)
+    setIntervalValue(String(value.intervalMinutes))
+    setFilesDir(value.filesDir)
+    setFilesOut(value.filesOut)
+    setBase(value.base)
+  }, [])
+
+  const load = useCallback(async () => {
+    try { apply(await cloudSyncRequest('GET')) } catch (error) { setMessage({ kind: 'error', text: error instanceof Error ? error.message : String(error) }) }
+  }, [apply])
+
+  useEffect(() => {
+    void load()
+    const timer = window.setInterval(() => { void load() }, 3000)
+    return () => window.clearInterval(timer)
+  }, [load])
+
+  const save = async (runAfterSave: boolean): Promise<void> => {
+    setBusy(true)
+    setMessage(undefined)
+    try {
+      const intervalNumber = Number(interval)
+      if (!Number.isInteger(intervalNumber) || intervalNumber < 1 || intervalNumber > 60) throw new Error('自动同步间隔必须是 1-60 分钟')
+      const next = await cloudSyncRequest('PUT', { url, token, userName, autoSync, intervalMinutes: intervalNumber, filesDir, filesOut, base })
+      apply(next)
+      setToken('')
+      if (runAfterSave && next.configured) {
+        apply(await cloudSyncRequest('POST', { mode: 'sync' }))
+        setMessage({ kind: 'success', text: '已连接云端并开始首次同步；下方状态会自动刷新。' })
+      } else {
+        setMessage({ kind: 'success', text: '云端同步配置已保存。' })
+      }
+    } catch (error) {
+      setMessage({ kind: 'error', text: error instanceof Error ? error.message : String(error) })
+    } finally { setBusy(false) }
+  }
+
+  const run = async (mode: 'push' | 'pull' | 'sync'): Promise<void> => {
+    setBusy(true)
+    setMessage(undefined)
+    try {
+      apply(await cloudSyncRequest('POST', { mode }))
+      setMessage({ kind: 'success', text: mode === 'push' ? '已开始上传本地→云端。' : mode === 'pull' ? '已开始拉取云端→本地镜像。' : '已开始双向同步。' })
+    } catch (error) {
+      setMessage({ kind: 'error', text: error instanceof Error ? error.message : String(error) })
+    } finally { setBusy(false) }
+  }
+
+  return <li className="dsh-plugin-settings dsh-knowledge-settings-card">
+    <div className="dsh-knowledge-settings-body">
+      <div className="dsh-knowledge-settings-header" style={{ cursor: 'default' }}>
+        <span><strong>云端团队同步</strong><small>连接云端后，本地原库保持可用，并自动增加“云端·库名”的本地镜像库。</small></span>
+        <span className="dsh-knowledge-settings-summary">{status?.configured ? (status.running ? '同步中' : status.autoSync ? '自动' : '已连接') : '未连接'}<i aria-hidden="true" /></span>
+      </div>
+      <p className="dsh-knowledge-settings-note">云端需要先部署团队知识库服务，并在「成员与邀请」生成 DSH Token。Token 随本机配置保存在知识库数据目录，不进入 Git。</p>
+      <div className="dsh-knowledge-remote-fields">
+        <label>云端服务地址
+          <input type="url" value={url} placeholder="https://知识库域名/knowledge-api/v1" onChange={event => setUrl(event.target.value)} />
+        </label>
+        <label>DSH Token
+          <input type="password" value={token} placeholder={status?.configured ? '已保存；留空保持不变' : '粘贴 dshk_...'} autoComplete="new-password" onChange={event => setToken(event.target.value)} />
+        </label>
+        <label>文件归属用户名
+          <input type="text" value={userName} placeholder="默认本机用户名" maxLength={100} onChange={event => setUserName(event.target.value)} />
+        </label>
+        <label>自动同步间隔（分钟）
+          <input type="number" min="1" max="60" step="1" value={interval} onChange={event => setIntervalValue(event.target.value)} />
+        </label>
+      </div>
+      <label className="dsh-knowledge-settings-note">
+        <input type="checkbox" checked={autoSync} onChange={event => setAutoSync(event.target.checked)} /> 自动同步（本地/云端变化后轮询）
+      </label>
+      <div className="dsh-knowledge-remote-fields">
+        <label>本地文件上传目录（可选）
+          <input type="text" value={filesDir} placeholder="例如 G:\dsh-knowledge\artifacts\blobs" onChange={event => setFilesDir(event.target.value)} />
+        </label>
+        <label>云端文件下载目录（可选）
+          <input type="text" value={filesOut} placeholder="例如 G:\dsh-knowledge\cloud-files" onChange={event => setFilesOut(event.target.value)} />
+        </label>
+        <label>指定本地知识库（可选）
+          <input type="text" value={base} placeholder="留空同步全部；填库名或 ID 限定上传文件" onChange={event => setBase(event.target.value)} />
+        </label>
+      </div>
+      {message && <p className={`dsh-knowledge-settings-message is-${message.kind}`} role={message.kind === 'error' ? 'alert' : 'status'}>{message.text}</p>}
+      <div className="dsh-knowledge-settings-actions">
+        <button type="button" className="is-primary" disabled={busy || status?.running} onClick={() => { void save(true) }}>{busy || status?.running ? '同步中…' : '连接并立即同步'}</button>
+        <button type="button" disabled={busy || status?.running || !status?.configured} onClick={() => { void run('push') }}>上传本地→云</button>
+        <button type="button" disabled={busy || status?.running || !status?.configured} onClick={() => { void run('pull') }}>拉取云端→本地镜像</button>
+        <button type="button" disabled={busy || !status?.configured} onClick={() => { void save(false) }}>保存配置</button>
+      </div>
+      {status && <div className="dsh-knowledge-settings-note">
+        <p>状态：{status.running ? `正在${status.mode ?? '同步'}` : status.lastRunAt ? `上次同步 ${new Date(status.lastRunAt).toLocaleString()}` : '尚未同步'}{status.autoSync ? ` · 每 ${status.intervalMinutes} 分钟自动` : ''}</p>
+        {status.lastError && <p className="dsh-knowledge-field-error">上次错误：{status.lastError}</p>}
+        {status.lastOutput && <pre style={{ whiteSpace: 'pre-wrap', maxHeight: 160, overflow: 'auto', fontSize: 11 }}>{status.lastOutput}</pre>}
+      </div>}
+    </div>
+  </li>
 }
 
 function KnowledgeLauncher({ wide, useSessions, workspace, activity, docked }: SidebarActionProps & { workspace: KnowledgeWorkspaceController; activity: KnowledgeActivityController; docked: boolean }) {

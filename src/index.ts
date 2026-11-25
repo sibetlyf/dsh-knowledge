@@ -1,4 +1,5 @@
 import { normalizeWritebackFrequency } from './service-settings.js'
+import { CloudSyncManager } from './cloud-sync.js'
 import { NoteVault } from './notes/vault.js'
 import type { Context } from '@deepseek-ai/cordis'
 import { createHash, randomBytes } from 'node:crypto'
@@ -108,6 +109,9 @@ export function apply(ctx: Context, config: KnowledgeConfig): void {
     update:(id,bytes,version)=>managementProvider.updateNoteContent(id,bytes,undefined,version,'外部文件修改'),
     create:(kind,name,parentId,bytes)=>kind==='folder'?managementProvider.createNoteFolder(name,parentId):managementProvider.createNoteDocument(name,parentId,Buffer.from(bytes).toString('utf8')),
   },resolved.databasePath+'.note-workspaces/local/vault-index.json'):undefined
+  const cloudSync = managementProvider !== undefined && resolved.databasePath !== undefined && resolved.databasePath !== ':memory:'
+    ? new CloudSyncManager({ databasePath: resolved.databasePath, logger: runtime.logger })
+    : undefined
   const connectionProvider = (settings: KnowledgeConnectionSettings): { provider: KnowledgeProvider; owned: boolean } => {
     if (settings.backend === 'local' && managementProvider !== undefined) {
       return { provider: managementProvider, owned: false }
@@ -237,6 +241,7 @@ export function apply(ctx: Context, config: KnowledgeConfig): void {
       }).catch(error => runtime.logger.warn(`dsh-knowledge: 制品归档失败: ${error instanceof Error ? error.message : String(error)}`))
     })
   }
+  if (cloudSync !== undefined) runtime.on('agent/turn-stopping', () => cloudSync.scheduleSoon())
   runtime.provide?.(KNOWLEDGE_TRACKING_SERVICE, createKnowledgeTrackingService(provider))
   runtime.provide?.(KNOWLEDGE_MOUNT_MANAGEMENT_SERVICE, createKnowledgeMountManagement(provider, () => providerRouter.revision))
   runtime.provide?.('dshKnowledgeNoteRecording', createNoteRecording(provider))
@@ -394,6 +399,7 @@ export function apply(ctx: Context, config: KnowledgeConfig): void {
           tencentDocs,
           morning: morningBrief,
           knowledgeShares,
+          ...(cloudSync === undefined ? {} : { cloudSync }),
         })
       }
     }
@@ -526,6 +532,7 @@ export function apply(ctx: Context, config: KnowledgeConfig): void {
 
   runtime.effect(() => async () => {
     await writebackQueue?.close()
+    cloudSync?.dispose()
     await coordinator.close()
     await providerRouter.close()
     await localNoteVault?.close()

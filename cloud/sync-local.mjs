@@ -105,7 +105,7 @@ async function saveMap(map) {
   await writeFile(mapPath, `${JSON.stringify(map, null, 2)}\n`, { mode: 0o600 })
 }
 
-async function uploadFile(cloudBaseId, localPath, sourceKey, displayName = basename(sourceKey)) {
+async function uploadFile(cloudBaseId, localPath, sourceKey, displayName = basename(sourceKey), map) {
   const info = await stat(localPath)
   if (!info.isFile()) return false
   if (info.size > 100 * 1024 * 1024) {
@@ -113,6 +113,9 @@ async function uploadFile(cloudBaseId, localPath, sourceKey, displayName = basen
     return false
   }
   const bytes = await readFile(localPath)
+  const sha256 = digest(bytes)
+  const mapKey = `${userName}:${sourceKey}`
+  if (map.files[mapKey]?.sha256 === sha256) return false
   const name = displayName || 'file'
   const response = await fetch(`${apiBase}/files`, {
     method: 'POST',
@@ -130,6 +133,7 @@ async function uploadFile(cloudBaseId, localPath, sourceKey, displayName = basen
     const payload = await response.json().catch(() => ({}))
     throw new Error(payload.error ?? `上传失败 (${response.status})`)
   }
+  map.files[mapKey] = { sha256, sourceKey, name, updatedAt: new Date().toISOString() }
   return true
 }
 
@@ -231,7 +235,8 @@ async function pullCloud(local, remote, map, remoteBases, localBases) {
       try {
         const cloudEntry = await remote.get(summary.id)
         if (cloudEntry === undefined || cloudEntry.status !== 'active') { skipped += 1; continue }
-        const localId = Object.entries(map.docs).find(([, value]) => value.cloudId === cloudEntry.id)?.[0]
+        const targetMap = mirror ? map.mirrorDocs : map.docs
+        const localId = Object.entries(targetMap).find(([, value]) => value.cloudId === cloudEntry.id)?.[0]
         const cloudHash = docHash(cloudEntry, localBase.id)
         if (localId === undefined) {
           const created = await local.create({
@@ -244,17 +249,17 @@ async function pullCloud(local, remote, map, remoteBases, localBases) {
             scope: cloudEntry.scope,
             confidence: cloudEntry.confidence,
           })
-          map.docs[created.id] = { cloudId: cloudEntry.id, hash: cloudHash, updatedAt: new Date().toISOString() }
+          targetMap[created.id] = { cloudId: cloudEntry.id, hash: cloudHash, updatedAt: new Date().toISOString() }
           pulled += 1
           console.log(`  新建: ${cloudEntry.title}`)
         } else {
           const localEntry = await local.get(localId)
           if (localEntry === undefined) {
-            delete map.docs[localId]
+            delete targetMap[localId]
             skipped += 1
             continue
           }
-          const known = map.docs[localId]
+          const known = targetMap[localId]
           const localHash = docHash(localEntry, localBase.id)
           if (cloudHash === known.hash) { skipped += 1; continue }
           if (localHash !== known.hash) {
@@ -272,7 +277,7 @@ async function pullCloud(local, remote, map, remoteBases, localBases) {
             scope: cloudEntry.scope,
             confidence: cloudEntry.confidence,
           }, undefined, localEntry.version)
-          map.docs[localId] = { cloudId: cloudEntry.id, hash: cloudHash, updatedAt: new Date().toISOString() }
+          targetMap[localId] = { cloudId: cloudEntry.id, hash: cloudHash, updatedAt: new Date().toISOString() }
           pulled += 1
           console.log(`  更新: ${updated.title}`)
         }
@@ -311,6 +316,8 @@ async function main() {
   map.bases ??= {}
   map.docs ??= {}
   map.mirrorBases ??= {}
+  map.mirrorDocs ??= {}
+  map.files ??= {}
   const localBases = (await local.listKnowledgeBases()).filter(base => base.status === 'active')
   const selectedBases = baseFilter === undefined
     ? localBases.filter(base => !new Set(Object.values(map.mirrorBases)).has(base.id))
@@ -396,8 +403,9 @@ async function main() {
           const artifact = artifactMap.get(relative) ?? artifactMap.get(relative.replace(/^blobs\//u, ''))
           const sourceKey = artifact?.sourceKey ?? relative
           const name = artifact?.name ?? basename(relative)
-          if (await uploadFile(cloudBase.id, file.absolute, sourceKey, name)) {
+          if (await uploadFile(cloudBase.id, file.absolute, sourceKey, name, map)) {
             console.log(`  上传: ${sourceKey}`)
+            await saveMap(map)
           }
         } catch (error) {
           failed += 1
