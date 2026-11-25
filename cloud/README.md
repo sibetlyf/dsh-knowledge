@@ -218,10 +218,11 @@ sudo systemctl status team-kb
 团队网页的「文件库」支持任意文件类型：PDF、Word、Excel、PPT、图片、ZIP、音视频、二进制数据等。上传后用原文件名下载；图片、PDF、文本等可以直接在浏览器打开，其他类型下载。
 
 - 文件按知识库授权，只有登录成员可访问；
+- 文件按上传者 `user_name` 分组显示，例如 `alice/docs/report.pdf`；
 - 上传/删除需要管理员或编辑者；
 - 文件内容保存在 `$TEAM_DATA_DIR/files/`，元数据在 `team.sqlite`；
 - 单文件默认上限 100 MiB，通过 `TEAM_MAX_FILE_BYTES` 调整；
-- 文件名、MIME 和 SHA-256 都会记录；同名同步文件通过 `sourceKey` 幂等覆盖。
+- 文件名、MIME、上传者和 SHA-256 都会记录；同一用户同一 `sourceKey` 幂等覆盖。
 
 命令行上传任意类型：
 
@@ -229,6 +230,7 @@ sudo systemctl status team-kb
 curl -X POST http://127.0.0.1:8787/knowledge-api/v1/files \
   -H "Authorization: Bearer dshk_..." \
   -H "x-file-base-id: default" \
+  -H "x-file-user-name: alice" \
   -H "x-file-name: $(python3 -c 'import urllib.parse;print(urllib.parse.quote("报告.pdf"))')" \
   -H "x-content-type: application/pdf" \
   --data-binary @报告.pdf
@@ -272,6 +274,9 @@ node cloud/sync-local.mjs \
 | `--base` | 可选，只同步指定库名或本地 ID |
 | `--map` | 可选，默认 `<db>.cloud-sync.json`，保存本地/云端映射 |
 | `--pull` | 从云端拉取；不推本地 |
+| `--mirror` | 拉取到独立本地镜像库 `云端·<库名>`，原本地库保持不变 |
+| `--mirror-prefix` | 镜像库名前缀，默认 `云端·` |
+| `--user` | 文件归属的用户名，默认本机用户名；云端按它建立子目录 |
 
 也可以用环境变量：
 
@@ -280,6 +285,7 @@ LOCAL_KB_DB=/data/knowledge.sqlite \
 CLOUD_URL=https://kb.example.com/knowledge-api/v1 \
 CLOUD_TOKEN=dshk_... \
 CLOUD_SYNC_FILES=/data/files \
+CLOUD_SYNC_USER=alice \
 node cloud/sync-local.mjs
 ```
 
@@ -290,6 +296,7 @@ LOCAL_KB_DB=/data/knowledge.sqlite \
 CLOUD_URL=https://kb.example.com/knowledge-api/v1 \
 CLOUD_TOKEN=dshk_... \
 CLOUD_SYNC_PULL=1 \
+CLOUD_SYNC_MIRROR=1 \
 CLOUD_SYNC_FILES_OUT=/data/cloud-files \
 node cloud/sync-local.mjs
 ```
@@ -298,11 +305,11 @@ node cloud/sync-local.mjs
 
 - 默认推送：本地内容变化才写云端；未变化跳过。
 - `--pull`：云端内容变化且本地自上次同步未变化时才写本地。
+- `--mirror`：不覆盖本地原库，而是新建本地库 `云端·默认知识库`、`云端·制品归档` 等；本地原库继续独立使用。
+- 默认推送会跳过镜像库，避免把云端内容又推回云端。
 - 本地和云端都发生变化时，默认**保留本地并报告冲突**，不静默覆盖。
 - 映射文件 `cloud-sync.json` 要保留；删掉后再次推送会在云端新建文档。
 - 云端文件下载用 `sourceKey` 保持目录层级；文件名只作为缺省路径。
-
-同步映射文件 `cloud-sync.json` 要保留；删掉后再次同步会在云端新建文档，而不是更新原来的。
 
 ## 连接本地 DSH
 

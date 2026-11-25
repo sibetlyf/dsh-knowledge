@@ -376,6 +376,7 @@ async function uploadFiles(files) {
           'x-file-base-id': state.baseId,
           'x-file-name': encodeURIComponent(file.name),
           'x-file-source-key': encodeURIComponent(file.webkitRelativePath || file.name),
+          'x-file-user-name': encodeURIComponent(state.me.user.name),
           'x-content-type': file.type || 'application/octet-stream',
         },
         body: file,
@@ -409,10 +410,10 @@ function renderFiles() {
       event.currentTarget.value = ''
     },
   })
-  const rows = state.files.map(file => h('div', { class: 'file-row' },
+  const fileRow = file => h('div', { class: 'file-row' },
     h('div', { class: 'file-main' },
       h('strong', { text: file.name }),
-      h('small', { text: `${formatFileSize(file.size)} · ${file.mime || '未知类型'} · ${new Date(file.updatedAt).toLocaleString()}` })),
+      h('small', { text: `${file.sourceKey || file.name} · ${formatFileSize(file.size)} · ${file.mime || '未知类型'} · ${new Date(file.updatedAt).toLocaleString()}` })),
     h('div', { class: 'file-actions' },
       h('a', { class: 'btn', href: file.inlineUrl, target: '_blank', rel: 'noopener', text: '打开' }),
       h('a', { class: 'btn', href: file.downloadUrl, text: '下载' }),
@@ -427,7 +428,16 @@ function renderFiles() {
             toast('文件已删除')
           } catch (error) { toast(error.message, 'error') }
         },
-      }) : null)))
+      }) : null))
+  const groups = new Map()
+  for (const file of state.files) {
+    const user = file.userName || '未署名'
+    if (!groups.has(user)) groups.set(user, [])
+    groups.get(user).push(file)
+  }
+  const rows = [...groups.entries()].map(([user, files]) => h('section', {},
+    h('h3', { class: 'file-group', text: `${user}/` }),
+    ...files.map(fileRow)))
   return h('div', { class: 'modal-backdrop', onClick: event => { if (event.target === event.currentTarget) close() } },
     h('div', { class: 'modal', role: 'dialog', 'aria-modal': 'true', 'aria-label': '文件库' },
       h('div', { class: 'modal-head' }, h('h2', { text: '文件库' }), h('button', { type: 'button', class: 'icon-btn', onClick: close, text: '关闭' })),

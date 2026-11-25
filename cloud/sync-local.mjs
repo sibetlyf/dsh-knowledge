@@ -3,6 +3,7 @@
 // 文档通过云端 DSH 远程协议写入；任意类型文件通过 /knowledge-api/v1/files 写入。
 import { createHash } from 'node:crypto'
 import { existsSync } from 'node:fs'
+import { userInfo } from 'node:os'
 import { mkdir, readFile, readdir, stat, writeFile } from 'node:fs/promises'
 import { basename, dirname, extname, join, resolve } from 'node:path'
 import { LocalKnowledgeProvider } from '../lib/local-provider.js'
@@ -12,7 +13,9 @@ function usage() {
   console.log(`用法:
   node cloud/sync-local.mjs --db <本地 knowledge.sqlite> --url <云端 /knowledge-api/v1> --token <DSH Token> [--files <上传目录>] [--base <知识库>] [--map <映射文件>] [--pull]
 
-  --pull  只拉取云端新增/更新到本地（默认只本地→云端）
+  --pull  从云端拉取新增/更新到本地
+  --mirror  拉取到本地镜像库“云端·<库名>”，本地原库保持不变
+  --user <名字>  文件按这个名字建立云端子目录，默认本机用户名
   --files-out <目录>  同时下载云端文件
 
 环境变量也可以:
@@ -41,6 +44,9 @@ const token = options.token ?? process.env.CLOUD_TOKEN ?? ''
 const filesDir = options.files ?? process.env.CLOUD_SYNC_FILES
 const filesOut = options['files-out'] ?? process.env.CLOUD_SYNC_FILES_OUT
 const pull = options.pull === '1' || process.env.CLOUD_SYNC_PULL === '1'
+const mirror = options.mirror === '1' || process.env.CLOUD_SYNC_MIRROR === '1'
+const mirrorPrefix = options['mirror-prefix'] ?? process.env.CLOUD_SYNC_MIRROR_PREFIX ?? '云端·'
+const userName = String(options.user ?? process.env.CLOUD_SYNC_USER ?? userInfo().username ?? 'user').trim() || 'user'
 const baseFilter = options.base ?? process.env.CLOUD_SYNC_BASE
 const mapPath = resolve(options.map ?? process.env.CLOUD_SYNC_MAP ?? `${db}.cloud-sync.json`)
 if (db === '' || url === '' || token === '') {
@@ -90,7 +96,7 @@ async function loadMap() {
   try {
     return JSON.parse(await readFile(mapPath, 'utf8'))
   } catch {
-    return { version: 1, bases: {}, docs: {} }
+    return { version: 1, bases: {}, docs: {}, mirrorBases: {} }
   }
 }
 
@@ -115,6 +121,7 @@ async function uploadFile(cloudBaseId, localPath, sourceKey, displayName = basen
       'x-file-base-id': cloudBaseId,
       'x-file-name': encodeURIComponent(name),
       'x-file-source-key': encodeURIComponent(sourceKey),
+      'x-file-user-name': encodeURIComponent(userName),
       'x-content-type': mimeFor(name),
     },
     body: bytes,
@@ -188,15 +195,34 @@ async function pullCloud(local, remote, map, remoteBases, localBases) {
   for (const cloudBase of remoteBases) {
     if (baseFilter !== undefined && cloudBase.name !== baseFilter && cloudBase.id !== baseFilter) continue
     const mappedLocalId = Object.entries(map.bases).find(([, cloudId]) => cloudId === cloudBase.id)?.[0]
-    let localBase = localBases.find(base => base.id === mappedLocalId) ?? localBases.find(base => base.name === cloudBase.name)
-    if (localBase === undefined) {
-      localBase = await local.createKnowledgeBase({
-        name: cloudBase.name,
-        description: cloudBase.description ?? '',
-        defaultTags: cloudBase.defaultTags ?? [],
-        writebackPolicy: cloudBase.writebackPolicy ?? 'conservative',
-      })
-      console.log(`创建本地知识库: ${localBase.name}`)
+    let localBase
+    if (mirror) {
+      const mirrorId = map.mirrorBases[cloudBase.id]
+      localBase = localBases.find(base => base.id === mirrorId)
+        ?? localBases.find(base => base.name === `${mirrorPrefix}${cloudBase.name}`)
+      if (localBase === undefined) {
+        localBase = await local.createKnowledgeBase({
+          name: `${mirrorPrefix}${cloudBase.name}`,
+          description: `云端团队库镜像：${cloudBase.name}`,
+          defaultTags: [],
+          extractionInstructions: '',
+          writebackPolicy: 'conservative',
+        })
+        console.log(`创建本地镜像库: ${localBase.name}`)
+      }
+      map.mirrorBases[cloudBase.id] = localBase.id
+    } else {
+      localBase = localBases.find(base => base.id === mappedLocalId) ?? localBases.find(base => base.name === cloudBase.name)
+      if (localBase === undefined) {
+        localBase = await local.createKnowledgeBase({
+          name: cloudBase.name,
+          description: cloudBase.description ?? '',
+          defaultTags: cloudBase.defaultTags ?? [],
+          extractionInstructions: cloudBase.extractionInstructions ?? '',
+          writebackPolicy: cloudBase.writebackPolicy ?? 'conservative',
+        })
+        console.log(`创建本地知识库: ${localBase.name}`)
+      }
     }
     map.bases[localBase.id] = cloudBase.id
     const cloudDocs = await remote.listDocuments(cloudBase.id)
@@ -282,10 +308,14 @@ async function main() {
   const local = new LocalKnowledgeProvider(db)
   const remote = new RemoteKnowledgeProvider({ url: apiBase, token, timeoutMs: 30_000 })
   const map = await loadMap()
+  map.bases ??= {}
+  map.docs ??= {}
+  map.mirrorBases ??= {}
   const localBases = (await local.listKnowledgeBases()).filter(base => base.status === 'active')
   const selectedBases = baseFilter === undefined
-    ? localBases
+    ? localBases.filter(base => !new Set(Object.values(map.mirrorBases)).has(base.id))
     : localBases.filter(base => base.id === baseFilter || base.name === baseFilter)
+  if (mirror && !pull) throw new Error('--mirror 只能和 --pull 一起使用')
   if (!pull && selectedBases.length === 0) throw new Error('没有匹配的本地知识库')
   if (!pull && filesDir !== undefined && selectedBases.length > 1 && baseFilter === undefined) {
     throw new Error('本地有多个知识库；上传文件时必须用 --base 指定一个知识库，避免把文件传到错误的库。')

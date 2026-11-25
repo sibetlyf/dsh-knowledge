@@ -77,6 +77,7 @@ export class TeamStore {
         sha256 TEXT NOT NULL,
         storage_path TEXT NOT NULL,
         source_key TEXT,
+        user_name TEXT,
         uploaded_by TEXT,
         created_at TEXT NOT NULL,
         updated_at TEXT NOT NULL
@@ -85,6 +86,8 @@ export class TeamStore {
       CREATE UNIQUE INDEX IF NOT EXISTS files_source ON files(base_id, source_key) WHERE source_key IS NOT NULL;
       CREATE INDEX IF NOT EXISTS sessions_expiry ON sessions(expires_at);
     `)
+    const fileColumns = this.db.prepare('PRAGMA table_info(files)').all().map(column => column.name)
+    if (!fileColumns.includes('user_name')) this.db.exec('ALTER TABLE files ADD COLUMN user_name TEXT')
   }
 
   close() {
@@ -232,12 +235,12 @@ export class TeamStore {
     return this.db.prepare('SELECT * FROM files WHERE base_id=? AND source_key=?').get(baseId, sourceKey)
   }
 
-  addFile({ id, baseId, name, mime, size, sha256, storagePath, sourceKey = null, uploadedBy = null }) {
+  addFile({ id, baseId, name, mime, size, sha256, storagePath, sourceKey = null, userName = null, uploadedBy = null }) {
     const now = new Date().toISOString()
     this.db.prepare(`INSERT INTO files
-      (id,base_id,name,mime,size,sha256,storage_path,source_key,uploaded_by,created_at,updated_at)
-      VALUES (?,?,?,?,?,?,?,?,?,?,?)`)
-      .run(id, baseId, name, mime, size, sha256, storagePath, sourceKey, uploadedBy, now, now)
+      (id,base_id,name,mime,size,sha256,storage_path,source_key,user_name,uploaded_by,created_at,updated_at)
+      VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`)
+      .run(id, baseId, name, mime, size, sha256, storagePath, sourceKey, userName, uploadedBy, now, now)
     return this.getFile(id)
   }
 

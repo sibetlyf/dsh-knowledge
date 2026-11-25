@@ -170,14 +170,16 @@ function mimeFromName(name) {
   }[ext] ?? 'application/octet-stream'
 }
 
-async function storeUploadedFile({ baseId, name, mime, bytes, actorId, sourceKey }) {
+async function storeUploadedFile({ baseId, name, mime, bytes, actorId, sourceKey, userName }) {
   const base = await provider.getKnowledgeBase(baseId)
   if (base === undefined || base.status !== 'active') throw new HttpError(400, '知识库不存在或不可用')
   if (bytes.length > maxFileBytes) throw new HttpError(413, `文件超过 ${Math.round(maxFileBytes / 1024 / 1024)} MiB 上限`)
   const displayName = safeFileName(name)
   const safeMime = String(mime ?? '').trim().slice(0, 200) || mimeFromName(displayName)
   const sha256 = createHash('sha256').update(bytes).digest('hex')
-  const source = sourceKey === undefined || sourceKey === '' ? null : String(sourceKey).slice(0, 500)
+  const owner = String(userName ?? '').trim().replace(/[\u0000-\u001f\u007f/\\]/gu, '_').slice(0, 100) || '未署名'
+  const rawSource = sourceKey === undefined || sourceKey === '' ? null : String(sourceKey).replace(/^\/+/u, '').slice(0, 400)
+  const source = rawSource === null ? null : `${owner}/${rawSource}`
   const existing = team.findFileBySource(baseId, source ?? '')
   const id = existing?.id ?? randomUUID()
   const relativePath = join('files', id)
@@ -189,7 +191,7 @@ async function storeUploadedFile({ baseId, name, mime, bytes, actorId, sourceKey
     }
     return team.updateFile(id, { name: displayName, mime: safeMime, size: bytes.length, sha256, storagePath: relativePath })
   }
-  return team.addFile({ id, baseId, name: displayName, mime: safeMime, size: bytes.length, sha256, storagePath: relativePath, sourceKey: source, uploadedBy: actorId })
+  return team.addFile({ id, baseId, name: displayName, mime: safeMime, size: bytes.length, sha256, storagePath: relativePath, sourceKey: source, userName: owner, uploadedBy: actorId })
 }
 
 function bearerActor(req) {
@@ -226,6 +228,7 @@ function fileMetadata(row, prefix = '/api/files') {
     size: row.size,
     sha256: row.sha256,
     sourceKey: row.source_key ?? null,
+    userName: row.user_name ?? null,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
     inlineUrl: `${prefix}/${row.id}?inline=1`,
@@ -248,8 +251,9 @@ async function handleTokenFiles(req, res, url, path, method) {
     const name = decodeUploadHeader(firstHeader(req.headers['x-file-name'])) || 'file'
     const mime = firstHeader(req.headers['x-content-type']) || ''
     const sourceKey = decodeUploadHeader(firstHeader(req.headers['x-file-source-key']))
+    const userName = decodeUploadHeader(firstHeader(req.headers['x-file-user-name'])) || '未署名'
     const bytes = await readBody(req, maxFileBytes)
-    const row = await storeUploadedFile({ baseId, name, mime, bytes, actorId: null, sourceKey })
+    const row = await storeUploadedFile({ baseId, name, mime, bytes, actorId: null, sourceKey, userName })
     return sendJson(res, 201, { file: fileMetadata(row, '/knowledge-api/v1/files') })
   }
   const tokenMatch = /^\/knowledge-api\/v1\/files\/([a-f0-9-]{36})$/u.exec(path)
@@ -283,8 +287,9 @@ async function handleTeamFiles(req, res, url, path, method, session) {
     const name = decodeUploadHeader(firstHeader(req.headers['x-file-name'])) || 'file'
     const mime = firstHeader(req.headers['x-content-type']) || ''
     const sourceKey = decodeUploadHeader(firstHeader(req.headers['x-file-source-key']))
+    const userName = decodeUploadHeader(firstHeader(req.headers['x-file-user-name'])) || session.user.name
     const bytes = await readBody(req, maxFileBytes)
-    const row = await storeUploadedFile({ baseId, name, mime, bytes, actorId: session.user.id, sourceKey })
+    const row = await storeUploadedFile({ baseId, name, mime, bytes, actorId: session.user.id, sourceKey, userName })
     team.audit(session.user.id, 'file.upload', row.id, `${name} ${bytes.length}`)
     return sendJson(res, 201, { file: fileMetadata(row) })
   }
