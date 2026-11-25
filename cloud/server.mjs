@@ -204,13 +204,15 @@ function bearerActor(req) {
 function sendFile(res, row, inline = false) {
   const absolute = join(dataDir, row.storage_path)
   if (!existsSync(absolute)) throw new HttpError(410, '文件内容已丢失')
-  const disposition = inline ? 'inline' : 'attachment'
+  // 不把 HTML/SVG 等主动内容 inline 到同源页面，避免上传文件执行脚本。
+  const safeInline = /^(?:image\/(?:png|jpeg|gif|webp)|application\/pdf|text\/(?:plain|markdown|csv)|application\/json)/u.test(row.mime ?? '')
+  const disposition = inline && safeInline ? 'inline' : 'attachment'
   res.writeHead(200, {
     'content-type': row.mime || 'application/octet-stream',
     'content-length': String(row.size),
     'content-disposition': `${disposition}; filename="${encodeURIComponent(row.name)}"; filename*=UTF-8''${encodeURIComponent(row.name)}`,
     'x-content-type-options': 'nosniff',
-    'cache-control': inline ? 'private, max-age=300' : 'no-store',
+    'cache-control': inline && safeInline ? 'private, max-age=300' : 'no-store',
   })
   createReadStream(absolute).pipe(res)
 }
