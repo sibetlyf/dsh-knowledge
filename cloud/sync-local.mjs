@@ -260,6 +260,9 @@ async function main() {
     ? localBases
     : localBases.filter(base => base.id === baseFilter || base.name === baseFilter)
   if (!pull && selectedBases.length === 0) throw new Error('没有匹配的本地知识库')
+  if (!pull && filesDir !== undefined && selectedBases.length > 1 && baseFilter === undefined) {
+    throw new Error('本地有多个知识库；上传文件时必须用 --base 指定一个知识库，避免把文件传到错误的库。')
+  }
 
   const remoteBases = await remote.listKnowledgeBases()
   if (pull) {
@@ -323,9 +326,6 @@ async function main() {
     await saveMap(map)
 
     if (filesDir !== undefined) {
-      if (selectedBases.length > 1 && baseFilter === undefined) {
-        throw new Error('多个本地库同时同步文件时，请用 --base 指定一个知识库')
-      }
       const all = await walkFiles(resolve(filesDir))
       console.log(`\n文件目录 ${filesDir}: ${all.length} 个文件`)
       for (const file of all) {
