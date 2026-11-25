@@ -67,7 +67,12 @@
     "docs/releases/2.21.2.md",
     "docs/releases/2.21.3.md",
     "docs/work-calendar.md",
-    "docs/releases/2.21.10.md"
+    "docs/releases/2.21.10.md",
+    "cloud/*.mjs",
+    "cloud/*.md",
+    "cloud/Dockerfile",
+    "cloud/public/*",
+    "cloud/deploy/*"
   ],
   "dsh": {
     "bundle": {
@@ -100,6 +105,8 @@
     "prepare": "npm run clean && npm run build",
     "test": "npm run build && node --test test/*.test.mjs",
     "eval:retrieval": "npm run build && node scripts/evaluate-retrieval.mjs",
+    "cloud": "node cloud/server.mjs",
+    "cloud:check": "node --check cloud/server.mjs && node --check cloud/team-store.mjs && node --check cloud/views.mjs && node --check cloud/public/app.js",
     "pack:check": "npm pack --dry-run"
   },
   "dependencies": {

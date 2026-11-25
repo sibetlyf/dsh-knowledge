@@ -1,0 +1,23 @@
+[Unit]
+Description=Team Knowledge standalone service
+After=network.target
+
+[Service]
+Type=simple
+User=teamkb
+Group=teamkb
+WorkingDirectory=/opt/team-kb
+EnvironmentFile=/etc/team-kb.env
+ExecStart=/usr/bin/node /opt/team-kb/node_modules/@lemoncat7/dsh-knowledge/cloud/server.mjs
+Restart=on-failure
+RestartSec=3
+TimeoutStopSec=20
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=yes
+ReadWritePaths=/opt/team-kb/data
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target

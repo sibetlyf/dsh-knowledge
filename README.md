@@ -4,6 +4,10 @@
 
 [![npm](https://img.shields.io/npm/v/%40lemoncat7%2Fdsh-knowledge)](https://www.npmjs.com/package/@lemoncat7/dsh-knowledge)
 
+## 独立团队知识库
+
+`cloud/` 提供一个不需要安装 DSH 的独立团队知识库服务：浏览器登录、成员邀请、角色权限、共同编辑与版本冲突保护。部署方式见 [cloud/README.md](cloud/README.md)。这是独立服务，不会改变 DSH 插件本身的本地/远程模式。
+
 ## 功能
 
 - 知识库与文档分组、全文检索、项目和会话挂载，按权限召回与回写。

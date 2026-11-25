@@ -1,6 +1,7 @@
 lib/
 node_modules/
 dist/
+cloud-data/
 *.tgz
 *.log
 .env
