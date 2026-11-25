@@ -4,7 +4,7 @@
 import { createHash } from 'node:crypto'
 import { existsSync } from 'node:fs'
 import { mkdir, readFile, readdir, stat, writeFile } from 'node:fs/promises'
-import { dirname, extname, join, resolve } from 'node:path'
+import { basename, dirname, extname, join, resolve } from 'node:path'
 import { LocalKnowledgeProvider } from '../lib/local-provider.js'
 import { RemoteKnowledgeProvider } from '../lib/remote-provider.js'
 
@@ -99,7 +99,7 @@ async function saveMap(map) {
   await writeFile(mapPath, `${JSON.stringify(map, null, 2)}\n`, { mode: 0o600 })
 }
 
-async function uploadFile(cloudBaseId, localPath, sourceKey) {
+async function uploadFile(cloudBaseId, localPath, sourceKey, displayName = basename(sourceKey)) {
   const info = await stat(localPath)
   if (!info.isFile()) return false
   if (info.size > 100 * 1024 * 1024) {
@@ -107,7 +107,7 @@ async function uploadFile(cloudBaseId, localPath, sourceKey) {
     return false
   }
   const bytes = await readFile(localPath)
-  const name = sourceKey.split('/').pop() || 'file'
+  const name = displayName || 'file'
   const response = await fetch(`${apiBase}/files`, {
     method: 'POST',
     headers: {
@@ -137,6 +137,33 @@ async function walkFiles(directory, prefix = '') {
     else if (entry.isFile()) files.push({ absolute, relative })
   }
   return files
+}
+
+async function artifactFiles(directory) {
+  const indexFiles = [join(directory, 'index.json'), join(dirname(directory), 'index.json')]
+  const indexFile = indexFiles.find(path => existsSync(path))
+  if (indexFile === undefined) return new Map()
+  try {
+    const root = JSON.parse(await readFile(indexFile, 'utf8'))
+    const entries = root?.artifacts && typeof root.artifacts === 'object'
+      ? root.artifacts
+      : root?.entries && typeof root.entries === 'object'
+        ? root.entries
+        : root
+    const map = new Map()
+    for (const record of Object.values(entries ?? {})) {
+      if (record === null || typeof record !== 'object' || typeof record.blob !== 'string') continue
+      const blob = record.blob.replaceAll('\\', '/')
+      const relative = blob.startsWith('blobs/') ? blob.slice('blobs/'.length) : blob
+      const display = typeof record.display === 'string' && record.display.trim() !== '' ? record.display : record.path
+      if (typeof display !== 'string' || display.trim() === '') continue
+      const name = basename(display.split('/').pop() || display)
+      map.set(relative, { sourceKey: display, name })
+    }
+    return map
+  } catch {
+    return new Map()
+  }
 }
 
 async function downloadCloudFile(baseId, file, directory) {
@@ -327,11 +354,16 @@ async function main() {
 
     if (filesDir !== undefined) {
       const all = await walkFiles(resolve(filesDir))
+      const artifactMap = await artifactFiles(resolve(filesDir))
       console.log(`\n文件目录 ${filesDir}: ${all.length} 个文件`)
       for (const file of all) {
         try {
-          if (await uploadFile(cloudBase.id, file.absolute, file.relative)) {
-            console.log(`  上传: ${file.relative}`)
+          const relative = file.relative.replaceAll('\\', '/')
+          const artifact = artifactMap.get(relative) ?? artifactMap.get(relative.replace(/^blobs\//u, ''))
+          const sourceKey = artifact?.sourceKey ?? relative
+          const name = artifact?.name ?? basename(relative)
+          if (await uploadFile(cloudBase.id, file.absolute, sourceKey, name)) {
+            console.log(`  上传: ${sourceKey}`)
           }
         } catch (error) {
           failed += 1
