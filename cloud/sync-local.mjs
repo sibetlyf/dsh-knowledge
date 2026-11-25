@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// 把本地 dsh-knowledge 知识库单向同步到云端团队库；重复执行是幂等的。
+// 把本地 dsh-knowledge 知识库同步到云端团队库；默认本地→云端，重复执行幂等。
 // 文档通过云端 DSH 远程协议写入；任意类型文件通过 /knowledge-api/v1/files 写入。
 import { createHash } from 'node:crypto'
 import { existsSync } from 'node:fs'
@@ -10,10 +10,14 @@ import { RemoteKnowledgeProvider } from '../lib/remote-provider.js'
 
 function usage() {
   console.log(`用法:
-  node cloud/sync-local.mjs --db <本地 knowledge.sqlite> --url <云端 /knowledge-api/v1> --token <DSH Token> [--files <目录>] [--base <知识库>] [--map <映射文件>]
+  node cloud/sync-local.mjs --db <本地 knowledge.sqlite> --url <云端 /knowledge-api/v1> --token <DSH Token> [--files <上传目录>] [--base <知识库>] [--map <映射文件>] [--pull]
+
+  --pull  只拉取云端新增/更新到本地（默认只本地→云端）
+  --files-out <目录>  同时下载云端文件
 
 环境变量也可以:
-  LOCAL_KB_DB, CLOUD_URL, CLOUD_TOKEN, CLOUD_SYNC_FILES, CLOUD_SYNC_BASE, CLOUD_SYNC_MAP`)
+  LOCAL_KB_DB, CLOUD_URL, CLOUD_TOKEN, CLOUD_SYNC_FILES, CLOUD_SYNC_BASE, CLOUD_SYNC_MAP
+  CLOUD_SYNC_PULL=1, CLOUD_SYNC_FILES_OUT`)
 }
 
 function args() {
@@ -35,6 +39,8 @@ const db = resolve(options.db ?? process.env.LOCAL_KB_DB ?? '')
 const url = options.url ?? process.env.CLOUD_URL ?? ''
 const token = options.token ?? process.env.CLOUD_TOKEN ?? ''
 const filesDir = options.files ?? process.env.CLOUD_SYNC_FILES
+const filesOut = options['files-out'] ?? process.env.CLOUD_SYNC_FILES_OUT
+const pull = options.pull === '1' || process.env.CLOUD_SYNC_PULL === '1'
 const baseFilter = options.base ?? process.env.CLOUD_SYNC_BASE
 const mapPath = resolve(options.map ?? process.env.CLOUD_SYNC_MAP ?? `${db}.cloud-sync.json`)
 if (db === '' || url === '' || token === '') {
@@ -133,6 +139,118 @@ async function walkFiles(directory, prefix = '') {
   return files
 }
 
+async function downloadCloudFile(baseId, file, directory) {
+  const path = file.sourceKey && !file.sourceKey.split('/').some(part => part === '..' || part === '')
+    ? file.sourceKey
+    : file.name
+  const target = join(directory, ...path.split('/'))
+  const response = await fetch(`${apiBase}/files/${encodeURIComponent(file.id)}`, {
+    headers: { authorization: `Bearer ${token}` },
+  })
+  if (!response.ok) throw new Error(`下载失败 (${response.status})`)
+  await mkdir(dirname(target), { recursive: true })
+  await writeFile(target, Buffer.from(await response.arrayBuffer()), { mode: 0o600 })
+  return path
+}
+
+async function pullCloud(local, remote, map, remoteBases, localBases) {
+  let pulled = 0
+  let skipped = 0
+  let conflicts = 0
+  let failed = 0
+  for (const cloudBase of remoteBases) {
+    if (baseFilter !== undefined && cloudBase.name !== baseFilter && cloudBase.id !== baseFilter) continue
+    const mappedLocalId = Object.entries(map.bases).find(([, cloudId]) => cloudId === cloudBase.id)?.[0]
+    let localBase = localBases.find(base => base.id === mappedLocalId) ?? localBases.find(base => base.name === cloudBase.name)
+    if (localBase === undefined) {
+      localBase = await local.createKnowledgeBase({
+        name: cloudBase.name,
+        description: cloudBase.description ?? '',
+        defaultTags: cloudBase.defaultTags ?? [],
+        writebackPolicy: cloudBase.writebackPolicy ?? 'conservative',
+      })
+      console.log(`创建本地知识库: ${localBase.name}`)
+    }
+    map.bases[localBase.id] = cloudBase.id
+    const cloudDocs = await remote.listDocuments(cloudBase.id)
+    console.log(`\n拉取 ${cloudBase.name}: ${cloudDocs.length} 篇文档`)
+    for (const summary of cloudDocs) {
+      try {
+        const cloudEntry = await remote.get(summary.id)
+        if (cloudEntry === undefined || cloudEntry.status !== 'active') { skipped += 1; continue }
+        const localId = Object.entries(map.docs).find(([, value]) => value.cloudId === cloudEntry.id)?.[0]
+        const cloudHash = docHash(cloudEntry, localBase.id)
+        if (localId === undefined) {
+          const created = await local.create({
+            knowledgeBaseId: localBase.id,
+            title: cloudEntry.title,
+            body: cloudEntry.body,
+            group: cloudEntry.group && cloudEntry.group !== '' ? cloudEntry.group : '云端同步',
+            type: cloudEntry.type,
+            tags: cloudEntry.tags,
+            scope: cloudEntry.scope,
+            confidence: cloudEntry.confidence,
+          })
+          map.docs[created.id] = { cloudId: cloudEntry.id, hash: cloudHash, updatedAt: new Date().toISOString() }
+          pulled += 1
+          console.log(`  新建: ${cloudEntry.title}`)
+        } else {
+          const localEntry = await local.get(localId)
+          if (localEntry === undefined) {
+            delete map.docs[localId]
+            skipped += 1
+            continue
+          }
+          const known = map.docs[localId]
+          const localHash = docHash(localEntry, localBase.id)
+          if (cloudHash === known.hash) { skipped += 1; continue }
+          if (localHash !== known.hash) {
+            conflicts += 1
+            console.warn(`  冲突（本地和云端都变了，保留本地）: ${cloudEntry.title}`)
+            continue
+          }
+          const updated = await local.update(localId, {
+            knowledgeBaseId: localBase.id,
+            title: cloudEntry.title,
+            body: cloudEntry.body,
+            group: cloudEntry.group && cloudEntry.group !== '' ? cloudEntry.group : '云端同步',
+            type: cloudEntry.type,
+            tags: cloudEntry.tags,
+            scope: cloudEntry.scope,
+            confidence: cloudEntry.confidence,
+          }, undefined, localEntry.version)
+          map.docs[localId] = { cloudId: cloudEntry.id, hash: cloudHash, updatedAt: new Date().toISOString() }
+          pulled += 1
+          console.log(`  更新: ${updated.title}`)
+        }
+        await saveMap(map)
+      } catch (error) {
+        failed += 1
+        console.error(`  拉取失败: ${summary.title} — ${error.message}`)
+      }
+    }
+    if (filesOut !== undefined) {
+      const response = await fetch(`${apiBase}/files?baseId=${encodeURIComponent(cloudBase.id)}`, {
+        headers: { authorization: `Bearer ${token}` },
+      })
+      if (!response.ok) throw new Error(`读取云端文件列表失败 (${response.status})`)
+      const files = await response.json()
+      console.log(`\n下载文件 ${cloudBase.name}: ${files.files.length} 个`)
+      for (const file of files.files) {
+        try {
+          const relative = await downloadCloudFile(cloudBase.id, file, resolve(filesOut))
+          console.log(`  下载: ${relative}`)
+        } catch (error) {
+          failed += 1
+          console.error(`  文件失败: ${file.name} — ${error.message}`)
+        }
+      }
+    }
+  }
+  console.log(`\n拉取完成：写入 ${pulled}，跳过 ${skipped}，冲突 ${conflicts}，失败 ${failed}`)
+  await saveMap(map)
+}
+
 async function main() {
   const local = new LocalKnowledgeProvider(db)
   const remote = new RemoteKnowledgeProvider({ url: apiBase, token, timeoutMs: 30_000 })
@@ -141,9 +259,14 @@ async function main() {
   const selectedBases = baseFilter === undefined
     ? localBases
     : localBases.filter(base => base.id === baseFilter || base.name === baseFilter)
-  if (selectedBases.length === 0) throw new Error('没有匹配的本地知识库')
+  if (!pull && selectedBases.length === 0) throw new Error('没有匹配的本地知识库')
 
   const remoteBases = await remote.listKnowledgeBases()
+  if (pull) {
+    await pullCloud(local, remote, map, remoteBases, localBases)
+    await local.close().catch(() => {})
+    return
+  }
   let pushed = 0
   let skipped = 0
   let failed = 0

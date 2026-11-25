@@ -234,9 +234,9 @@ curl -X POST http://127.0.0.1:8787/knowledge-api/v1/files \
   --data-binary @报告.pdf
 ```
 
-## 本地知识库同步到云端
+## 本地知识库与云端同步
 
-仓库提供 `cloud/sync-local.mjs`，把本地 `knowledge.sqlite` 的知识库、文档和文件目录同步到云端团队库。重复执行是幂等的，会更新已同步文档；本地是本次同步的写入来源。
+仓库提供 `cloud/sync-local.mjs`，把本地 `knowledge.sqlite` 的知识库、文档和文件目录同步到云端团队库。重复执行是幂等的，会更新已同步文档；默认方向是**本地 → 云端**。
 
 ```bash
 # 1) 云端管理员生成 DSH Token
@@ -249,6 +249,17 @@ node cloud/sync-local.mjs \
   --base "默认知识库"
 ```
 
+从云端拉取新增/更新到本地：
+
+```bash
+node cloud/sync-local.mjs \
+  --db "/path/to/local/knowledge.sqlite" \
+  --url "https://你的域名/knowledge-api/v1" \
+  --token "dshk_..." \
+  --pull \
+  --files-out "/path/to/cloud-files"
+```
+
 参数：
 
 | 参数 | 说明 |
@@ -257,8 +268,10 @@ node cloud/sync-local.mjs \
 | `--url` | 云端 `/knowledge-api/v1` |
 | `--token` | 云端 DSH Token（需要 `read/propose/write`） |
 | `--files` | 可选，任意类型文件目录；递归上传 |
+| `--files-out` | 可选，把云端文件下载到此目录 |
 | `--base` | 可选，只同步指定库名或本地 ID |
-| `--map` | 可选，默认 `<db>.cloud-sync.json`，保存本地文档到云端文档的映射 |
+| `--map` | 可选，默认 `<db>.cloud-sync.json`，保存本地/云端映射 |
+| `--pull` | 从云端拉取；不推本地 |
 
 也可以用环境变量：
 
@@ -270,7 +283,24 @@ CLOUD_SYNC_FILES=/data/files \
 node cloud/sync-local.mjs
 ```
 
-当前同步方向是 **本地 → 云端**。云端新增的文档不会自动回写本地；本地再次执行会把你本地改过的文档覆盖到云端。需要双向同步时，把云端文档先拉到本地再编辑，或后续增加 `--pull`。
+从云端拉取时使用：
+
+```bash
+LOCAL_KB_DB=/data/knowledge.sqlite \
+CLOUD_URL=https://kb.example.com/knowledge-api/v1 \
+CLOUD_TOKEN=dshk_... \
+CLOUD_SYNC_PULL=1 \
+CLOUD_SYNC_FILES_OUT=/data/cloud-files \
+node cloud/sync-local.mjs
+```
+
+同步规则：
+
+- 默认推送：本地内容变化才写云端；未变化跳过。
+- `--pull`：云端内容变化且本地自上次同步未变化时才写本地。
+- 本地和云端都发生变化时，默认**保留本地并报告冲突**，不静默覆盖。
+- 映射文件 `cloud-sync.json` 要保留；删掉后再次推送会在云端新建文档。
+- 云端文件下载用 `sourceKey` 保持目录层级；文件名只作为缺省路径。
 
 同步映射文件 `cloud-sync.json` 要保留；删掉后再次同步会在云端新建文档，而不是更新原来的。
 
