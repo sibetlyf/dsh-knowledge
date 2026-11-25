@@ -269,7 +269,7 @@ node cloud/sync-local.mjs \
 | `--db` | 本地 `knowledge.sqlite` |
 | `--url` | 云端 `/knowledge-api/v1` |
 | `--token` | 云端 DSH Token（需要 `read/propose/write`） |
-| `--files` | 可选，任意类型文件目录；递归上传 |
+| `--files` | 可选，任意类型文件或目录；目录递归上传 |
 | `--files-out` | 可选，把云端文件下载到此目录 |
 | `--base` | 可选，只同步指定库名或本地 ID |
 | `--map` | 可选，默认 `<db>.cloud-sync.json`，保存本地/云端映射 |

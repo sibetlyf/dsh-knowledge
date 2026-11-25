@@ -147,7 +147,7 @@ async function walkFiles(directory, prefix = '') {
 }
 
 async function artifactFiles(directory) {
-  const indexFiles = [join(directory, 'index.json'), join(dirname(directory), 'index.json')]
+  const indexFiles = [join(directory, 'index.json'), join(dirname(directory), 'index.json'), join(dirname(dirname(directory)), 'index.json')]
   const indexFile = indexFiles.find(path => existsSync(path))
   if (indexFile === undefined) return new Map()
   try {
@@ -383,9 +383,13 @@ async function main() {
     await saveMap(map)
 
     if (filesDir !== undefined) {
-      const all = await walkFiles(resolve(filesDir))
-      const artifactMap = await artifactFiles(resolve(filesDir))
-      console.log(`\n文件目录 ${filesDir}: ${all.length} 个文件`)
+      const sourcePath = resolve(filesDir)
+      const sourceInfo = await stat(sourcePath)
+      const all = sourceInfo.isFile()
+        ? [{ absolute: sourcePath, relative: basename(sourcePath) }]
+        : await walkFiles(sourcePath)
+      const artifactMap = await artifactFiles(sourceInfo.isFile() ? dirname(sourcePath) : sourcePath)
+      console.log(`\n文件${sourceInfo.isFile() ? '' : '目录'} ${filesDir}: ${all.length} 个文件`)
       for (const file of all) {
         try {
           const relative = file.relative.replaceAll('\\', '/')
