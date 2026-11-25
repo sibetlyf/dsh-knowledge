@@ -95,6 +95,7 @@ TEAM_ADMIN_NAME=管理员
 | `TEAM_TITLE` | 页面标题 |
 | `TEAM_SESSION_DAYS` | 登录会话天数，默认 7 |
 | `TEAM_MAX_BODY_BYTES` | 单篇文档正文上限，默认 5 MiB |
+| `TEAM_MAX_FILE_BYTES` | 单个文件上限，默认 100 MiB，可调到 1 GiB |
 
 ### 5. 导入原有知识库（可选）
 
@@ -212,6 +213,67 @@ sudo systemctl status team-kb
 
 至少保留一个管理员；管理员不能停用自己。
 
+## 文件库：所有类型
+
+团队网页的「文件库」支持任意文件类型：PDF、Word、Excel、PPT、图片、ZIP、音视频、二进制数据等。上传后用原文件名下载；图片、PDF、文本等可以直接在浏览器打开，其他类型下载。
+
+- 文件按知识库授权，只有登录成员可访问；
+- 上传/删除需要管理员或编辑者；
+- 文件内容保存在 `$TEAM_DATA_DIR/files/`，元数据在 `team.sqlite`；
+- 单文件默认上限 100 MiB，通过 `TEAM_MAX_FILE_BYTES` 调整；
+- 文件名、MIME 和 SHA-256 都会记录；同名同步文件通过 `sourceKey` 幂等覆盖。
+
+命令行上传任意类型：
+
+```bash
+curl -X POST http://127.0.0.1:8787/knowledge-api/v1/files \
+  -H "Authorization: Bearer dshk_..." \
+  -H "x-file-base-id: default" \
+  -H "x-file-name: $(python3 -c 'import urllib.parse;print(urllib.parse.quote("报告.pdf"))')" \
+  -H "x-content-type: application/pdf" \
+  --data-binary @报告.pdf
+```
+
+## 本地知识库同步到云端
+
+仓库提供 `cloud/sync-local.mjs`，把本地 `knowledge.sqlite` 的知识库、文档和文件目录同步到云端团队库。重复执行是幂等的，会更新已同步文档；本地是本次同步的写入来源。
+
+```bash
+# 1) 云端管理员生成 DSH Token
+# 2) 本地执行
+node cloud/sync-local.mjs \
+  --db "/path/to/local/knowledge.sqlite" \
+  --url "https://你的域名/knowledge-api/v1" \
+  --token "dshk_..." \
+  --files "/path/to/files" \
+  --base "默认知识库"
+```
+
+参数：
+
+| 参数 | 说明 |
+|---|---|
+| `--db` | 本地 `knowledge.sqlite` |
+| `--url` | 云端 `/knowledge-api/v1` |
+| `--token` | 云端 DSH Token（需要 `read/propose/write`） |
+| `--files` | 可选，任意类型文件目录；递归上传 |
+| `--base` | 可选，只同步指定库名或本地 ID |
+| `--map` | 可选，默认 `<db>.cloud-sync.json`，保存本地文档到云端文档的映射 |
+
+也可以用环境变量：
+
+```bash
+LOCAL_KB_DB=/data/knowledge.sqlite \
+CLOUD_URL=https://kb.example.com/knowledge-api/v1 \
+CLOUD_TOKEN=dshk_... \
+CLOUD_SYNC_FILES=/data/files \
+node cloud/sync-local.mjs
+```
+
+当前同步方向是 **本地 → 云端**。云端新增的文档不会自动回写本地；本地再次执行会把你本地改过的文档覆盖到云端。需要双向同步时，把云端文档先拉到本地再编辑，或后续增加 `--pull`。
+
+同步映射文件 `cloud-sync.json` 要保留；删掉后再次同步会在云端新建文档，而不是更新原来的。
+
 ## 连接本地 DSH
 
 云端服务同时暴露 DSH 远程知识库协议：
@@ -281,9 +343,10 @@ sudo /opt/team-kb/node_modules/@lemoncat7/dsh-knowledge/cloud/deploy/backup.sh /
 ```text
 knowledge.sqlite
 team.sqlite
+files.tar.gz      # 任意类型文件
 ```
 
-脚本使用 `sqlite3 .backup`，对运行中的 WAL 数据库是安全快照。把备份目录同步到另一台机器或对象存储。
+脚本使用 `sqlite3 .backup`，对运行中的 WAL 数据库是安全快照；文件目录单独打包。把备份目录同步到另一台机器或对象存储。
 
 恢复：
 
@@ -291,6 +354,7 @@ team.sqlite
 sudo systemctl stop team-kb
 sudo cp /var/backups/team-kb/20261125/knowledge.sqlite /opt/team-kb/data/knowledge.sqlite
 sudo cp /var/backups/team-kb/20261125/team.sqlite /opt/team-kb/data/team.sqlite
+sudo tar -xzf /var/backups/team-kb/20261125/files.tar.gz -C /opt/team-kb/data
 sudo chown -R teamkb:teamkb /opt/team-kb/data
 sudo systemctl start team-kb
 ```

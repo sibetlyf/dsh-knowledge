@@ -1,7 +1,9 @@
 // 独立团队知识库服务：只依赖 Node.js 24 + 本仓库的存储层，不需要安装 DSH。
 import { createServer } from 'node:http'
-import { createReadStream, existsSync, mkdirSync } from 'node:fs'
-import { join, resolve } from 'node:path'
+import { createHash, randomUUID } from 'node:crypto'
+import { createReadStream, existsSync, mkdirSync, rmSync } from 'node:fs'
+import { writeFile } from 'node:fs/promises'
+import { basename, extname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { LocalKnowledgeProvider } from '../lib/local-provider.js'
 import { registerKnowledgeApi } from '../lib/api.js'
@@ -17,12 +19,15 @@ const host = process.env.TEAM_HOST?.trim() || '127.0.0.1'
 const title = process.env.TEAM_TITLE?.trim() || '团队知识库'
 const sessionDays = integerEnv('TEAM_SESSION_DAYS', 7, 1, 30)
 const maxBody = integerEnv('TEAM_MAX_BODY_BYTES', 5 * 1024 * 1024, 64 * 1024, 50 * 1024 * 1024)
+const maxFileBytes = integerEnv('TEAM_MAX_FILE_BYTES', 100 * 1024 * 1024, 1024 * 1024, 1024 * 1024 * 1024)
+const filesDir = join(dataDir, 'files')
 const trustProxy = process.env.TEAM_TRUST_PROXY === '1'
 const publicOrigin = process.env.TEAM_PUBLIC_ORIGIN?.trim()
 const kbDbPath = resolve(process.env.TEAM_KB_DB?.trim() || join(dataDir, 'knowledge.sqlite'))
 const teamDbPath = resolve(process.env.TEAM_TEAM_DB?.trim() || join(dataDir, 'team.sqlite'))
 
 mkdirSync(dataDir, { recursive: true, mode: 0o700 })
+mkdirSync(filesDir, { recursive: true, mode: 0o700 })
 const team = new TeamStore(teamDbPath)
 const provider = new LocalKnowledgeProvider(kbDbPath)
 let closing = false
@@ -120,12 +125,12 @@ class HttpError extends Error {
   }
 }
 
-async function readBody(req) {
+async function readBody(req, limit = maxBody) {
   let size = 0
   const chunks = []
   for await (const chunk of req) {
     size += chunk.length
-    if (size > maxBody) throw new HttpError(413, '请求内容过大')
+    if (size > limit) throw new HttpError(413, '请求内容过大')
     chunks.push(chunk)
   }
   return Buffer.concat(chunks)
@@ -140,6 +145,165 @@ async function readJson(req) {
 async function readForm(req) {
   const body = await readBody(req)
   return Object.fromEntries(new URLSearchParams(body.toString('utf8')))
+}
+
+function decodeUploadHeader(value) {
+  if (typeof value !== 'string') return ''
+  try { return decodeURIComponent(value) } catch { return value }
+}
+
+function safeFileName(value) {
+  const name = basename(String(value ?? '')).replace(/[\u0000-\u001f\u007f/\\]/gu, '_').trim()
+  return name.length === 0 ? 'file' : name.slice(0, 200)
+}
+
+function mimeFromName(name) {
+  const ext = extname(name).toLowerCase()
+  return {
+    '.md': 'text/markdown; charset=utf-8', '.txt': 'text/plain; charset=utf-8', '.json': 'application/json',
+    '.pdf': 'application/pdf', '.png': 'image/png', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg',
+    '.gif': 'image/gif', '.webp': 'image/webp', '.svg': 'image/svg+xml', '.zip': 'application/zip',
+    '.doc': 'application/msword', '.docx': 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+    '.xls': 'application/vnd.ms-excel', '.xlsx': 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+    '.ppt': 'application/vnd.ms-powerpoint', '.pptx': 'application/vnd.openxmlformats-officedocument.presentationml.presentation',
+    '.csv': 'text/csv; charset=utf-8', '.mp3': 'audio/mpeg', '.mp4': 'video/mp4',
+  }[ext] ?? 'application/octet-stream'
+}
+
+async function storeUploadedFile({ baseId, name, mime, bytes, actorId, sourceKey }) {
+  const base = await provider.getKnowledgeBase(baseId)
+  if (base === undefined || base.status !== 'active') throw new HttpError(400, '知识库不存在或不可用')
+  if (bytes.length > maxFileBytes) throw new HttpError(413, `文件超过 ${Math.round(maxFileBytes / 1024 / 1024)} MiB 上限`)
+  const displayName = safeFileName(name)
+  const safeMime = String(mime ?? '').trim().slice(0, 200) || mimeFromName(displayName)
+  const sha256 = createHash('sha256').update(bytes).digest('hex')
+  const source = sourceKey === undefined || sourceKey === '' ? null : String(sourceKey).slice(0, 500)
+  const existing = team.findFileBySource(baseId, source ?? '')
+  const id = existing?.id ?? randomUUID()
+  const relativePath = join('files', id)
+  const absolutePath = join(dataDir, relativePath)
+  await writeFile(absolutePath, bytes, { mode: 0o600 })
+  if (existing !== undefined) {
+    if (existing.storage_path !== relativePath && existsSync(join(dataDir, existing.storage_path))) {
+      try { rmSync(join(dataDir, existing.storage_path)) } catch {}
+    }
+    return team.updateFile(id, { name: displayName, mime: safeMime, size: bytes.length, sha256, storagePath: relativePath })
+  }
+  return team.addFile({ id, baseId, name: displayName, mime: safeMime, size: bytes.length, sha256, storagePath: relativePath, sourceKey: source, uploadedBy: actorId })
+}
+
+function bearerActor(req) {
+  const header = req.headers.authorization
+  if (typeof header !== 'string' || !header.startsWith('Bearer ')) throw new HttpError(401, 'Bearer token is required')
+  const token = header.slice(7).trim()
+  const record = provider.authenticate(token)
+  if (record === undefined) throw new HttpError(401, 'Token 无效或已撤销')
+  return record
+}
+
+function sendFile(res, row, inline = false) {
+  const absolute = join(dataDir, row.storage_path)
+  if (!existsSync(absolute)) throw new HttpError(410, '文件内容已丢失')
+  const disposition = inline ? 'inline' : 'attachment'
+  res.writeHead(200, {
+    'content-type': row.mime || 'application/octet-stream',
+    'content-length': String(row.size),
+    'content-disposition': `${disposition}; filename="${encodeURIComponent(row.name)}"; filename*=UTF-8''${encodeURIComponent(row.name)}`,
+    'x-content-type-options': 'nosniff',
+    'cache-control': inline ? 'private, max-age=300' : 'no-store',
+  })
+  createReadStream(absolute).pipe(res)
+}
+
+function fileMetadata(row, prefix = '/api/files') {
+  return {
+    id: row.id,
+    baseId: row.base_id,
+    name: row.name,
+    mime: row.mime,
+    size: row.size,
+    sha256: row.sha256,
+    sourceKey: row.source_key ?? null,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+    inlineUrl: `${prefix}/${row.id}?inline=1`,
+    downloadUrl: `${prefix}/${row.id}`,
+  }
+}
+
+async function handleTokenFiles(req, res, url, path, method) {
+  const actor = bearerActor(req)
+  const record = actor
+  const canWrite = Array.isArray(record.permissions) && record.permissions.includes('write')
+  if (path === '/knowledge-api/v1/files' && method === 'GET') {
+    const baseId = url.searchParams.get('baseId') ?? ''
+    if (baseId === '') throw new HttpError(400, 'baseId 不能为空')
+    return sendJson(res, 200, { files: team.listFiles(baseId).map(row => fileMetadata(row, '/knowledge-api/v1/files')) })
+  }
+  if (path === '/knowledge-api/v1/files' && method === 'POST') {
+    if (!canWrite) throw new HttpError(403, 'Token 没有 write 权限')
+    const baseId = decodeUploadHeader(firstHeader(req.headers['x-file-base-id'])) || url.searchParams.get('baseId') || ''
+    const name = decodeUploadHeader(firstHeader(req.headers['x-file-name'])) || 'file'
+    const mime = firstHeader(req.headers['x-content-type']) || ''
+    const sourceKey = decodeUploadHeader(firstHeader(req.headers['x-file-source-key']))
+    const bytes = await readBody(req, maxFileBytes)
+    const row = await storeUploadedFile({ baseId, name, mime, bytes, actorId: null, sourceKey })
+    return sendJson(res, 201, { file: fileMetadata(row, '/knowledge-api/v1/files') })
+  }
+  const tokenMatch = /^\/knowledge-api\/v1\/files\/([a-f0-9-]{36})$/u.exec(path)
+  if (tokenMatch !== null && method === 'GET') {
+    const row = team.getFile(tokenMatch[1])
+    if (row === undefined) throw new HttpError(404, '文件不存在')
+    return sendFile(res, row, url.searchParams.get('inline') === '1')
+  }
+  if (tokenMatch !== null && method === 'DELETE') {
+    if (!canWrite) throw new HttpError(403, 'Token 没有 write 权限')
+    const row = team.getFile(tokenMatch[1])
+    if (row === undefined) throw new HttpError(404, '文件不存在')
+    team.deleteFile(row.id)
+    if (existsSync(join(dataDir, row.storage_path))) {
+      try { rmSync(join(dataDir, row.storage_path)) } catch {}
+    }
+    return sendJson(res, 200, { ok: true })
+  }
+  throw new HttpError(404, '文件接口不存在')
+}
+
+async function handleTeamFiles(req, res, url, path, method, session) {
+  if (path === '/api/files' && method === 'GET') {
+    const baseId = url.searchParams.get('baseId') ?? ''
+    if (baseId === '') throw new HttpError(400, 'baseId 不能为空')
+    return sendJson(res, 200, { files: team.listFiles(baseId).map(row => fileMetadata(row)) })
+  }
+  if (path === '/api/files' && method === 'POST') {
+    requireRole(session, ['admin', 'editor'])
+    const baseId = decodeUploadHeader(firstHeader(req.headers['x-file-base-id'])) || ''
+    const name = decodeUploadHeader(firstHeader(req.headers['x-file-name'])) || 'file'
+    const mime = firstHeader(req.headers['x-content-type']) || ''
+    const sourceKey = decodeUploadHeader(firstHeader(req.headers['x-file-source-key']))
+    const bytes = await readBody(req, maxFileBytes)
+    const row = await storeUploadedFile({ baseId, name, mime, bytes, actorId: session.user.id, sourceKey })
+    team.audit(session.user.id, 'file.upload', row.id, `${name} ${bytes.length}`)
+    return sendJson(res, 201, { file: fileMetadata(row) })
+  }
+  const fileMatch = /^\/api\/files\/([a-f0-9-]{36})$/u.exec(path)
+  if (fileMatch !== null && method === 'GET') {
+    const row = team.getFile(fileMatch[1])
+    if (row === undefined) throw new HttpError(404, '文件不存在')
+    return sendFile(res, row, url.searchParams.get('inline') === '1')
+  }
+  if (fileMatch !== null && method === 'DELETE') {
+    requireRole(session, ['admin', 'editor'])
+    const row = team.getFile(fileMatch[1])
+    if (row === undefined) throw new HttpError(404, '文件不存在')
+    team.deleteFile(row.id)
+    if (existsSync(join(dataDir, row.storage_path))) {
+      try { rmSync(join(dataDir, row.storage_path)) } catch {}
+    }
+    team.audit(session.user.id, 'file.delete', row.id, row.name)
+    return sendJson(res, 200, { ok: true })
+  }
+  throw new HttpError(404, '文件接口不存在')
 }
 
 function safeNext(value) {
@@ -254,6 +418,10 @@ async function handle(req, res) {
   if (path === '/api/health') return sendJson(res, 200, { ok: true, service: 'team-knowledge' })
 
   if (path === '/knowledge-api/v1' || path.startsWith('/knowledge-api/v1/')) {
+    if (path === '/knowledge-api/v1/files' || path.startsWith('/knowledge-api/v1/files/')) {
+      await handleTokenFiles(req, res, url, path, method)
+      return
+    }
     if (remoteKnowledgeHandler === undefined) throw new HttpError(503, 'DSH 远程 API 尚未就绪')
     await remoteKnowledgeHandler(req, res)
     return
@@ -346,6 +514,11 @@ async function handle(req, res) {
   }
 
   if (method !== 'GET' && method !== 'HEAD') requireCsrf(req, session)
+
+  if (path === '/api/files' || path.startsWith('/api/files/')) {
+    await handleTeamFiles(req, res, url, path, method, session)
+    return
+  }
 
   if (path === '/api/kbs' && method === 'GET') {
     const bases = (await provider.listKnowledgeBases()).filter(base => base.status === 'active')

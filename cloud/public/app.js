@@ -12,6 +12,8 @@ const state = {
   searchFocus: false,
   searchTimer: null,
   loading: false,
+  filesOpen: false,
+  files: [],
   error: '',
   admin: null,
   invite: null,
@@ -75,6 +77,7 @@ function render() {
   const main = renderMain()
   root.append(sidebar, main)
   if (state.admin !== null) root.append(renderAdmin())
+  if (state.filesOpen === true) root.append(renderFiles())
   document.getElementById('boot')?.classList.add('hidden')
   root.classList.remove('hidden')
 }
@@ -121,7 +124,9 @@ function renderMain() {
   const base = state.kbs.find(item => item.id === state.baseId)
   main.append(h('header', { class: 'topbar' },
     h('div', { class: 'breadcrumb' }, h('strong', { text: base?.name ?? '全部知识库' }), h('span', { text: state.selected ? ` / ${state.selected.title}` : '' })),
-    h('span', { class: 'pill', text: state.me.canEdit ? '可编辑' : '只读' })))
+    h('div', { class: 'doc-actions' },
+      state.baseId !== null ? h('button', { type: 'button', class: 'btn', onClick: () => void openFiles(), text: '文件库' }) : null,
+      h('span', { class: 'pill', text: state.me.canEdit ? '可编辑' : '只读' }))))
   if (base !== undefined) main.append(renderDocumentList())
   const content = h('section', { class: 'content' })
   if (state.loading) content.append(h('div', { class: 'welcome' }, h('p', { text: '正在加载…' })))
@@ -338,6 +343,99 @@ async function logout() {
     await api('/logout', { method: 'POST' })
   } catch {}
   location.assign('/login')
+}
+
+async function openFiles() {
+  if (state.baseId === null) { toast('请先选择知识库', 'error'); return }
+  state.filesOpen = true
+  await loadFiles()
+}
+
+async function loadFiles() {
+  if (state.baseId === null) return
+  try {
+    const result = await api(`/api/files?baseId=${encodeURIComponent(state.baseId)}`)
+    state.files = result.files
+    state.error = ''
+  } catch (error) {
+    state.error = error.message
+  }
+  render()
+}
+
+async function uploadFiles(files) {
+  if (files.length === 0) return
+  let uploaded = 0
+  for (const file of files) {
+    try {
+      const response = await fetch('/api/files', {
+        method: 'POST',
+        credentials: 'same-origin',
+        headers: {
+          'x-csrf-token': state.me.csrf,
+          'x-file-base-id': state.baseId,
+          'x-file-name': encodeURIComponent(file.name),
+          'x-file-source-key': encodeURIComponent(file.webkitRelativePath || file.name),
+          'x-content-type': file.type || 'application/octet-stream',
+        },
+        body: file,
+      })
+      if (!response.ok) {
+        const payload = await response.json().catch(() => ({}))
+        throw new Error(payload.error ?? `上传失败 (${response.status})`)
+      }
+      uploaded += 1
+    } catch (error) {
+      toast(`${file.name}：${error.message}`, 'error')
+    }
+  }
+  if (uploaded > 0) toast(`已上传 ${uploaded} 个文件`)
+  await loadFiles()
+}
+
+function formatFileSize(bytes) {
+  if (bytes < 1024) return `${bytes} B`
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`
+  return `${(bytes / 1024 / 1024).toFixed(1)} MB`
+}
+
+function renderFiles() {
+  const close = () => { state.filesOpen = false; render() }
+  const input = h('input', {
+    type: 'file', multiple: true, hidden: true,
+    onChange: event => {
+      const files = event.currentTarget.files
+      if (files !== null) void uploadFiles([...files])
+      event.currentTarget.value = ''
+    },
+  })
+  const rows = state.files.map(file => h('div', { class: 'file-row' },
+    h('div', { class: 'file-main' },
+      h('strong', { text: file.name }),
+      h('small', { text: `${formatFileSize(file.size)} · ${file.mime || '未知类型'} · ${new Date(file.updatedAt).toLocaleString()}` })),
+    h('div', { class: 'file-actions' },
+      h('a', { class: 'btn', href: file.inlineUrl, target: '_blank', rel: 'noopener', text: '打开' }),
+      h('a', { class: 'btn', href: file.downloadUrl, text: '下载' }),
+      state.me.canEdit ? h('button', {
+        type: 'button', class: 'btn danger', text: '删除',
+        onClick: async () => {
+          if (!confirm(`删除文件「${file.name}」？`)) return
+          try {
+            await api(`/api/files/${encodeURIComponent(file.id)}`, { method: 'DELETE' })
+            state.files = state.files.filter(row => row.id !== file.id)
+            render()
+            toast('文件已删除')
+          } catch (error) { toast(error.message, 'error') }
+        },
+      }) : null)))
+  return h('div', { class: 'modal-backdrop', onClick: event => { if (event.target === event.currentTarget) close() } },
+    h('div', { class: 'modal', role: 'dialog', 'aria-modal': 'true', 'aria-label': '文件库' },
+      h('div', { class: 'modal-head' }, h('h2', { text: '文件库' }), h('button', { type: 'button', class: 'icon-btn', onClick: close, text: '关闭' })),
+      h('p', { class: 'note', text: '支持任意文件类型：PDF、Word、Excel、PPT、图片、压缩包、音视频等。文件按所属知识库授权，登录成员可下载。' }),
+      state.me.canEdit ? h('div', { class: 'doc-actions' },
+        h('button', { type: 'button', class: 'btn primary', onClick: () => input.click(), text: '+ 上传文件' }),
+        input) : null,
+      rows.length === 0 ? h('div', { class: 'doc-empty', text: '这个知识库还没有文件。' }) : h('div', { class: 'file-list' }, ...rows)))
 }
 
 async function openAdmin() {
