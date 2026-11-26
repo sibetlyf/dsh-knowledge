@@ -52,6 +52,15 @@ dsh plugin --profile web add .\dsh-knowledge-*.tgz
 
 > 如果你直接安装 GitHub 的 `archive/refs/heads/main.tar.gz`，那只是源码，不是预构建包；没有 `lib/client.js` 时，DSH 不会出现「云端同步」等新客户端功能。
 
+> **安装后验证**：如果 DSH 报 `Cannot find module ...\@lemoncat7\dsh-knowledge\lib\index.js`，说明安装的是源码，`lib/` 没有构建出来。执行上面的 `npm ci && npm pack` 后，先确认 tarball 内存在：
+>
+> ```powershell
+> tar -tzf .\lemoncat7-dsh-knowledge-2.22.10-custom.1.tgz |
+>   Select-String 'package/lib/index.js'
+> ```
+>
+> 有输出才安装；没有输出说明 `prepare/build` 失败或没有包含 `lib`。
+
 > 安装日志里的 `@lemoncat7/dsh-knowledge@2.22.10-custom.1` 是 `package.json` 的包名和版本，不是第二个插件。
 
 ### 方式二：GitHub 源码
