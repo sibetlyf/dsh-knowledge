@@ -85,6 +85,65 @@ export class TeamStore {
       CREATE INDEX IF NOT EXISTS files_base ON files(base_id, updated_at);
       CREATE UNIQUE INDEX IF NOT EXISTS files_source ON files(base_id, source_key) WHERE source_key IS NOT NULL;
       CREATE INDEX IF NOT EXISTS sessions_expiry ON sessions(expires_at);
+      CREATE TABLE IF NOT EXISTS sync_changes (
+        seq INTEGER PRIMARY KEY AUTOINCREMENT,
+        entity_kind TEXT NOT NULL,
+        entity_id TEXT NOT NULL,
+        base_id TEXT NOT NULL,
+        operation TEXT NOT NULL,
+        version INTEGER,
+        occurred_at TEXT NOT NULL,
+        payload TEXT
+      );
+      CREATE INDEX IF NOT EXISTS sync_changes_base ON sync_changes(base_id, occurred_at, seq);
+      CREATE TABLE IF NOT EXISTS file_text (
+        file_id TEXT PRIMARY KEY REFERENCES files(id) ON DELETE CASCADE,
+        base_id TEXT NOT NULL,
+        status TEXT NOT NULL,
+        content TEXT NOT NULL DEFAULT '',
+        parser TEXT,
+        error TEXT,
+        updated_at TEXT NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS file_text_base ON file_text(base_id, status);
+      CREATE VIRTUAL TABLE IF NOT EXISTS file_text_fts USING fts5(file_id UNINDEXED, base_id UNINDEXED, name, content, tokenize='unicode61');
+      CREATE TABLE IF NOT EXISTS wiki_pages (
+        id TEXT PRIMARY KEY,
+        base_id TEXT NOT NULL,
+        slug TEXT NOT NULL,
+        title TEXT NOT NULL,
+        content TEXT NOT NULL,
+        status TEXT NOT NULL DEFAULT 'draft',
+        version INTEGER NOT NULL DEFAULT 1,
+        created_by TEXT,
+        updated_by TEXT,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      );
+      CREATE UNIQUE INDEX IF NOT EXISTS wiki_slug ON wiki_pages(base_id, slug);
+      CREATE TABLE IF NOT EXISTS wiki_versions (
+        id TEXT PRIMARY KEY,
+        page_id TEXT NOT NULL REFERENCES wiki_pages(id) ON DELETE CASCADE,
+        version INTEGER NOT NULL,
+        title TEXT NOT NULL,
+        content TEXT NOT NULL,
+        status TEXT NOT NULL,
+        created_by TEXT,
+        created_at TEXT NOT NULL
+      );
+      CREATE UNIQUE INDEX IF NOT EXISTS wiki_version_unique ON wiki_versions(page_id, version);
+      CREATE TABLE IF NOT EXISTS wiki_sources (
+        id TEXT PRIMARY KEY,
+        page_id TEXT NOT NULL REFERENCES wiki_pages(id) ON DELETE CASCADE,
+        source_kind TEXT NOT NULL,
+        source_id TEXT NOT NULL,
+        title TEXT NOT NULL,
+        excerpt TEXT,
+        line_start INTEGER,
+        line_end INTEGER,
+        created_at TEXT NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS wiki_sources_page ON wiki_sources(page_id);
     `)
     const fileColumns = this.db.prepare('PRAGMA table_info(files)').all().map(column => column.name)
     if (!fileColumns.includes('user_name')) this.db.exec('ALTER TABLE files ADD COLUMN user_name TEXT')
@@ -218,6 +277,156 @@ export class TeamStore {
       .run(new Date().toISOString(), actorId ?? null, action, target, detail)
   }
 
+  recordChange({ entityKind, entityId, baseId, operation, version = null, payload = null, occurredAt = new Date().toISOString() }) {
+    this.db.prepare(`INSERT INTO sync_changes
+      (entity_kind,entity_id,base_id,operation,version,occurred_at,payload)
+      VALUES (?,?,?,?,?,?,?)`)
+      .run(entityKind, entityId, baseId, operation, version, occurredAt, payload === null ? null : JSON.stringify(payload))
+  }
+
+  listChanges(baseId, since = '', limit = 200) {
+    const size = Math.min(Math.max(Number(limit) || 200, 1), 1000)
+    const rows = this.db.prepare(`SELECT * FROM sync_changes
+      WHERE base_id=? AND occurred_at>? ORDER BY occurred_at, seq LIMIT ?`).all(baseId, String(since ?? ''), size)
+    return rows.map(row => ({
+      seq: row.seq,
+      entityKind: row.entity_kind,
+      entityId: row.entity_id,
+      baseId: row.base_id,
+      operation: row.operation,
+      version: row.version,
+      occurredAt: row.occurred_at,
+      payload: row.payload === null ? null : JSON.parse(row.payload),
+    }))
+  }
+
+  listFileText(baseId) {
+    return this.db.prepare('SELECT * FROM file_text WHERE base_id=? ORDER BY updated_at DESC').all(baseId)
+  }
+
+  getFileText(fileId) {
+    return this.db.prepare('SELECT * FROM file_text WHERE file_id=?').get(fileId)
+  }
+
+  setFileText({ fileId, baseId, status, content = '', parser = null, error = null, name = '' }) {
+    const now = new Date().toISOString()
+    this.db.prepare(`INSERT INTO file_text (file_id,base_id,status,content,parser,error,updated_at)
+      VALUES (?,?,?,?,?,?,?)
+      ON CONFLICT(file_id) DO UPDATE SET base_id=excluded.base_id,status=excluded.status,content=excluded.content,
+      parser=excluded.parser,error=excluded.error,updated_at=excluded.updated_at`)
+      .run(fileId, baseId, status, content, parser, error, now)
+    this.db.prepare('DELETE FROM file_text_fts WHERE file_id=?').run(fileId)
+    if (status === 'parsed' && content !== '') {
+      this.db.prepare('INSERT INTO file_text_fts (file_id,base_id,name,content) VALUES (?,?,?,?)')
+        .run(fileId, baseId, name, content)
+    }
+    return this.getFileText(fileId)
+  }
+
+  searchFileText(baseId, query, limit = 20) {
+    const raw = String(query ?? '').trim()
+    const terms = raw.split(/\s+/u).map(term => term.replace(/[^\p{L}\p{N}_-]/gu, '')).filter(Boolean).slice(0, 8)
+    if (terms.length === 0) return []
+    const match = terms.map(term => `"${term.replaceAll('"', '""')}"`).join(' AND ')
+    try {
+      const hits = this.db.prepare(`SELECT f.file_id AS fileId, f.base_id AS baseId, f.name AS name,
+        snippet(file_text_fts, 3, '【', '】', '…', 24) AS snippet, bm25(file_text_fts) AS score
+        FROM file_text_fts f JOIN files x ON x.id=f.file_id
+        WHERE file_text_fts MATCH ? AND f.base_id=? ORDER BY score LIMIT ?`).all(match, baseId, Math.min(Math.max(limit, 1), 100))
+      if (hits.length > 0) return hits
+    } catch { /* fall through to substring search */ }
+    // 中文等没有空格分词时，FTS5 往往只能命中完整短语；补充有限长度的子串检索。
+    if (raw.length < 2) return []
+    const pattern = `%${raw.slice(0, 80)}%`
+    return this.db.prepare(`SELECT t.file_id AS fileId, t.base_id AS baseId, x.name AS name,
+      substr(t.content, max(1, instr(t.content, ?) - 30), 90) AS snippet, 0 AS score
+      FROM file_text t JOIN files x ON x.id=t.file_id
+      WHERE t.base_id=? AND t.status='parsed' AND (t.content LIKE ? OR x.name LIKE ?)
+      ORDER BY t.updated_at DESC LIMIT ?`).all(raw.slice(0, 80), baseId, pattern, pattern, Math.min(Math.max(limit, 1), 100))
+  }
+
+  listWikiPages(baseId) {
+    return this.db.prepare('SELECT id,base_id,slug,title,status,version,created_by,updated_by,created_at,updated_at FROM wiki_pages WHERE base_id=? ORDER BY updated_at DESC').all(baseId)
+  }
+
+  getWikiPage(id) {
+    const row = this.db.prepare('SELECT * FROM wiki_pages WHERE id=?').get(id)
+    if (row === undefined) return undefined
+    return { ...row, sources: this.listWikiSources(id) }
+  }
+
+  findWikiPage(baseId, slug) {
+    return this.db.prepare('SELECT * FROM wiki_pages WHERE base_id=? AND slug=?').get(baseId, slug)
+  }
+
+  listWikiSources(pageId) {
+    return this.db.prepare('SELECT * FROM wiki_sources WHERE page_id=? ORDER BY created_at').all(pageId)
+      .map(row => ({ ...row, lineStart: row.line_start, lineEnd: row.line_end }))
+  }
+
+  listWikiVersions(pageId) {
+    return this.db.prepare('SELECT id,page_id,version,title,status,created_by,created_at FROM wiki_versions WHERE page_id=? ORDER BY version DESC').all(pageId)
+  }
+
+  createWikiPage({ baseId, slug, title, content, createdBy = null, status = 'draft', sources = [] }) {
+    const id = randomUUID()
+    const now = new Date().toISOString()
+    this.db.prepare(`INSERT INTO wiki_pages (id,base_id,slug,title,content,status,version,created_by,updated_by,created_at,updated_at)
+      VALUES (?,?,?,?,?,?,1,?,?,?,?)`).run(id, baseId, slug, title, content, status, createdBy, createdBy, now, now)
+    this.recordWikiVersion(id, title, content, status, createdBy, 1)
+    for (const source of sources) this.addWikiSource(id, source)
+    return this.getWikiPage(id)
+  }
+
+  updateWikiPage(id, { title, content, status, updatedBy = null, sources = undefined }) {
+    const page = this.getWikiPage(id)
+    if (page === undefined) throw new TeamError('Wiki 页面不存在', 404)
+    const version = page.version + 1
+    const now = new Date().toISOString()
+    this.db.prepare(`UPDATE wiki_pages SET title=?,content=?,status=?,version=?,updated_by=?,updated_at=? WHERE id=?`)
+      .run(title, content, status, version, updatedBy, now, id)
+    this.recordWikiVersion(id, title, content, status, updatedBy, version)
+    if (Array.isArray(sources)) {
+      this.db.prepare('DELETE FROM wiki_sources WHERE page_id=?').run(id)
+      for (const source of sources) this.addWikiSource(id, source)
+    }
+    this.recordChange({ entityKind: 'wiki', entityId: id, baseId: page.base_id, operation: 'update', version, payload: { title, status } })
+    return this.getWikiPage(id)
+  }
+
+  publishWikiPage(id, actor = null) {
+    const page = this.getWikiPage(id)
+    if (page === undefined) throw new TeamError('Wiki 页面不存在', 404)
+    return this.updateWikiPage(id, { title: page.title, content: page.content, status: 'published', updatedBy: actor })
+  }
+
+  deleteWikiPage(id) {
+    const page = this.getWikiPage(id)
+    if (page === undefined) return 0
+    this.db.prepare('DELETE FROM wiki_pages WHERE id=?').run(id)
+    this.recordChange({ entityKind: 'wiki', entityId: id, baseId: page.base_id, operation: 'delete', payload: { title: page.title } })
+    return 1
+  }
+
+  recordWikiVersion(pageId, title, content, status, createdBy, version) {
+    this.db.prepare(`INSERT INTO wiki_versions (id,page_id,version,title,content,status,created_by,created_at)
+      VALUES (?,?,?,?,?,?,?,?)`).run(randomUUID(), pageId, version, title, content, status, createdBy ?? null, new Date().toISOString())
+  }
+
+  addWikiSource(pageId, source) {
+    const id = randomUUID()
+    this.db.prepare(`INSERT INTO wiki_sources
+      (id,page_id,source_kind,source_id,title,excerpt,line_start,line_end,created_at)
+      VALUES (?,?,?,?,?,?,?,?,?)`).run(id, pageId, source.kind ?? 'document', source.sourceId ?? '', source.title ?? '', source.excerpt ?? null,
+      source.lineStart ?? null, source.lineEnd ?? null, new Date().toISOString())
+  }
+
+  restoreWikiVersion(pageId, version, actor = null) {
+    const row = this.db.prepare('SELECT * FROM wiki_versions WHERE page_id=? AND version=?').get(pageId, version)
+    if (row === undefined) throw new TeamError('Wiki 版本不存在', 404)
+    return this.updateWikiPage(pageId, { title: row.title, content: row.content, status: row.status, updatedBy: actor })
+  }
+
   listAudit(limit = 100) {
     return this.db.prepare('SELECT * FROM audit ORDER BY id DESC LIMIT ?').all(Math.min(Math.max(limit, 1), 500))
   }
@@ -241,16 +450,26 @@ export class TeamStore {
       (id,base_id,name,mime,size,sha256,storage_path,source_key,user_name,uploaded_by,created_at,updated_at)
       VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`)
       .run(id, baseId, name, mime, size, sha256, storagePath, sourceKey, userName, uploadedBy, now, now)
+    this.recordChange({ entityKind: 'file', entityId: id, baseId, operation: 'create', payload: { name, mime, size, sha256, sourceKey, userName } })
     return this.getFile(id)
   }
 
   updateFile(id, { name, mime, size, sha256, storagePath }) {
+    const now = new Date().toISOString()
     this.db.prepare('UPDATE files SET name=?,mime=?,size=?,sha256=?,storage_path=?,updated_at=? WHERE id=?')
-      .run(name, mime, size, sha256, storagePath, new Date().toISOString(), id)
-    return this.getFile(id)
+      .run(name, mime, size, sha256, storagePath, now, id)
+    const row = this.getFile(id)
+    this.recordChange({ entityKind: 'file', entityId: id, baseId: row.base_id, operation: 'update', payload: { name, mime, size, sha256 } })
+    return row
   }
 
   deleteFile(id) {
-    return this.db.prepare('DELETE FROM files WHERE id=?').run(id).changes
+    const row = this.getFile(id)
+    if (row === undefined) return 0
+    this.db.prepare('DELETE FROM file_text_fts WHERE file_id=?').run(id)
+    this.db.prepare('DELETE FROM file_text WHERE file_id=?').run(id)
+    const changes = this.db.prepare('DELETE FROM files WHERE id=?').run(id).changes
+    if (changes > 0) this.recordChange({ entityKind: 'file', entityId: id, baseId: row.base_id, operation: 'delete', payload: { name: row.name } })
+    return changes
   }
 }

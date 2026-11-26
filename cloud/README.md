@@ -56,11 +56,36 @@ sudo chown -R teamkb:teamkb /opt/team-kb
 sudo -u teamkb npm install --prefix /opt/team-kb --omit=dev --ignore-scripts /tmp/lemoncat7-dsh-knowledge-2.22.10-custom.1.tgz
 ```
 
-应用入口：
+应用入口（按实际 systemd 配置）：
 
 ```text
-/opt/team-kb/node_modules/@lemoncat7/dsh-knowledge/cloud/server.mjs
+/opt/team-kb/app/cloud/server.mjs
 ```
+
+有些部署把包放在 `node_modules/@lemoncat7/dsh-knowledge`；更新时必须替换 systemd `ExecStart` 实际指向的目录，仅 `git pull` 不会更新独立部署。
+
+### 更新已部署服务
+
+```bash
+# 本地生成包
+npm pack
+
+# 上传到服务器
+scp lemoncat7-dsh-knowledge-2.22.10-custom.1.tgz root@服务器:/tmp/
+
+# 服务器执行（自动备份、替换 /opt/team-kb/app、重启、健康检查，失败回滚）
+sudo bash /root/dsh-knowledge/cloud/deploy/update-app.sh \
+  /tmp/lemoncat7-dsh-knowledge-2.22.10-custom.1.tgz
+```
+
+更新后检查：
+
+```bash
+curl -s http://127.0.0.1:8787/knowledge-api/v1/health
+curl -s http://127.0.0.1:8787/assets/app.js | grep workspace-tab
+```
+
+`/health` 返回的 `buildId` 与页面左下角 `build ...` 应一致。
 
 ### 4. 配置环境变量
 
@@ -96,6 +121,20 @@ TEAM_ADMIN_NAME=管理员
 | `TEAM_SESSION_DAYS` | 登录会话天数，默认 7 |
 | `TEAM_MAX_BODY_BYTES` | 单篇文档正文上限，默认 5 MiB |
 | `TEAM_MAX_FILE_BYTES` | 单个文件上限，默认 100 MiB，可调到 1 GiB |
+| `TEAM_LLM_API_BASE` | 可选，OpenAI 兼容接口，例如 `https://api.example.com/v1`；未配置时问答/Wiki 使用抽取式证据 |
+| `TEAM_LLM_API_KEY` | 可选模型 API Key |
+| `TEAM_LLM_MODEL` | 可选模型名；配置后才能生成模型回答 |
+
+### 文件解析、搜索、问答与 Wiki
+
+- 文本类文件（Markdown、TXT、CSV、JSON、HTML、代码等）上传后自动抽取文本，写入 SQLite FTS5 索引；
+- PDF/Office/图片等复杂格式当前标记为“仅存储”，原文件可下载，不伪造“已索引”；
+- 文件列表显示 `已索引 / 待解析 / 仅存储 / 解析失败`，详情支持重新解析；
+- `/api/search` 同时返回文档命中和文件文本命中；
+- `/api/ask` 返回带 `[编号]` 引用的答案和引用列表；没有配置模型时返回可核对证据，不编造答案；
+- `/api/wiki/generate` 生成草稿并记录来源，`/api/wiki/:id/publish` 审核发布，版本可恢复；
+- `/knowledge-api/v1/sync/changes?baseId=...&since=...` 提供增量变更游标，文件变更含删除事件。
+
 
 ### 5. 导入原有知识库（可选）
 

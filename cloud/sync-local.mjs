@@ -105,6 +105,14 @@ async function saveMap(map) {
   await writeFile(mapPath, `${JSON.stringify(map, null, 2)}\n`, { mode: 0o600 })
 }
 
+async function syncChanges(cloudBaseId, since) {
+  const response = await fetch(`${apiBase}/sync/changes?baseId=${encodeURIComponent(cloudBaseId)}&since=${encodeURIComponent(since)}`, {
+    headers: { authorization: `Bearer ${token}` },
+  })
+  if (!response.ok) throw new Error(`读取变更失败 (${response.status})`)
+  return await response.json()
+}
+
 async function uploadFile(cloudBaseId, localPath, sourceKey, displayName = basename(sourceKey), map) {
   const info = await stat(localPath)
   if (!info.isFile()) return false
@@ -229,7 +237,20 @@ async function pullCloud(local, remote, map, remoteBases, localBases) {
       }
     }
     map.bases[localBase.id] = cloudBase.id
-    const cloudDocs = await remote.listDocuments(cloudBase.id)
+    let cloudDocs = await remote.listDocuments(cloudBase.id)
+    let nextCursor = new Date().toISOString()
+    const since = map.sync[cloudBase.id]
+    if (typeof since === 'string' && since !== '') {
+      try {
+        const feed = await syncChanges(cloudBase.id, since)
+        cloudDocs = feed.changes.filter(change => change.entityKind === 'document' && change.operation !== 'delete')
+          .map(change => ({ id: change.entityId, title: change.payload?.title ?? '' }))
+        nextCursor = feed.nextCursor ?? nextCursor
+        console.log(`  增量变更: ${cloudDocs.length} 篇文档`)
+      } catch (error) {
+        console.warn(`  增量接口不可用，回退全量扫描: ${error.message}`)
+      }
+    }
     console.log(`\n拉取 ${cloudBase.name}: ${cloudDocs.length} 篇文档`)
     for (const summary of cloudDocs) {
       try {
@@ -287,6 +308,8 @@ async function pullCloud(local, remote, map, remoteBases, localBases) {
         console.error(`  拉取失败: ${summary.title} — ${error.message}`)
       }
     }
+    map.sync[cloudBase.id] = nextCursor
+    await saveMap(map)
     if (filesOut !== undefined) {
       const response = await fetch(`${apiBase}/files?baseId=${encodeURIComponent(cloudBase.id)}`, {
         headers: { authorization: `Bearer ${token}` },
@@ -318,6 +341,7 @@ async function main() {
   map.mirrorBases ??= {}
   map.mirrorDocs ??= {}
   map.files ??= {}
+  map.sync ??= {}
   const localBases = (await local.listKnowledgeBases()).filter(base => base.status === 'active')
   const selectedBases = baseFilter === undefined
     ? localBases.filter(base => !new Set(Object.values(map.mirrorBases)).has(base.id))

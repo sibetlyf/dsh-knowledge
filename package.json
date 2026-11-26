@@ -106,7 +106,9 @@
     "test": "npm run build && node --test test/*.test.mjs",
     "eval:retrieval": "npm run build && node scripts/evaluate-retrieval.mjs",
     "cloud": "node cloud/server.mjs",
-    "cloud:check": "node --check cloud/server.mjs && node --check cloud/team-store.mjs && node --check cloud/views.mjs && node --check cloud/public/app.js && node --check cloud/sync-local.mjs",
+    "cloud:check": "node --check cloud/server.mjs && node --check cloud/team-store.mjs && node --check cloud/ingest.mjs && node --check cloud/llm.mjs && node --check cloud/views.mjs && node --check cloud/public/app.js && node --check cloud/sync-local.mjs",
+    "cloud:pack": "npm pack",
+    "cloud:update": "bash cloud/deploy/update-app.sh",
     "pack:check": "npm pack --dry-run"
   },
   "dependencies": {

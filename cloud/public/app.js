@@ -1,5 +1,6 @@
 const state = {
   me: null,
+  meta: null,
   kbs: [],
   baseId: null,
   groups: [],
@@ -8,6 +9,8 @@ const state = {
   selected: null,
   selectedFile: null,
   view: 'documents',
+  ask: { question: '', answer: '', citations: [], engine: '', busy: false, error: '' },
+  wiki: { pages: [], page: null, versions: [], draftTitle: '', draftContent: '', busy: false },
   editing: false,
   draftTitle: '',
   draftBody: '',
@@ -79,7 +82,8 @@ function render() {
   const hasBase = state.kbs.some(base => base.id === state.baseId)
   root.dataset.hasBase = String(hasBase)
   root.append(sidebar)
-  if (hasBase) root.append(renderResourceList())
+  if (hasBase && state.view !== 'ask' && state.view !== 'wiki') root.append(renderResourceList())
+  else if (hasBase) root.append(renderContextList())
   root.append(renderMain())
   if (state.admin !== null) root.append(renderAdmin())
   document.getElementById('boot')?.classList.add('hidden')
@@ -116,37 +120,43 @@ function renderSidebar() {
         },
       })),
     h('div', { class: 'workspace-nav', role: 'tablist', 'aria-label': '工作区' },
-      h('button', { type: 'button', class: `workspace-tab${state.view === 'documents' ? ' active' : ''}`, onClick: () => { state.view = 'documents'; state.selectedFile = null; render(); void loadDocuments() } }, '文档'),
-      h('button', { type: 'button', class: `workspace-tab${state.view === 'files' ? ' active' : ''}`, onClick: () => { state.view = 'files'; state.selected = null; render(); void loadFiles() } }, '文件'),
+      h('button', { type: 'button', class: `workspace-tab${state.view === 'documents' ? ' active' : ''}`, onClick: () => switchView('documents') }, '文档'),
+      h('button', { type: 'button', class: `workspace-tab${state.view === 'files' ? ' active' : ''}`, onClick: () => switchView('files') }, '文件'),
+      h('button', { type: 'button', class: `workspace-tab${state.view === 'ask' ? ' active' : ''}`, onClick: () => switchView('ask') }, '问答'),
+      h('button', { type: 'button', class: `workspace-tab${state.view === 'wiki' ? ' active' : ''}`, onClick: () => switchView('wiki') }, 'Wiki'),
     ),
     h('nav', { class: 'kb-list', 'aria-label': '知识库' },
       baseList.length === 0 ? h('p', { class: 'note', text: '还没有可访问的知识库。' }) : baseList),
     h('div', { class: 'sidebar-foot' },
       state.me.canEdit && state.view === 'documents' ? h('button', { type: 'button', class: 'side-btn accent', onClick: openCreate, text: state.baseId === null ? '+ 新建文档' : '+ 在这个库中新建' }) : null,
       state.me.isAdmin ? h('button', { type: 'button', class: 'side-btn', onClick: () => void openAdmin(), text: '成员与邀请' }) : null,
-      h('button', { type: 'button', class: 'side-btn ghost', onClick: () => void refreshAll(), text: '刷新' })),
+      h('button', { type: 'button', class: 'side-btn ghost', onClick: () => void refreshAll(), text: '刷新' }),
+      h('div', { class: 'build-stamp', title: '服务端 build ID', text: state.meta ? `build ${state.meta.buildId}` : 'build …' })),
   )
 }
 
 function renderMain() {
   const main = h('main', { class: 'main' })
   const base = state.kbs.find(item => item.id === state.baseId)
-  const currentTitle = state.view === 'files' ? state.selectedFile?.name : state.selected?.title
+  const currentTitle = state.view === 'files' ? state.selectedFile?.name : state.view === 'wiki' ? state.wiki.page?.title : state.selected?.title
   main.append(h('header', { class: 'topbar' },
     h('div', { class: 'breadcrumb' },
       h('span', { text: '工作区' }), h('span', { class: 'crumb-separator', text: '/' }),
       h('strong', { text: base?.name ?? '全部知识库' }),
       h('span', { class: 'crumb-separator', text: '/' }),
-      h('span', { text: state.view === 'files' ? '文件' : '文档' }),
+      h('span', { text: state.view === 'files' ? '文件' : state.view === 'ask' ? '问答' : state.view === 'wiki' ? 'Wiki' : '文档' }),
       currentTitle ? h('span', { class: 'crumb-current', text: ` / ${currentTitle}` }) : null),
     h('div', { class: 'doc-actions' },
       state.view === 'documents' && state.baseId !== null && state.me.canEdit ? h('button', { type: 'button', class: 'btn primary', onClick: openCreate, text: '+ 新建文档' }) : null,
+      state.view === 'wiki' && state.me.canEdit ? h('button', { type: 'button', class: 'btn primary', onClick: () => void generateWiki(), text: '+ 生成 Wiki 草稿' }) : null,
       state.me.isAdmin ? h('button', { type: 'button', class: 'btn', onClick: () => void openAdmin(), text: '成员与设置' }) : null,
       h('span', { class: 'pill', text: state.me.canEdit ? '可编辑' : '只读' }))))
   const content = h('section', { class: 'content' })
   if (state.baseId === null) content.append(renderWelcome())
   else if (state.loading) content.append(h('div', { class: 'welcome' }, h('p', { text: '正在加载…' })))
   else if (state.error !== '') content.append(h('div', { class: 'welcome' }, h('p', { text: state.error })))
+  else if (state.view === 'ask') content.append(renderAskDetail())
+  else if (state.view === 'wiki') content.append(renderWikiDetail())
   else if (state.view === 'files') content.append(state.selectedFile === null ? renderEmptyDetail('选择一个文件查看详情') : renderFileDetail())
   else if (state.selected === null) content.append(renderWelcome())
   else content.append(state.editing ? renderEditor() : renderReader())
@@ -156,6 +166,78 @@ function renderMain() {
 
 function renderEmptyDetail(message) {
   return h('div', { class: 'welcome' }, h('div', { class: 'empty-mark', text: state.view === 'files' ? '▧' : '▤' }), h('h2', { text: message }), h('p', { text: state.view === 'files' ? '选择左侧文件列表中的条目，查看元数据或打开预览。' : '从列表选择一篇文档开始阅读。' }))
+}
+
+function renderAskDetail() {
+  const ask = state.ask
+  const input = h('textarea', {
+    class: 'ask-input', value: ask.question, rows: '3', placeholder: '向团队知识库提问，例如：这个项目的发布流程是什么？',
+    onInput: event => { ask.question = event.currentTarget.value },
+    onKeyDown: event => { if ((event.ctrlKey || event.metaKey) && event.key === 'Enter') { event.preventDefault(); void submit() } },
+  })
+  const submit = async () => {
+    if (ask.question.trim() === '' || ask.busy) return
+    ask.busy = true
+    ask.error = ''
+    render()
+    try {
+      const result = await api('/api/ask', { method: 'POST', body: JSON.stringify({ q: ask.question.trim(), baseId: state.baseId ?? '' }) })
+      ask.answer = result.answer
+      ask.citations = result.citations ?? []
+      ask.engine = result.engine ?? ''
+    } catch (error) { ask.error = error.message } finally { ask.busy = false; render() }
+  }
+  return h('article', { class: 'ask-detail' },
+    h('header', { class: 'ask-head' },
+      h('p', { class: 'eyebrow', text: '团队知识库 · 引用问答' }),
+      h('h1', { text: '从知识中找答案，并回到原文' }),
+      h('p', { class: 'ask-copy', text: '回答只使用当前可访问的文档和已索引文件。结果中的编号可以打开来源。' })),
+    h('div', { class: 'ask-form' },
+      input,
+      h('div', { class: 'ask-actions' }, h('button', { type: 'button', class: 'btn primary', disabled: ask.busy, onClick: () => void submit(), text: ask.busy ? '检索中…' : '提问' }),
+        h('span', { class: 'ask-engine', text: ask.engine === 'model' ? '生成模型回答' : ask.engine === 'extractive' ? '抽取式证据（未配置模型）' : 'Ctrl/⌘ + Enter 提交' })),
+      ask.error ? h('p', { class: 'parse-error', text: ask.error }) : null),
+    ask.answer ? h('section', { class: 'ask-answer' },
+      h('div', { class: 'ask-answer-head' }, h('strong', { text: '回答' }), h('span', { class: 'pill', text: ask.engine === 'model' ? '模型' : '证据' })),
+      h('pre', { class: 'ask-answer-text', text: ask.answer }),
+      ask.citations.length ? h('div', { class: 'citation-list' }, ...ask.citations.map(citation => h('a', {
+        class: 'citation-card', href: citation.url, target: '_blank', rel: 'noopener',
+      }, h('strong', { text: `[${citation.index}] ${citation.title}` }), h('small', { text: `${citation.locator} · ${citation.kind === 'file' ? '文件' : '文档'}` }),
+      citation.excerpt ? h('p', { text: citation.excerpt.slice(0, 220) }) : null))) : null) : h('div', { class: 'ask-empty' }, h('div', { class: 'empty-mark', text: '?' }), h('p', { text: '提问后会在这里显示带来源的回答。' })))
+}
+
+function renderWikiDetail() {
+  const page = state.wiki.page
+  if (page === null) return h('div', { class: 'welcome' }, h('div', { class: 'empty-mark', text: '▤' }), h('h2', { text: '自动 Wiki' }), h('p', { text: '从文档和已索引文件生成带引用的 Wiki 草稿，审核后再发布。' }))
+  const titleInput = h('input', { class: 'wiki-title-input', value: state.wiki.draftTitle, maxlength: '240', onInput: event => { state.wiki.draftTitle = event.currentTarget.value } })
+  const contentInput = h('textarea', { class: 'wiki-editor', value: state.wiki.draftContent, onInput: event => { state.wiki.draftContent = event.currentTarget.value } })
+  const save = async (status) => {
+    state.wiki.busy = true
+    try {
+      const updated = await api(`/api/wiki/${encodeURIComponent(page.id)}`, { method: 'PUT', body: JSON.stringify({ title: state.wiki.draftTitle, content: state.wiki.draftContent, status }) })
+      state.wiki.page = updated.page
+      state.wiki.draftTitle = updated.page.title
+      state.wiki.draftContent = updated.page.content
+      await loadWiki()
+      toast(status === 'published' ? 'Wiki 已发布' : 'Wiki 草稿已保存')
+    } catch (error) { toast(error.message, 'error') } finally { state.wiki.busy = false; render() }
+  }
+  return h('article', { class: 'wiki-detail' },
+    h('header', { class: 'wiki-head' },
+      h('div', {}, h('p', { class: 'eyebrow', text: `Wiki · ${page.status === 'published' ? '已发布' : '待审核草稿'} · v${page.version}` }), h('h1', { text: page.title })),
+      h('div', { class: 'doc-actions' },
+        state.me.canEdit ? h('button', { type: 'button', class: 'btn', disabled: state.wiki.busy, onClick: () => void save('draft'), text: '保存草稿' }) : null,
+        state.me.canEdit ? h('button', { type: 'button', class: 'btn primary', disabled: state.wiki.busy, onClick: () => void save('published'), text: '发布' }) : null)),
+    h('div', { class: 'wiki-meta' },
+      h('span', { class: 'parse-badge is-parsed', text: page.status === 'published' ? '已发布' : '待审核' }),
+      h('span', { class: 'note', text: `由 ${page.updated_by || page.created_by || '团队'} 更新 · ${new Date(page.updated_at).toLocaleString()}` })),
+    h('div', { class: 'wiki-editor-wrap' },
+      h('label', { class: 'note', text: '标题' }, titleInput),
+      contentInput),
+    page.sources.length ? h('section', { class: 'wiki-sources' }, h('p', { class: 'eyebrow', text: '引用来源' }), ...page.sources.map(source => h('div', { class: 'wiki-source' }, h('strong', { text: source.title }), h('small', { text: source.excerpt?.slice(0, 240) ?? '' })))) : null,
+    state.wiki.versions.length ? h('section', { class: 'wiki-versions' }, h('p', { class: 'eyebrow', text: '版本历史' }), ...state.wiki.versions.slice(0, 8).map(version => h('div', { class: 'wiki-version' },
+      h('span', { text: `v${version.version} · ${version.status === 'published' ? '已发布' : '草稿'} · ${new Date(version.created_at).toLocaleString()}` }),
+      state.me.canEdit ? h('button', { type: 'button', class: 'btn compact', onClick: async () => { try { const result = await api(`/api/wiki/${encodeURIComponent(page.id)}/restore`, { method: 'POST', body: JSON.stringify({ version: version.version }) }); state.wiki.page = result.page; state.wiki.draftTitle = result.page.title; state.wiki.draftContent = result.page.content; toast(`已恢复 v${version.version}`); render() } catch (error) { toast(error.message, 'error') } }, text: '恢复' }) : null))) : null)
 }
 
 function renderFileDetail() {
@@ -174,14 +256,26 @@ function renderFileDetail() {
     h('header', { class: 'file-detail-head' },
       h('div', {}, h('p', { class: 'eyebrow', text: `${file.userName || '未署名'} · 文件` }), h('h1', { class: 'doc-title', text: file.name })),
       h('div', { class: 'doc-actions' }, h('a', { class: 'btn', href: file.downloadUrl, text: '下载' }),
+        state.me.canEdit ? h('button', { type: 'button', class: 'btn', onClick: () => void reparseFile(file), text: file.parseStatus === 'parsed' ? '重新解析' : '解析索引' }) : null,
         state.me.canEdit ? h('button', { type: 'button', class: 'btn danger', onClick: () => void deleteFile(file), text: '删除' }) : null)),
     h('div', { class: 'file-metadata' },
       h('span', {}, h('small', { text: '类型' }), h('strong', { text: file.mime || '未知' })),
       h('span', {}, h('small', { text: '大小' }), h('strong', { text: formatFileSize(file.size) })),
       h('span', {}, h('small', { text: '上传者' }), h('strong', { text: file.userName || '未署名' })),
-      h('span', {}, h('small', { text: '更新时间' }), h('strong', { text: new Date(file.updatedAt).toLocaleString() }))),
+      h('span', {}, h('small', { text: '检索状态' }), h('strong', {}, parseBadge(file.parseStatus), file.parseError ? h('span', { class: 'parse-error', text: file.parseError }) : null))),
     h('div', { class: 'file-source-path', text: file.sourceKey || file.name }),
+    file.excerpt ? h('section', { class: 'file-extract' }, h('p', { class: 'eyebrow', text: '已索引文本节选' }), h('pre', { text: file.excerpt })) : null,
     h('div', { class: 'file-preview' }, preview))
+}
+
+async function reparseFile(file) {
+  try {
+    const result = await api(`/api/files/${encodeURIComponent(file.id)}/reparse`, { method: 'POST', body: '{}' })
+    state.files = state.files.map(row => row.id === file.id ? result.file : row)
+    state.selectedFile = result.file
+    render()
+    toast('解析状态已更新')
+  } catch (error) { toast(error.message, 'error') }
 }
 
 async function deleteFile(file) {
@@ -204,6 +298,83 @@ function renderWelcome() {
 
 function renderResourceList() {
   return state.view === 'files' ? renderFileList() : renderDocumentList()
+}
+
+function switchView(view) {
+  state.view = view
+  state.selected = null
+  state.selectedFile = null
+  if (view === 'files') { render(); void loadFiles(); return }
+  if (view === 'wiki') { render(); void loadWiki(); return }
+  if (view === 'documents') { render(); void loadDocuments(); return }
+  render()
+}
+
+function renderContextList() {
+  if (state.view === 'ask') {
+    return h('section', { class: 'resource-list' },
+      h('header', { class: 'resource-list-head' }, h('div', {}, h('p', { class: 'eyebrow', text: '引用问答' }), h('strong', { text: state.ask.citations.length ? `${state.ask.citations.length} 条证据` : '等待提问' }))),
+      h('div', { class: 'context-note' },
+        h('p', { text: '答案只使用当前知识库中已授权的文档和已索引文件。' }),
+        h('p', { text: '没有配置生成模型时，返回可核对的相关证据片段，不伪造答案。' }),
+        state.ask.citations.length ? h('div', { class: 'citation-mini-list' }, ...state.ask.citations.map(citation => h('a', {
+          class: 'citation-mini', href: citation.url, target: '_blank', rel: 'noopener',
+          text: `[${citation.index}] ${citation.title}`,
+        }))) : null))
+  }
+  const pages = state.wiki.pages
+  const rows = pages.map(page => h('button', {
+    type: 'button', class: `doc-row${state.wiki.page?.id === page.id ? ' active' : ''}`,
+    onClick: () => void openWiki(page.id),
+  },
+  h('span', { class: 'resource-icon', text: '▤' }),
+  h('span', { class: 'resource-label' },
+    h('strong', { text: page.title }),
+    h('small', { text: `${page.status === 'published' ? '已发布' : '草稿'} · v${page.version}` }))))
+  return h('section', { class: 'resource-list' },
+    h('header', { class: 'resource-list-head' },
+      h('div', {}, h('p', { class: 'eyebrow', text: '自动 Wiki' }), h('strong', { text: `${pages.length} 个页面` })),
+      state.me.canEdit ? h('button', { type: 'button', class: 'btn primary compact', onClick: () => void generateWiki(), text: '生成草稿' }) : null),
+    pages.length === 0
+      ? h('div', { class: 'doc-empty', text: '还没有 Wiki。生成草稿后由团队审核发布。' })
+      : h('div', { class: 'doc-list' }, ...rows))
+}
+
+async function generateWiki() {
+  if (state.baseId === null) return
+  const title = window.prompt('Wiki 标题', state.selected?.title ?? '')
+  if (title === null || title.trim() === '') return
+  const topic = window.prompt('整理主题（可留空）', title) ?? title
+  try {
+    const result = await api('/api/wiki/generate', { method: 'POST', body: JSON.stringify({ baseId: state.baseId, title: title.trim(), topic: topic.trim() || title.trim() }) })
+    state.wiki.page = result.page
+    state.wiki.draftTitle = result.page.title
+    state.wiki.draftContent = result.page.content
+    await loadWiki()
+    toast(`Wiki 草稿已生成（${result.engine === 'model' ? '模型' : '抽取式'}）`)
+  } catch (error) { toast(error.message, 'error') }
+}
+
+async function loadWiki() {
+  if (state.baseId === null) return
+  setLoading(true)
+  try {
+    const result = await api(`/api/wiki?baseId=${encodeURIComponent(state.baseId)}`)
+    state.wiki.pages = result.pages
+    state.error = ''
+  } catch (error) { state.error = error.message } finally { setLoading(false); render() }
+}
+
+async function openWiki(id) {
+  setLoading(true)
+  try {
+    const result = await api(`/api/wiki/${encodeURIComponent(id)}`)
+    state.wiki.page = result.page
+    state.wiki.versions = result.versions
+    state.wiki.draftTitle = result.page.title
+    state.wiki.draftContent = result.page.content
+    state.error = ''
+  } catch (error) { state.error = error.message } finally { setLoading(false); render() }
 }
 
 function renderDocumentList() {
@@ -233,7 +404,7 @@ function renderFileList() {
       type: 'button', class: `doc-row file-entry${state.selectedFile?.id === file.id ? ' active' : ''}`,
       onClick: () => { state.selectedFile = file; render() },
     }, h('span', { class: 'resource-icon', text: '▧' }), h('span', { class: 'resource-label' },
-      h('strong', { text: file.name }), h('small', { text: `${file.sourceKey || file.name} · ${formatFileSize(file.size)}` }))))
+      h('strong', { text: file.name }), h('small', { text: `${parseLabel(file.parseStatus)} · ${file.sourceKey || file.name} · ${formatFileSize(file.size)}` }))))
   ])
   return h('section', { class: 'resource-list' },
     h('header', { class: 'resource-list-head' },
@@ -420,6 +591,7 @@ async function refreshAll() {
   try {
     const me = await api('/api/me')
     state.me = me
+    state.meta = await api('/api/meta').catch(() => null)
     await refreshKbs()
     await loadGroups()
     if (state.view === 'files') await loadFiles()
@@ -489,6 +661,14 @@ function formatFileSize(bytes) {
   if (bytes < 1024) return `${bytes} B`
   if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`
   return `${(bytes / 1024 / 1024).toFixed(1)} MB`
+}
+
+function parseLabel(status) {
+  return { parsed: '已索引', pending: '待解析', unsupported: '仅存储', failed: '解析失败' }[status] || '待解析'
+}
+
+function parseBadge(status) {
+  return h('span', { class: `parse-badge is-${status || 'pending'}`, text: parseLabel(status) })
 }
 
 async function openAdmin() {

@@ -1,19 +1,23 @@
 // 独立团队知识库服务：只依赖 Node.js 24 + 本仓库的存储层，不需要安装 DSH。
 import { createServer } from 'node:http'
 import { createHash, randomUUID } from 'node:crypto'
-import { createReadStream, existsSync, mkdirSync, rmSync } from 'node:fs'
-import { writeFile } from 'node:fs/promises'
+import { createReadStream, existsSync, mkdirSync, readFileSync, rmSync } from 'node:fs'
+import { writeFile, readFile } from 'node:fs/promises'
 import { basename, extname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { LocalKnowledgeProvider } from '../lib/local-provider.js'
 import { registerKnowledgeApi } from '../lib/api.js'
 import { renderSharedMarkdown } from '../lib/notes/share-markdown.js'
+import { extractText } from './ingest.mjs'
+import { chatCompletion, llmConfig } from './llm.mjs'
 import { TeamError, TeamStore } from './team-store.mjs'
 import { renderAppPage, renderErrorPage, renderInvitePage, renderLoginPage, renderSetupPage, roleLabel } from './views.mjs'
 
 const here = fileURLToPath(new URL('.', import.meta.url))
 const publicDir = join(here, 'public')
 const dataDir = resolve(process.env.TEAM_DATA_DIR ?? join(here, '..', 'cloud-data'))
+const buildInfo = readBuildInfo()
+const startedAt = new Date().toISOString()
 const port = integerEnv('TEAM_PORT', 8787, 1, 65535)
 const host = process.env.TEAM_HOST?.trim() || '127.0.0.1'
 const title = process.env.TEAM_TITLE?.trim() || '团队知识库'
@@ -44,6 +48,28 @@ const remoteApiContext = {
   get() { return undefined },
 }
 registerKnowledgeApi(remoteApiContext, provider, '/knowledge-api/v1', { authMode: 'bearer' })
+
+function readBuildInfo() {
+  const hasher = createHash('sha256')
+  for (const file of ['server.mjs', 'team-store.mjs', 'views.mjs', 'public/app.js', 'public/app.css']) {
+    try { hasher.update(readFileSync(join(here, file))) } catch { hasher.update(file) }
+  }
+  let version = '0.0.0'
+  try { version = JSON.parse(readFileSync(join(here, '..', 'package.json'), 'utf8')).version ?? version } catch { /* installed layouts may omit package.json */ }
+  const hash = hasher.digest('hex').slice(0, 12)
+  return {
+    service: 'team-knowledge',
+    version,
+    buildId: `${version}-${hash}`,
+    buildHash: hash,
+    commit: process.env.TEAM_BUILD_COMMIT?.trim() || '',
+    features: ['files', 'sync-v1', 'search-v1', 'qa-citations-v1', 'wiki-review-v1'],
+  }
+}
+
+function healthPayload() {
+  return { ok: true, ...buildInfo, startedAt, uptimeSeconds: Math.round(process.uptime()) }
+}
 
 function integerEnv(name, fallback, min, max) {
   const raw = process.env[name]
@@ -189,9 +215,13 @@ async function storeUploadedFile({ baseId, name, mime, bytes, actorId, sourceKey
     if (existing.storage_path !== relativePath && existsSync(join(dataDir, existing.storage_path))) {
       try { rmSync(join(dataDir, existing.storage_path)) } catch {}
     }
-    return team.updateFile(id, { name: displayName, mime: safeMime, size: bytes.length, sha256, storagePath: relativePath })
+    const updated = team.updateFile(id, { name: displayName, mime: safeMime, size: bytes.length, sha256, storagePath: relativePath })
+    await indexFile(updated, bytes)
+    return updated
   }
-  return team.addFile({ id, baseId, name: displayName, mime: safeMime, size: bytes.length, sha256, storagePath: relativePath, sourceKey: source, userName: owner, uploadedBy: actorId })
+  const created = team.addFile({ id, baseId, name: displayName, mime: safeMime, size: bytes.length, sha256, storagePath: relativePath, sourceKey: source, userName: owner, uploadedBy: actorId })
+  await indexFile(created, bytes)
+  return created
 }
 
 function bearerActor(req) {
@@ -220,6 +250,7 @@ function sendFile(res, row, inline = false) {
 }
 
 function fileMetadata(row, prefix = '/api/files') {
+  const text = team.getFileText(row.id)
   return {
     id: row.id,
     baseId: row.base_id,
@@ -229,11 +260,28 @@ function fileMetadata(row, prefix = '/api/files') {
     sha256: row.sha256,
     sourceKey: row.source_key ?? null,
     userName: row.user_name ?? null,
+    parseStatus: text?.status ?? 'pending',
+    parseError: text?.error ?? null,
+    excerpt: text?.content ? text.content.slice(0, 700) : null,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
     inlineUrl: `${prefix}/${row.id}?inline=1`,
     downloadUrl: `${prefix}/${row.id}`,
   }
+}
+
+async function indexFile(row, bytes) {
+  const result = extractText({ name: row.name, mime: row.mime, bytes })
+  team.setFileText({
+    fileId: row.id,
+    baseId: row.base_id,
+    status: result.status,
+    content: result.content,
+    parser: result.parser,
+    error: result.error,
+    name: row.name,
+  })
+  return result
 }
 
 async function handleTokenFiles(req, res, url, path, method) {
@@ -292,6 +340,18 @@ async function handleTeamFiles(req, res, url, path, method, session) {
     const row = await storeUploadedFile({ baseId, name, mime, bytes, actorId: session.user.id, sourceKey, userName })
     team.audit(session.user.id, 'file.upload', row.id, `${name} ${bytes.length}`)
     return sendJson(res, 201, { file: fileMetadata(row) })
+  }
+  const reparseMatch = /^\/api\/files\/([a-f0-9-]{36})\/reparse$/u.exec(path)
+  if (reparseMatch !== null && method === 'POST') {
+    requireRole(session, ['admin', 'editor'])
+    const row = team.getFile(reparseMatch[1])
+    if (row === undefined) throw new HttpError(404, '文件不存在')
+    const absolute = join(dataDir, row.storage_path)
+    if (!existsSync(absolute)) throw new HttpError(410, '文件内容已丢失')
+    const bytes = await readFile(absolute)
+    await indexFile(row, bytes)
+    team.audit(session.user.id, 'file.reparse', row.id, row.name)
+    return sendJson(res, 200, { file: fileMetadata(row) })
   }
   const fileMatch = /^\/api\/files\/([a-f0-9-]{36})$/u.exec(path)
   if (fileMatch !== null && method === 'GET') {
@@ -399,8 +459,7 @@ function draftFrom(entry, changes = {}) {
   }
 }
 
-async function listAllDocuments(baseId, query) {
-  const documents = []
+async function listAllDocuments(baseId, query) {  const documents = []
   let cursor
   let total = 0
   do {
@@ -417,14 +476,132 @@ async function listAllDocuments(baseId, query) {
   return { documents, total }
 }
 
+function citationFromDocument(hit, index, baseId) {
+  return {
+    index,
+    kind: 'document',
+    id: hit.entry.id,
+    baseId: hit.entry.knowledgeBaseId ?? baseId,
+    title: hit.entry.title,
+    locator: hit.passage ? `第 ${hit.passage.startLine}-${hit.passage.endLine} 行` : `v${hit.entry.version}`,
+    excerpt: hit.passage?.text ?? '',
+    url: `/api/document/${hit.entry.id}`,
+  }
+}
+
+function citationFromFile(file, index) {
+  const text = team.getFileText(file.fileId)
+  return {
+    index,
+    kind: 'file',
+    id: file.fileId,
+    baseId: file.baseId,
+    title: file.name,
+    locator: text?.parser ? `全文索引 · ${text.parser}` : '文件',
+    excerpt: file.snippet ?? (text?.content?.slice(0, 260) ?? ''),
+    url: `/api/files/${file.fileId}`,
+  }
+}
+
+async function retrieveEvidence(question, baseId) {
+  const bases = baseId === '' ? (await provider.listKnowledgeBases()).filter(base => base.status === 'active').map(base => base.id) : [baseId]
+  const query = question.replace(/[?？!！。]/gu, ' ').replace(/(是什么|有哪些|如何|怎么|为什么|请问|一下|吗)/gu, ' ').replace(/\s+/gu, ' ').trim() || question
+  const documents = await provider.search({
+    text: query,
+    includePassage: true,
+    limit: 8,
+    ...(baseId === '' ? {} : { knowledgeBaseIds: [baseId] }),
+  })
+  const files = bases.flatMap(id => team.searchFileText(id, query, 6)).slice(0, 8)
+  const citations = [
+    ...documents.map((hit, index) => citationFromDocument(hit, index + 1, baseId)),
+    ...files.map((file, index) => citationFromFile(file, documents.length + index + 1)),
+  ]
+  return { citations }
+}
+
+function evidencePrompt(question, citations) {
+  const evidence = citations.map(citation => `[${citation.index}] ${citation.title}（${citation.locator}）\n${citation.excerpt}`).join('\n\n')
+  return [
+    { role: 'system', content: '你是企业知识库问答助手。只使用给定证据回答；证据不足时明确说证据不足；每个事实句末尾用 [编号] 标注来源。不要编造链接或文件名。' },
+    { role: 'user', content: `问题：${question}\n\n证据：\n${evidence}` },
+  ]
+}
+
+async function answerQuestion(question, baseId) {
+  const { citations } = await retrieveEvidence(question, baseId)
+  if (citations.length === 0) return { answer: '未在当前知识库中找到可引用的证据。', citations: [], engine: 'none' }
+  const modelAnswer = await chatCompletion(evidencePrompt(question, citations), { maxTokens: 1400 }).catch(() => undefined)
+  if (modelAnswer !== undefined) return { answer: modelAnswer, citations, engine: 'model' }
+  return {
+    answer: `当前未配置生成模型，先返回与问题最相关的证据片段：\n\n${citations.map(citation => `- [${citation.index}] ${citation.title}：${citation.excerpt.slice(0, 320)}`).join('\n')}`,
+    citations,
+    engine: 'extractive',
+  }
+}
+
+function wikiSlug(title) {
+  return String(title).trim().toLowerCase().replace(/[^\p{L}\p{N}]+/gu, '-').replace(/^-+|-+$/gu, '').slice(0, 80) || 'wiki'
+}
+
+async function generateWikiPage({ baseId, topic, title, actor }) {
+  const question = topic || title
+  const { citations } = await retrieveEvidence(question, baseId)
+  const viewevidence = citations.map(citation => `### ${citation.title}\n\n${citation.excerpt.slice(0, 600)}\n\n来源：[${citation.index}] ${citation.url}`).join('\n\n')
+  const fallback = `# ${title}\n\n> 自动生成草稿，待团队审核。生成时间：${new Date().toLocaleString('zh-CN')}\n\n## 主题摘要\n\n${topic ? `围绕「${topic}」整理当前可检索资料。` : '根据当前知识库最近内容整理。'}\n\n## 证据摘录\n\n${viewevidence || '当前没有可引用的已索引资料。'}\n\n## 待补充\n\n- 请审核事实、补充结论并确认引用。`
+  const generated = await chatCompletion([
+    { role: 'system', content: '你是企业 Wiki 编辑。只根据给定证据写 Markdown 草稿，结构包含概述、要点、待确认事项、来源列表；每个结论附 [编号] 引用，不得编造。' },
+    { role: 'user', content: `主题：${question}\n\n${viewevidence}` },
+  ], { maxTokens: 1800 }).catch(() => undefined)
+  const content = generated ?? fallback
+  const safeTitle = String(title || topic || '未命名 Wiki').trim().slice(0, 240)
+  let slug = wikiSlug(safeTitle)
+  if (team.findWikiPage(baseId, slug) !== undefined) slug = `${slug}-${Date.now().toString(36)}`
+  const sources = citations.map(citation => ({ kind: citation.kind, sourceId: citation.id, title: citation.title, excerpt: citation.excerpt.slice(0, 500), lineStart: null, lineEnd: null }))
+  const page = team.createWikiPage({ baseId, slug, title: safeTitle, content, createdBy: actor, sources })
+  return { page, engine: generated === undefined ? 'extractive' : 'model', citations }
+}
+
+async function syncFeed(baseId, since = '') {
+  if (baseId === '') throw new HttpError(400, 'baseId 不能为空')
+  const base = await provider.getKnowledgeBase(baseId)
+  if (base === undefined || base.status !== 'active') throw new HttpError(404, '知识库不存在')
+  const now = new Date().toISOString()
+  const documents = await listAllDocuments(baseId, '')
+  const documentChanges = documents.documents
+    .filter(item => item.updatedAt !== undefined && String(item.updatedAt) > since)
+    .map(item => ({
+      entityKind: 'document',
+      entityId: item.id,
+      baseId,
+      operation: 'upsert',
+      version: item.version,
+      occurredAt: item.updatedAt,
+      payload: { title: item.title, group: item.group ?? '', updatedAt: item.updatedAt },
+    }))
+  const fileChanges = team.listChanges(baseId, since, 1000)
+  return {
+    baseId,
+    since,
+    nextCursor: now,
+    changes: [...documentChanges, ...fileChanges].sort((a, b) => String(a.occurredAt).localeCompare(String(b.occurredAt))),
+    hasMore: fileChanges.length >= 1000,
+  }
+}
+
 async function handle(req, res) {
   const url = new URL(req.url ?? '/', requestOrigin(req))
   const method = req.method ?? 'GET'
   const path = url.pathname
 
-  if (path === '/api/health') return sendJson(res, 200, { ok: true, service: 'team-knowledge' })
+  if (path === '/api/health' || path === '/health') return sendJson(res, 200, healthPayload())
 
   if (path === '/knowledge-api/v1' || path.startsWith('/knowledge-api/v1/')) {
+    if (path === '/knowledge-api/v1/health') return sendJson(res, 200, { ...healthPayload(), schemaVersion: 15 })
+    if (path === '/knowledge-api/v1/sync/changes' && method === 'GET') {
+      bearerActor(req)
+      return sendJson(res, 200, await syncFeed(url.searchParams.get('baseId') ?? '', url.searchParams.get('since') ?? ''))
+    }
     if (path === '/knowledge-api/v1/files' || path.startsWith('/knowledge-api/v1/files/')) {
       await handleTokenFiles(req, res, url, path, method)
       return
@@ -520,6 +697,12 @@ async function handle(req, res) {
     return sendJson(res, 200, { user: session.user, csrf: session.csrf, title, roleLabel: roleLabel(session.user.role), canEdit: ['admin', 'editor'].includes(session.user.role), isAdmin: session.user.role === 'admin' })
   }
 
+  if (path === '/api/meta' && method === 'GET') return sendJson(res, 200, { ...healthPayload(), schemaVersion: 15 })
+
+  if (path === '/api/sync/changes' && method === 'GET') {
+    return sendJson(res, 200, await syncFeed(url.searchParams.get('baseId') ?? '', url.searchParams.get('since') ?? ''))
+  }
+
   if (method !== 'GET' && method !== 'HEAD') requireCsrf(req, session)
 
   if (path === '/api/files' || path.startsWith('/api/files/')) {
@@ -558,17 +741,109 @@ async function handle(req, res) {
       limit: 20,
       ...(baseId === undefined ? {} : { knowledgeBaseIds: [baseId] }),
     })
+    const fileBases = baseId === undefined
+      ? (await provider.listKnowledgeBases()).filter(base => base.status === 'active').map(base => base.id)
+      : [baseId]
+    const fileHits = fileBases.flatMap(id => team.searchFileText(id, query, 10)).slice(0, 20)
     return sendJson(res, 200, {
       hits: hits.map(hit => ({
         ...summarizeEntry(hit.entry),
         score: hit.score,
         passage: hit.passage === undefined ? undefined : { text: hit.passage.text, startLine: hit.passage.startLine, endLine: hit.passage.endLine },
       })),
+      fileHits: fileHits.map(file => ({
+        id: file.fileId, baseId: file.baseId, name: file.name, score: file.score, snippet: file.snippet,
+        downloadUrl: `/api/files/${file.fileId}`,
+      })),
     })
   }
 
-  if (path === '/api/groups' && method === 'GET') {
+  if (path === '/api/ask' && method === 'POST') {
+    const body = await readJson(req)
+    const question = String(body.q ?? '').trim()
+    if (question === '') throw new HttpError(400, '问题不能为空')
+    const baseId = String(body.baseId ?? '')
+    return sendJson(res, 200, await answerQuestion(question, baseId))
+  }
+
+  if (path === '/api/wiki' && method === 'GET') {
     const baseId = url.searchParams.get('baseId') ?? ''
+    if (baseId === '') throw new HttpError(400, 'baseId 不能为空')
+    return sendJson(res, 200, { pages: team.listWikiPages(baseId), engine: llmConfig().enabled ? 'model' : 'extractive' })
+  }
+
+  if (path === '/api/wiki/generate' && method === 'POST') {
+    requireRole(session, ['admin', 'editor'])
+    const body = await readJson(req)
+    const baseId = String(body.baseId ?? '')
+    const title = String(body.title ?? '').trim().slice(0, 240)
+    const topic = String(body.topic ?? title).trim().slice(0, 1000)
+    const base = await provider.getKnowledgeBase(baseId)
+    if (base === undefined || base.status !== 'active') throw new HttpError(404, '知识库不存在')
+    if (title === '') throw new HttpError(400, 'Wiki 标题不能为空')
+    const result = await generateWikiPage({ baseId, topic, title, actor: session.user.id })
+    team.audit(session.user.id, 'wiki.generate', result.page.id, title)
+    return sendJson(res, 201, result)
+  }
+
+  if (path === '/api/wiki' && method === 'POST') {
+    requireRole(session, ['admin', 'editor'])
+    const body = await readJson(req)
+    const baseId = String(body.baseId ?? '')
+    const title = String(body.title ?? '').trim().slice(0, 240)
+    const content = String(body.content ?? '')
+    if (title === '' || content === '') throw new HttpError(400, '标题和正文不能为空')
+    const base = await provider.getKnowledgeBase(baseId)
+    if (base === undefined || base.status !== 'active') throw new HttpError(404, '知识库不存在')
+    let slug = wikiSlug(title)
+    if (team.findWikiPage(baseId, slug) !== undefined) slug = `${slug}-${Date.now().toString(36)}`
+    const page = team.createWikiPage({ baseId, slug, title, content, createdBy: session.user.id })
+    team.audit(session.user.id, 'wiki.create', page.id, title)
+    return sendJson(res, 201, { page })
+  }
+
+  const wikiMatch = /^\/api\/wiki\/([a-f0-9-]{36})(?:\/(publish|restore|versions)\/?)?$/u.exec(path)
+  if (wikiMatch !== null) {
+    const id = wikiMatch[1]
+    const action = wikiMatch[2] ?? ''
+    const page = team.getWikiPage(id)
+    if (page === undefined) throw new HttpError(404, 'Wiki 页面不存在')
+    if (method === 'GET' && action === '') return sendJson(res, 200, { page, versions: team.listWikiVersions(id) })
+    if (method === 'GET' && action === 'versions') return sendJson(res, 200, { versions: team.listWikiVersions(id) })
+    if (method === 'PUT' && action === '') {
+      requireRole(session, ['admin', 'editor'])
+      const body = await readJson(req)
+      const title = String(body.title ?? page.title).trim().slice(0, 240)
+      const content = String(body.content ?? page.content)
+      const status = body.status === 'published' ? 'published' : 'draft'
+      if (title === '' || content === '') throw new HttpError(400, '标题和正文不能为空')
+      const updated = team.updateWikiPage(id, { title, content, status, updatedBy: session.user.id })
+      team.audit(session.user.id, 'wiki.update', id, title)
+      return sendJson(res, 200, { page: updated })
+    }
+    if (method === 'POST' && action === 'publish') {
+      requireRole(session, ['admin', 'editor'])
+      const published = team.publishWikiPage(id, session.user.id)
+      team.audit(session.user.id, 'wiki.publish', id, published.title)
+      return sendJson(res, 200, { page: published })
+    }
+    if (method === 'POST' && action === 'restore') {
+      requireRole(session, ['admin', 'editor'])
+      const body = await readJson(req)
+      const version = Number(body.version)
+      if (!Number.isSafeInteger(version)) throw new HttpError(400, 'version 必须是整数')
+      const restored = team.restoreWikiVersion(id, version, session.user.id)
+      team.audit(session.user.id, 'wiki.restore', id, `v${version}`)
+      return sendJson(res, 200, { page: restored })
+    }
+    if (method === 'DELETE') {
+      requireRole(session, ['admin', 'editor'])
+      team.deleteWikiPage(id)
+      return sendJson(res, 200, { ok: true })
+    }
+  }
+
+  if (path === '/api/groups' && method === 'GET') {    const baseId = url.searchParams.get('baseId') ?? ''
     const base = await provider.getKnowledgeBase(baseId)
     if (base === undefined || base.status !== 'active') throw new HttpError(404, '知识库不存在')
     const groups = await provider.listDocumentGroups(baseId)
