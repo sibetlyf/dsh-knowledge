@@ -12,6 +12,9 @@ const state = {
   ask: { question: '', answer: '', citations: [], engine: '', busy: false, error: '' },
   wiki: { pages: [], page: null, versions: [], draftTitle: '', draftContent: '', busy: false },
   sources: [],
+  worklogs: [],
+  worklogSummaries: [],
+  worklogSummary: null,
   source: null,
   editing: false,
   draftTitle: '',
@@ -137,6 +140,7 @@ function renderSidebar() {
       h('button', { type: 'button', class: `workspace-tab${state.view === 'ask' ? ' active' : ''}`, onClick: () => switchView('ask') }, '问答'),
       h('button', { type: 'button', class: `workspace-tab${state.view === 'wiki' ? ' active' : ''}`, onClick: () => switchView('wiki') }, 'Wiki'),
       h('button', { type: 'button', class: `workspace-tab${state.view === 'sources' ? ' active' : ''}`, onClick: () => switchView('sources') }, '数据源'),
+      h('button', { type: 'button', class: `workspace-tab${state.view === 'worklogs' ? ' active' : ''}`, onClick: () => switchView('worklogs') }, '团队日报'),
     ),
     h('p', { class: 'kb-section-label', text: '团队知识库' }),
     h('nav', { class: 'kb-list', 'aria-label': '知识库' },
@@ -152,13 +156,13 @@ function renderSidebar() {
 function renderMain() {
   const main = h('main', { class: 'main' })
   const base = state.kbs.find(item => item.id === state.baseId)
-  const currentTitle = state.view === 'files' ? state.selectedFile?.name : state.view === 'wiki' ? state.wiki.page?.title : state.view === 'sources' ? state.source?.name : state.selected?.title
+  const currentTitle = state.view === 'files' ? state.selectedFile?.name : state.view === 'wiki' ? state.wiki.page?.title : state.view === 'sources' ? state.source?.name : state.view === 'worklogs' ? state.worklogSummary?.to_day : state.selected?.title
   main.append(h('header', { class: 'topbar' },
     h('div', { class: 'breadcrumb' },
       h('span', { text: '工作区' }), h('span', { class: 'crumb-separator', text: '/' }),
       h('strong', { text: base?.name ?? '全部知识库' }),
       h('span', { class: 'crumb-separator', text: '/' }),
-      h('span', { text: state.view === 'files' ? '文件' : state.view === 'ask' ? '问答' : state.view === 'wiki' ? 'Wiki' : state.view === 'sources' ? '数据源' : '文档' }),
+      h('span', { text: state.view === 'files' ? '文件' : state.view === 'ask' ? '问答' : state.view === 'wiki' ? 'Wiki' : state.view === 'sources' ? '数据源' : state.view === 'worklogs' ? '团队日报' : '文档' }),
       currentTitle ? h('span', { class: 'crumb-current', text: ` / ${currentTitle}` }) : null),
     h('div', { class: 'doc-actions' },
       state.view === 'documents' && state.baseId !== null && state.me.canEdit ? h('button', { type: 'button', class: 'btn primary', onClick: openCreate, text: '+ 新建文档' }) : null,
@@ -172,6 +176,7 @@ function renderMain() {
   else if (state.view === 'ask') content.append(renderAskDetail())
   else if (state.view === 'wiki') content.append(renderWikiDetail())
   else if (state.view === 'sources') content.append(renderSourceDetail())
+  else if (state.view === 'worklogs') content.append(renderWorklogDetail())
   else if (state.view === 'files') content.append(state.selectedFile === null ? renderEmptyDetail('选择一个文件查看详情') : renderFileDetail())
   else if (state.selected === null) content.append(renderWelcome())
   else content.append(state.editing ? renderEditor() : renderReader())
@@ -331,11 +336,13 @@ function switchView(view) {
   if (view === 'files') { render(); void loadFiles(); return }
   if (view === 'wiki') { render(); void loadWiki(); return }
   if (view === 'sources') { render(); void loadSources(); return }
+  if (view === 'worklogs') { render(); void loadWorklogs(); return }
   if (view === 'documents') { render(); void loadDocuments(); return }
   render()
 }
 
 function renderContextList() {
+  if (state.view === 'worklogs') return renderWorklogList()
   if (state.view === 'sources') return renderSourceList()
   if (state.view === 'ask') {
     return h('section', { class: 'resource-list' },
@@ -364,6 +371,73 @@ function renderContextList() {
     pages.length === 0
       ? h('div', { class: 'doc-empty', text: '还没有 Wiki。生成草稿后由团队审核发布。' })
       : h('div', { class: 'doc-list' }, ...rows))
+}
+
+function renderWorklogList() {
+  const summaries = state.worklogSummaries
+  const rows = summaries.map(summary => h('button', {
+    type: 'button', class: `doc-row${state.worklogSummary?.id === summary.id ? ' active' : ''}`,
+    onClick: () => { state.worklogSummary = summary; render() },
+  },
+  h('span', { class: 'resource-icon', text: '▤' }),
+  h('span', { class: 'resource-label' },
+    h('strong', { text: `${summary.from_day}${summary.to_day === summary.from_day ? '' : ` ~ ${summary.to_day}`}` }),
+    h('small', { text: `${summary.engine === 'model' ? '模型汇总' : '抽取式汇总'} · ${summary.status === 'published' ? '已发布' : '待审核'}` }))))
+  return h('section', { class: 'resource-list' },
+    h('header', { class: 'resource-list-head' },
+      h('div', {}, h('p', { class: 'eyebrow', text: '团队日报' }), h('strong', { text: `${state.worklogs.length} 天 · ${summaries.length} 份汇总` })),
+      state.me.canEdit ? h('button', { type: 'button', class: 'btn primary compact', onClick: () => void summarizeWorklogs(), text: '+ 汇总今日' }) : null),
+    h('div', { class: 'context-note' },
+      h('p', { text: '成员日报由本地 DSH 工作日报自动同步到云端；汇总只读，不改变成员日报。' }),
+      h('p', { text: '自动汇总每天在配置时间后生成草稿；也可以随时手动生成本日汇总。' })),
+    summaries.length === 0
+      ? h('div', { class: 'doc-empty', text: '还没有团队日报汇总。等成员同步日报后点击「汇总今日」。' })
+      : h('div', { class: 'doc-list' }, ...rows))
+}
+
+async function loadWorklogs() {
+  if (state.baseId === null) return
+  setLoading(true)
+  try {
+    const result = await api(`/api/worklogs?baseId=${encodeURIComponent(state.baseId)}`)
+    state.worklogs = result.logs
+    state.worklogSummaries = result.summaries
+    if (state.worklogSummary === null || !state.worklogSummaries.some(item => item.id === state.worklogSummary.id)) {
+      state.worklogSummary = state.worklogSummaries[0] ?? null
+    }
+    state.error = ''
+  } catch (error) { state.error = error.message } finally { setLoading(false); render() }
+}
+
+async function summarizeWorklogs() {
+  if (state.baseId === null || !state.me.canEdit) return
+  try {
+    const result = await api('/api/worklogs/summarize', { method: 'POST', body: JSON.stringify({ baseId: state.baseId }) })
+    state.worklogSummary = result.summary
+    await loadWorklogs()
+    toast(`已生成 ${result.days} 天团队日报汇总`)
+  } catch (error) { toast(error.message, 'error') }
+}
+
+function renderWorklogDetail() {
+  const summary = state.worklogSummary
+  if (summary === null) {
+    return h('div', { class: 'welcome' },
+      h('div', { class: 'empty-mark', text: '▤' }),
+      h('h2', { text: '团队日报汇总' }),
+      h('p', { text: '同步成员的工作日报后，这里会显示每日团队进展、阻塞和下一步。' }),
+      state.me.canEdit ? h('button', { type: 'button', class: 'btn primary', onClick: () => void summarizeWorklogs(), text: '汇总今日日报' }) : null)
+  }
+  const memberNames = [...new Set(state.worklogs.filter(row => row.day >= summary.from_day && row.day <= summary.to_day).map(row => row.user_name))]
+  return h('article', { class: 'worklog-detail' },
+    h('header', { class: 'worklog-head' },
+      h('div', {}, h('p', { class: 'eyebrow', text: `团队日报 · ${summary.engine === 'model' ? '模型汇总' : '抽取式汇总'}` }), h('h1', { text: `${summary.from_day}${summary.to_day === summary.from_day ? '' : ` ~ ${summary.to_day}`}` }), h('p', { class: 'source-repo', text: `${memberNames.join('、') || '暂无成员'} · ${summary.status === 'published' ? '已发布' : '待审核'}` })),
+      h('div', { class: 'doc-actions' },
+        state.me.canEdit ? h('button', { type: 'button', class: 'btn primary', onClick: () => void summarizeWorklogs(), text: '重新汇总今日' }) : null,
+        state.me.canEdit ? h('button', { type: 'button', class: 'btn', onClick: async () => {
+          try { const updated = await api(`/api/worklogs/summaries/${encodeURIComponent(summary.id)}`, { method: 'PATCH', body: JSON.stringify({ status: 'published' }) }); state.worklogSummary = updated.summary; toast('汇总已标记发布'); render() } catch (error) { toast(error.message, 'error') }
+        }, text: '标记发布' }) : null)),
+    h('section', { class: 'worklog-summary' }, h('pre', { text: summary.markdown })))
 }
 
 function renderSourceList() {
@@ -713,6 +787,7 @@ async function selectBase(id) {
   await loadGroups()
   if (state.view === 'files') await loadFiles()
   else if (state.view === 'sources') await loadSources()
+  else if (state.view === 'worklogs') await loadWorklogs()
   else if (state.view === 'wiki') await loadWiki()
   else if (state.view !== 'ask') await loadDocuments()
 }
@@ -764,6 +839,7 @@ async function refreshAll() {
     await loadGroups()
     if (state.view === 'files') await loadFiles()
     else if (state.view === 'sources') await loadSources()
+    else if (state.view === 'worklogs') await loadWorklogs()
     else if (state.view === 'wiki') await loadWiki()
     else if (state.view !== 'ask') await loadDocuments()
     render()

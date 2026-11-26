@@ -228,6 +228,8 @@ export class CloudSyncManager implements CloudSyncControl {
         ...(this.config.filesDir === '' ? {} : { CLOUD_SYNC_FILES: this.config.filesDir }),
         ...(this.config.filesOut === '' ? {} : { CLOUD_SYNC_FILES_OUT: this.config.filesOut }),
         ...(this.config.base === '' ? {} : { CLOUD_SYNC_BASE: this.config.base }),
+        CLOUD_SYNC_WORKLOG_DB: `${this.databasePath}.worklog.sqlite`,
+        CLOUD_SYNC_WORKLOG_BASE: 'default',
         ...(mode === 'pull' ? { CLOUD_SYNC_PULL: '1', CLOUD_SYNC_MIRROR: '1' } : {}),
       }
       const child = spawn(process.execPath, [this.scriptPath], {

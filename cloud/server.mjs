@@ -64,7 +64,7 @@ function readBuildInfo() {
     buildId: `${version}-${hash}`,
     buildHash: hash,
     commit: process.env.TEAM_BUILD_COMMIT?.trim() || '',
-    features: ['files', 'sync-v1', 'search-v1', 'qa-citations-v1', 'wiki-review-v1'],
+    features: ['files', 'sync-v1', 'search-v1', 'qa-citations-v1', 'wiki-review-v1', 'worklogs-v1', 'automation-v1'],
   }
 }
 
@@ -620,6 +620,116 @@ async function syncFeed(baseId, since = '') {
   }
 }
 
+function validDay(value) {
+  return typeof value === 'string' && /^\d{4}-\d{2}-\d{2}$/u.test(value) ? value : ''
+}
+
+function dayOffset(date, offset) {
+  const copy = new Date(`${date}T00:00:00Z`)
+  copy.setUTCDate(copy.getUTCDate() + offset)
+  return copy.toISOString().slice(0, 10)
+}
+
+function worklogEvidence(rows) {
+  return rows.map(row => `## ${row.day} · ${row.user_name}\n\n${String(row.markdown ?? '').slice(0, 6_000)}`).join('\n\n')
+}
+
+async function summarizeTeamWorklogs({ baseId, fromDay, toDay, actor, force = false }) {
+  const base = await provider.getKnowledgeBase(baseId)
+  if (base === undefined || base.status !== 'active') throw new HttpError(404, '知识库不存在')
+  const from = validDay(fromDay) || toDay || new Date().toISOString().slice(0, 10)
+  const to = validDay(toDay) || from
+  const logs = team.listWorklogs(baseId, from, to)
+  if (logs.length === 0) throw new HttpError(404, `没有 ${from} 至 ${to} 的团队日报`)
+  const evidence = worklogEvidence(logs)
+  const fallback = `# 团队工作日报总结 · ${from} 至 ${to}\n\n> 自动汇总草稿，请人工审核。\n\n## 已汇总成员\n\n${[...new Set(logs.map(row => row.user_name))].map(name => `- ${name}`).join('\n')}\n\n## 日报摘录\n\n${logs.map(row => `### ${row.day} · ${row.user_name}\n\n${String(row.markdown ?? '').slice(0, 1_200)}`).join('\n\n')}`
+  const generated = await chatCompletion([
+    { role: 'system', content: '你是企业团队日报编辑。只根据给定成员日报总结团队进展、阻塞和下一步；按成员和日期保留可核验事实，不编造，不忽略未完成事项。输出 Markdown，结论后附 [成员/日期]。' },
+    { role: 'user', content: `日期范围：${from} 至 ${to}\n\n团队日报：\n${evidence}` },
+  ], { maxTokens: 1800 }).catch(() => undefined)
+  const summary = team.findWorklogSummary(baseId, from, to) === undefined
+    ? team.createWorklogSummary({
+      baseId,
+      fromDay: from,
+      toDay: to,
+      markdown: generated ?? fallback,
+      engine: generated === undefined ? 'extractive' : 'model',
+    })
+    : team.updateWorklogSummary(team.findWorklogSummary(baseId, from, to).id, { markdown: generated ?? fallback, status: 'draft' })
+  team.audit(actor ?? null, 'worklog.summarize', summary.id, `${from}..${to} ${logs.length} 天`)
+  return { summary, members: [...new Set(logs.map(row => row.user_name))], days: logs.length, citations: logs.map(row => `${row.user_name}/${row.day}`) }
+}
+
+async function upsertAutoWiki(baseId) {
+  const docs = await provider.listDocuments(baseId)
+  if (docs.length === 0) return undefined
+  const latest = docs.reduce((max, doc) => String(doc.updatedAt ?? '') > max ? String(doc.updatedAt ?? '') : max, '')
+  const key = `auto-wiki:${baseId}`
+  if (latest === '' || latest <= (team.getAutomationState(key) ?? '')) return undefined
+  const { citations } = await retrieveEvidence('团队知识概览', baseId)
+  const evidence = citations.map(citation => `### ${citation.title}\n\n${citation.excerpt.slice(0, 600)}\n\n来源：[${citation.index}] ${citation.url}`).join('\n\n')
+  const generated = await chatCompletion([
+    { role: 'system', content: '你是企业知识库 Wiki 编辑。只根据证据整理团队知识概览：主题、关键结论、待确认事项和来源。输出 Markdown，结论附 [编号]，不得编造。' },
+    { role: 'user', content: `请生成团队知识概览：\n\n${evidence}` },
+  ], { maxTokens: 1800 }).catch(() => undefined)
+  const content = generated ?? `# 自动 Wiki · 团队知识概览\n\n> 自动生成草稿，待团队审核。\n\n## 证据摘要\n\n${evidence || '当前没有可引用资料。'}`
+  const title = '自动 Wiki · 团队知识概览'
+  const slug = 'auto-team-wiki'
+  const sources = citations.map(citation => ({ kind: citation.kind, sourceId: citation.id, title: citation.title, excerpt: citation.excerpt.slice(0, 500), lineStart: null, lineEnd: null }))
+  const existing = team.findWikiPage(baseId, slug)
+  const page = existing === undefined || existing.status === 'published'
+    ? team.createWikiPage({ baseId, slug: existing === undefined ? slug : `${slug}-${new Date().toISOString().slice(0, 10).replaceAll('-', '')}`, title: existing === undefined ? title : `${title}（更新 ${new Date().toISOString().slice(0, 10)}）`, content, createdBy: null, status: 'draft', sources })
+    : team.updateWikiPage(existing.id, { title, content, status: 'draft', sources })
+  team.setAutomationState(key, latest)
+  return page
+}
+
+async function runAutomation({ force = false } = {}) {
+  const result = { wiki: [], worklog: [], skipped: 0 }
+  const bases = (await provider.listKnowledgeBases()).filter(base => base.status === 'active')
+  for (const base of bases) {
+    try {
+      const page = await upsertAutoWiki(base.id)
+      if (page !== undefined) result.wiki.push({ baseId: base.id, pageId: page.id })
+      else result.skipped += 1
+    } catch (error) {
+      result.wiki.push({ baseId: base.id, error: error.message })
+    }
+  }
+  const today = new Date().toISOString().slice(0, 10)
+  const autoHour = Math.max(0, Math.min(23, Number(process.env.TEAM_WORKLOG_SUMMARY_HOUR ?? 19)))
+  if (force || new Date().getHours() >= autoHour) {
+    const stateKey = `worklog-summary:${today}`
+    if (force || team.getAutomationState(stateKey) === undefined) {
+      let generated = false
+      for (const base of bases) {
+        const logs = team.listWorklogs(base.id, today, today)
+        if (logs.length === 0) continue
+        try {
+          const summary = await summarizeTeamWorklogs({ baseId: base.id, fromDay: today, toDay: today, actor: null, force })
+          result.worklog.push({ baseId: base.id, summaryId: summary.summary.id })
+          generated = true
+        } catch (error) {
+          result.worklog.push({ baseId: base.id, error: error.message })
+        }
+      }
+      if (generated) team.setAutomationState(stateKey, new Date().toISOString())
+    }
+  }
+  return result
+}
+
+function automationStatus() {
+  return {
+    autoWiki: process.env.TEAM_AUTO_WIKI !== '0',
+    autoWorklog: process.env.TEAM_AUTO_WORKLOG !== '0',
+    summaryHour: Number(process.env.TEAM_WORKLOG_SUMMARY_HOUR ?? 19),
+    intervalMinutes: Math.max(1, Number(process.env.TEAM_AUTO_INTERVAL_MINUTES ?? 30)),
+    lastWiki: team.getAutomationState('auto-wiki:default') ?? null,
+    lastWorklog: team.getAutomationState(`worklog-summary:${new Date().toISOString().slice(0, 10)}`) ?? null,
+  }
+}
+
 async function handle(req, res) {
   const url = new URL(req.url ?? '/', requestOrigin(req))
   const method = req.method ?? 'GET'
@@ -632,6 +742,27 @@ async function handle(req, res) {
     if (path === '/knowledge-api/v1/sync/changes' && method === 'GET') {
       bearerActor(req)
       return sendJson(res, 200, await syncFeed(url.searchParams.get('baseId') ?? '', url.searchParams.get('since') ?? ''))
+    }
+    if (path === '/knowledge-api/v1/worklogs' && (method === 'POST' || method === 'GET')) {
+      const actor = bearerActor(req)
+      const canWrite = Array.isArray(actor.permissions) && actor.permissions.includes('write')
+      if (method === 'GET') {
+        const baseId = url.searchParams.get('baseId') ?? 'default'
+        return sendJson(res, 200, { logs: team.listWorklogs(baseId, url.searchParams.get('from') ?? '', url.searchParams.get('to') ?? '') })
+      }
+      if (!canWrite) throw new HttpError(403, 'Token 没有 write 权限')
+      const body = await readJson(req)
+      const baseId = String(body.baseId ?? 'default')
+      const day = validDay(body.day)
+      if (day === '') throw new HttpError(400, 'day 必须是 YYYY-MM-DD')
+      const markdown = String(body.markdown ?? '').trim()
+      if (markdown === '') throw new HttpError(400, '日报内容不能为空')
+      const row = team.upsertWorklog({
+        baseId, userName: String(body.userName ?? '未署名').trim().slice(0, 100), day,
+        revision: Number(body.revision ?? 0) || 0, markdown, source: String(body.source ?? 'worklog').slice(0, 80),
+      })
+      team.audit(null, 'worklog.sync', `${baseId}/${row.user_name}/${day}`, `${markdown.length} chars`)
+      return sendJson(res, 201, { ok: true, day, userName: row.user_name })
     }
     if (path === '/knowledge-api/v1/files' || path.startsWith('/knowledge-api/v1/files/')) {
       await handleTokenFiles(req, res, url, path, method)
@@ -735,6 +866,52 @@ async function handle(req, res) {
   }
 
   if (method !== 'GET' && method !== 'HEAD') requireCsrf(req, session)
+
+  if (path === '/api/worklogs' && method === 'GET') {
+    const baseId = url.searchParams.get('baseId') ?? 'default'
+    return sendJson(res, 200, {
+      logs: team.listWorklogs(baseId, url.searchParams.get('from') ?? '', url.searchParams.get('to') ?? ''),
+      summaries: team.listWorklogSummaries(baseId),
+    })
+  }
+
+  if (path === '/api/worklogs/summaries' && method === 'GET') {
+    const baseId = url.searchParams.get('baseId') ?? 'default'
+    return sendJson(res, 200, { summaries: team.listWorklogSummaries(baseId, Number(url.searchParams.get('limit') ?? 20)) })
+  }
+
+  if (path === '/api/worklogs/summarize' && method === 'POST') {
+    requireRole(session, ['admin', 'editor'])
+    const body = await readJson(req)
+    return sendJson(res, 201, await summarizeTeamWorklogs({
+      baseId: String(body.baseId ?? 'default'),
+      fromDay: validDay(body.from) || undefined,
+      toDay: validDay(body.to) || undefined,
+      actor: session.user.id,
+      force: true,
+    }))
+  }
+
+  const summaryMatch = /^\/api\/worklogs\/summaries\/([a-f0-9-]{36})$/u.exec(path)
+  if (summaryMatch !== null && method === 'PATCH') {
+    requireRole(session, ['admin', 'editor'])
+    const body = await readJson(req)
+    const status = String(body.status ?? '')
+    if (!['draft', 'published'].includes(status)) throw new HttpError(400, '无效的汇总状态')
+    const summary = team.updateWorklogSummary(summaryMatch[1], { status })
+    if (summary === undefined) throw new HttpError(404, '汇总不存在')
+    team.audit(session.user.id, 'worklog.summary.status', summary.id, status)
+    return sendJson(res, 200, { summary })
+  }
+
+  if (path === '/api/automation/status' && method === 'GET') {
+    return sendJson(res, 200, automationStatus())
+  }
+
+  if (path === '/api/automation/run' && method === 'POST') {
+    requireRole(session, ['admin'])
+    return sendJson(res, 200, await runAutomation({ force: true }))
+  }
 
   if (path === '/api/files' || path.startsWith('/api/files/')) {
     await handleTeamFiles(req, res, url, path, method, session)
@@ -1128,6 +1305,14 @@ server.listen(port, host, () => {
   console.log(`[team-kb] data=${dataDir}`)
   console.log(`[team-kb] knowledge=${kbDbPath}`)
   console.log(`[team-kb] team=${teamDbPath}`)
+  const intervalMinutes = Math.max(1, Number(process.env.TEAM_AUTO_INTERVAL_MINUTES ?? 30))
+  const run = () => {
+    if (closing) return
+    void runAutomation().catch(error => console.error('[team-kb] automation failed:', error))
+  }
+  setTimeout(run, 15_000).unref()
+  setInterval(run, intervalMinutes * 60_000).unref()
+  console.log(`[team-kb] automation interval=${intervalMinutes}m wiki=${process.env.TEAM_AUTO_WIKI !== '0' ? 'on' : 'off'} worklog=${process.env.TEAM_AUTO_WORKLOG !== '0' ? 'on' : 'off'}`)
 })
 
 async function shutdown(signal) {

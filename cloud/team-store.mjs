@@ -171,6 +171,34 @@ export class TeamStore {
         updated_at TEXT NOT NULL,
         PRIMARY KEY(source_id, path)
       );
+      CREATE TABLE IF NOT EXISTS team_worklogs (
+        base_id TEXT NOT NULL,
+        user_name TEXT NOT NULL,
+        day TEXT NOT NULL,
+        revision INTEGER NOT NULL DEFAULT 0,
+        markdown TEXT NOT NULL,
+        source TEXT NOT NULL DEFAULT 'worklog',
+        updated_at TEXT NOT NULL,
+        PRIMARY KEY(base_id, user_name, day)
+      );
+      CREATE INDEX IF NOT EXISTS team_worklogs_day ON team_worklogs(base_id, day, updated_at);
+      CREATE TABLE IF NOT EXISTS worklog_summaries (
+        id TEXT PRIMARY KEY,
+        base_id TEXT NOT NULL,
+        from_day TEXT NOT NULL,
+        to_day TEXT NOT NULL,
+        markdown TEXT NOT NULL,
+        status TEXT NOT NULL DEFAULT 'draft',
+        engine TEXT NOT NULL DEFAULT 'extractive',
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS worklog_summaries_base ON worklog_summaries(base_id, to_day);
+      CREATE TABLE IF NOT EXISTS automation_state (
+        key TEXT PRIMARY KEY,
+        value TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      );
     `)
     const fileColumns = this.db.prepare('PRAGMA table_info(files)').all().map(column => column.name)
     if (!fileColumns.includes('user_name')) this.db.exec('ALTER TABLE files ADD COLUMN user_name TEXT')
@@ -426,6 +454,63 @@ export class TeamStore {
 
   listSourceItems(sourceId) {
     return this.db.prepare('SELECT * FROM source_items WHERE source_id=? ORDER BY path').all(sourceId)
+  }
+
+  upsertWorklog({ baseId, userName, day, revision = 0, markdown, source = 'worklog' }) {
+    const now = new Date().toISOString()
+    this.db.prepare(`INSERT INTO team_worklogs (base_id,user_name,day,revision,markdown,source,updated_at)
+      VALUES (?,?,?,?,?,?,?)
+      ON CONFLICT(base_id,user_name,day) DO UPDATE SET
+        revision=CASE WHEN excluded.revision > team_worklogs.revision THEN excluded.revision ELSE team_worklogs.revision END,
+        markdown=excluded.markdown, source=excluded.source, updated_at=excluded.updated_at`)
+      .run(baseId, userName, day, revision, markdown, source, now)
+    return this.getWorklog(baseId, userName, day)
+  }
+
+  getWorklog(baseId, userName, day) {
+    return this.db.prepare('SELECT * FROM team_worklogs WHERE base_id=? AND user_name=? AND day=?').get(baseId, userName, day)
+  }
+
+  listWorklogs(baseId, fromDay = '', toDay = '') {
+    const from = fromDay === '' ? '0000-00-00' : fromDay
+    const to = toDay === '' ? '9999-99-99' : toDay
+    return this.db.prepare('SELECT * FROM team_worklogs WHERE base_id=? AND day>=? AND day<=? ORDER BY day DESC, user_name').all(baseId, from, to)
+  }
+
+  listWorklogSummaries(baseId, limit = 20) {
+    return this.db.prepare('SELECT * FROM worklog_summaries WHERE base_id=? ORDER BY to_day DESC, updated_at DESC LIMIT ?').all(baseId, Math.max(1, Math.min(100, limit)))
+  }
+
+  findWorklogSummary(baseId, fromDay, toDay) {
+    return this.db.prepare('SELECT * FROM worklog_summaries WHERE base_id=? AND from_day=? AND to_day=? ORDER BY updated_at DESC LIMIT 1').get(baseId, fromDay, toDay)
+  }
+
+  getWorklogSummary(id) {
+    return this.db.prepare('SELECT * FROM worklog_summaries WHERE id=?').get(id)
+  }
+
+  createWorklogSummary({ baseId, fromDay, toDay, markdown, status = 'draft', engine = 'extractive' }) {
+    const id = randomUUID()
+    const now = new Date().toISOString()
+    this.db.prepare(`INSERT INTO worklog_summaries (id,base_id,from_day,to_day,markdown,status,engine,created_at,updated_at)
+      VALUES (?,?,?,?,?,?,?,?,?)`).run(id, baseId, fromDay, toDay, markdown, status, engine, now, now)
+    return this.getWorklogSummary(id)
+  }
+
+  updateWorklogSummary(id, { markdown, status }) {
+    this.db.prepare('UPDATE worklog_summaries SET markdown=COALESCE(?,markdown), status=COALESCE(?,status), updated_at=? WHERE id=?')
+      .run(markdown ?? null, status ?? null, new Date().toISOString(), id)
+    return this.getWorklogSummary(id)
+  }
+
+  getAutomationState(key) {
+    const row = this.db.prepare('SELECT * FROM automation_state WHERE key=?').get(key)
+    return row === undefined ? undefined : row.value
+  }
+
+  setAutomationState(key, value) {
+    this.db.prepare(`INSERT INTO automation_state (key,value,updated_at) VALUES (?,?,?)
+      ON CONFLICT(key) DO UPDATE SET value=excluded.value, updated_at=excluded.updated_at`).run(key, String(value), new Date().toISOString())
   }
 
   listWikiPages(baseId) {    return this.db.prepare('SELECT id,base_id,slug,title,status,version,created_by,updated_by,created_at,updated_at FROM wiki_pages WHERE base_id=? ORDER BY updated_at DESC').all(baseId)

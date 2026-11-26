@@ -21,7 +21,8 @@ function usage() {
 
 环境变量也可以:
   LOCAL_KB_DB, CLOUD_URL, CLOUD_TOKEN, CLOUD_SYNC_FILES, CLOUD_SYNC_BASE, CLOUD_SYNC_MAP
-  CLOUD_SYNC_PULL=1, CLOUD_SYNC_FILES_OUT`)
+  CLOUD_SYNC_PULL=1, CLOUD_SYNC_FILES_OUT
+  CLOUD_SYNC_WORKLOG_DB（默认 <db>.worklog.sqlite）, CLOUD_SYNC_WORKLOG_BASE（默认 default）`)
 }
 
 function args() {
@@ -50,6 +51,8 @@ const mirror = options.mirror === '1' || process.env.CLOUD_SYNC_MIRROR === '1'
 const mirrorPrefix = options['mirror-prefix'] ?? process.env.CLOUD_SYNC_MIRROR_PREFIX ?? '云端·'
 const userName = String(options.user ?? process.env.CLOUD_SYNC_USER ?? userInfo().username ?? 'user').trim() || 'user'
 const baseFilter = options.base ?? process.env.CLOUD_SYNC_BASE
+const worklogDb = options['worklog-db'] ?? process.env.CLOUD_SYNC_WORKLOG_DB ?? (existsSync(`${db}.worklog.sqlite`) ? `${db}.worklog.sqlite` : '')
+const worklogBase = options['worklog-base'] ?? process.env.CLOUD_SYNC_WORKLOG_BASE ?? 'default'
 const mapPath = resolve(options.map ?? process.env.CLOUD_SYNC_MAP ?? `${db}.cloud-sync.json`)
 if (db === '' || url === '' || token === '') {
   usage()
@@ -396,6 +399,43 @@ async function restoreMirrorToCloud(local, remote, map, localBases) {
   await saveMap(map)
 }
 
+async function syncWorklogs(map) {
+  if (worklogDb === '' || !existsSync(worklogDb)) return { pushed: 0, skipped: 0 }
+  const { DatabaseSync } = await import('node:sqlite')
+  const worklog = new DatabaseSync(worklogDb, { readOnly: true })
+  let pushed = 0
+  let skipped = 0
+  try {
+    map.worklogs ??= {}
+    const rows = worklog.prepare('SELECT day, revision, body FROM reports ORDER BY day ASC').all()
+    for (const row of rows) {
+      let markdown = ''
+      try { markdown = JSON.parse(String(row.body ?? '{}')).markdown ?? '' } catch { markdown = String(row.body ?? '') }
+      if (markdown.trim() === '') { skipped += 1; continue }
+      const key = `${worklogBase}/${userName}/${row.day}`
+      if (map.worklogs[key] === Number(row.revision ?? 0)) { skipped += 1; continue }
+      const response = await fetch(`${apiBase}/worklogs`, {
+        method: 'POST',
+        headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json' },
+        body: JSON.stringify({
+          baseId: worklogBase,
+          userName,
+          day: row.day,
+          revision: Number(row.revision ?? 0),
+          markdown,
+          source: 'dsh-worklog',
+        }),
+      })
+      if (!response.ok) throw new Error(`日报同步失败 (${response.status})`)
+      map.worklogs[key] = Number(row.revision ?? 0)
+      pushed += 1
+    }
+  } finally {
+    worklog.close()
+  }
+  return { pushed, skipped }
+}
+
 async function main() {
   const local = new LocalKnowledgeProvider(db)
   const remote = new RemoteKnowledgeProvider({ url: apiBase, token, timeoutMs: 30_000 })
@@ -507,7 +547,10 @@ async function main() {
       }
     }
   }
-  console.log(`\n完成：写入 ${pushed}，跳过 ${skipped}，失败 ${failed}`)
+  const worklogs = await syncWorklogs(map)
+  await saveMap(map)
+  console.log(`\n工作日报：写入 ${worklogs.pushed} 天，跳过 ${worklogs.skipped} 天`)
+  console.log(`完成：写入 ${pushed}，跳过 ${skipped}，失败 ${failed}`)
   console.log(`映射文件：${mapPath}`)
   await local.close().catch(() => {})
 }

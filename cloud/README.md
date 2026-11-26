@@ -146,6 +146,44 @@ TEAM_ADMIN_NAME=管理员
 
 当前首批连接器是 GitHub 和 Gitee；数据源 registry 的设计允许后续增加 GitLab、通用 Git、WebDAV 等。
 
+### 自动 Wiki 与团队日报汇总
+
+服务启动后默认每 30 分钟运行一次后台任务：
+
+- **自动 Wiki**：知识库文档有变化时，生成/更新一篇草稿 `自动 Wiki · 团队知识概览`（固定 slug `auto-team-wiki`）。只生成草稿，不自动发布；没有文档变化则跳过。
+- **团队日报汇总**：本地 DSH 工作日报通过云端同步写入后，每天配置时间后生成当日团队汇总，汇总成员进展、阻塞和下一步；无模型时退化为抽取式汇总。汇总不会改写成员日报。
+
+环境变量：
+
+```text
+TEAM_AUTO_WIKI=1
+TEAM_AUTO_WORKLOG=1
+TEAM_WORKLOG_SUMMARY_HOUR=19
+TEAM_AUTO_INTERVAL_MINUTES=30
+```
+
+接口：
+
+```text
+POST /knowledge-api/v1/worklogs        DSH Token 写入日报
+GET  /api/worklogs                   当前日报和汇总
+POST /api/worklogs/summarize         手动生成汇总
+PATCH /api/worklogs/summaries/:id    标记汇总发布
+GET  /api/automation/status
+POST /api/automation/run             管理员立即执行一次
+```
+
+本地同步脚本会自动读取 `<knowledge.sqlite>.worklog.sqlite`，也可以用：
+
+```text
+--worklog-db <日报数据库>
+--worklog-base <云端知识库 ID，默认 default>
+```
+
+上传日报时只上传日报正文，不包含成员本机路径或其他本地数据。
+
+
+
 ### 文件解析、搜索、问答与 Wiki
 
 #### 多格式文件渲染
@@ -167,7 +205,7 @@ HTML/SVG 等主动内容不做同源内嵌。
 - PDF、DOCX、XLSX、PPTX、EPUB、RTF 和文本文件上传后自动抽取文本，写入 SQLite FTS5 索引；旧版 `.xls` 明确提示另存为 `.xlsx`；
 - 图片已保存，但未配置 OCR 时标记为“仅存储”，不伪造“已索引”；
 - 文件列表显示 `已索引 / 待解析 / 仅存储 / 解析失败`，详情支持重新解析；
-- 依赖 `pdfjs-dist`、`mammoth`、`xlsx`、`fflate`；独立部署时应执行 `npm install --omit=dev --ignore-scripts` 安装这些解析依赖；
+- 依赖 `pdfjs-dist`、`mammoth`、`fflate`；独立部署时应执行 `npm install --omit=dev --ignore-scripts` 安装这些解析依赖；
 - `/api/search` 同时返回文档命中和文件文本命中；
 - `/api/ask` 返回带 `[编号]` 引用的答案和引用列表；没有配置模型时返回可核对证据，不编造答案；
 - `/api/wiki/generate` 生成草稿并记录来源，`/api/wiki/:id/publish` 审核发布，版本可恢复；

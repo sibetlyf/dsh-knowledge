@@ -42,6 +42,24 @@ test('office documents are extracted without Markdown', async () => {
   assert.match(xlsxResult.content, /Alice/u)
 })
 
+test('team worklogs and automation state persist', () => {
+  const store = new TeamStore(':memory:')
+  try {
+    const first = store.upsertWorklog({ baseId: 'default', userName: 'alice', day: '2026-11-26', revision: 1, markdown: '# 日报\n\n完成多格式解析。' })
+    assert.equal(first.day, '2026-11-26')
+    const second = store.upsertWorklog({ baseId: 'default', userName: 'alice', day: '2026-11-26', revision: 2, markdown: '# 日报\n\n完成多格式解析。\n\n补充日报。' })
+    assert.equal(second.revision, 2)
+    assert.equal(store.listWorklogs('default', '2026-11-26', '2026-11-26').length, 1)
+    const summary = store.createWorklogSummary({ baseId: 'default', fromDay: '2026-11-26', toDay: '2026-11-26', markdown: '# 团队汇总', engine: 'extractive' })
+    assert.equal(store.listWorklogSummaries('default').length, 1)
+    assert.equal(store.updateWorklogSummary(summary.id, { status: 'published' }).status, 'published')
+    store.setAutomationState('auto-wiki:default', '2026-11-26T00:00:00Z')
+    assert.equal(store.getAutomationState('auto-wiki:default'), '2026-11-26T00:00:00Z')
+  } finally {
+    store.close()
+  }
+})
+
 test('file full-text search and wiki version/restore work', async () => {
   const dir = await mkdtemp(join(tmpdir(), 'dsh-cloud-test-'))
   const store = new TeamStore(join(dir, 'team.sqlite'))
