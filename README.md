@@ -30,6 +30,8 @@
 dsh plugin --profile web add "https://github.com/sibetlyf/dsh-knowledge/archive/refs/heads/main.tar.gz"
 ```
 
+> 安装日志里可能出现 `@lemoncat7/dsh-knowledge@2.22.10-custom.1`。这是仓库 `package.json` 中的包名 + 自定义版本，不是第二个插件。该包声明了 `prepare: clean + build`，所以只有“GitHub 源码安装”才会要求编译；预构建 tarball 安装不执行 `prepare`。
+
 也可以在仓库本地执行：
 
 ```bash
@@ -43,7 +45,7 @@ dsh plugin --profile web add .\dsh-knowledge-*.tgz
 dsh plugin --profile web add github:sibetlyf/dsh-knowledge
 ```
 
-GitHub 源码安装会执行 `prepare`，pnpm 默认会拦截构建；如果报 `allowBuilds` 或 `bad indentation of a mapping entry`，先修 Profile 的 `pnpm-workspace.yaml`，而不是反复重试。
+GitHub 源码安装会执行 `prepare`，pnpm 默认会拦截构建；如果报 `allowBuilds`、`bad indentation of a mapping entry` 或 `@...@2.22.10-custom.1`，先修 Profile 的 `pnpm-workspace.yaml`，而不是反复重试。
 
 ### 修复 pnpm-workspace.yaml
 
