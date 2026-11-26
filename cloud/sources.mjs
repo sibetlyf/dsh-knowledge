@@ -19,7 +19,9 @@ function headersFor(source) {
 }
 
 async function fetchJson(url, source) {
-  const response = await fetch(url, { headers: headersFor(source), signal: AbortSignal.timeout(30_000) })
+  const target = new URL(url)
+  if (source.provider === 'gitee' && source.token) target.searchParams.set('access_token', source.token)
+  const response = await fetch(target, { headers: headersFor(source), signal: AbortSignal.timeout(30_000) })
   if (!response.ok) {
     const text = await response.text().catch(() => '')
     throw new Error(`${source.provider} API ${response.status}: ${text.slice(0, 160)}`)
