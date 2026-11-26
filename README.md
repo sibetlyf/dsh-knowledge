@@ -2,7 +2,8 @@
 
 面向 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) 的知识库、笔记与工作日报插件。支持本地使用和远程中央知识库，不修改 DSH Agent Loop。
 
-[![npm](https://img.shields.io/npm/v/%40lemoncat7%2Fdsh-knowledge)](https://www.npmjs.com/package/@lemoncat7/dsh-knowledge)
+[![GitHub](https://img.shields.io/badge/GitHub-sibetlyf%2Fdsh--knowledge-blue)](https://github.com/sibetlyf/dsh-knowledge)
+[![Release](https://img.shields.io/github/v/release/sibetlyf/dsh-knowledge?display_name=tag)](https://github.com/sibetlyf/dsh-knowledge/releases)
 
 ## 独立团队知识库
 
@@ -21,9 +22,19 @@
 
 需要 Node.js **>=24.9.0**。不按 DSH 版本号限制安装或加载；兼容性测试作为历史记录保留，见[宿主兼容策略](docs/host-compatibility-policy.md)。
 
+从本仓库安装：
+
 ```bash
-dsh plugin --profile web add @lemoncat7/dsh-knowledge@latest
+dsh plugin --profile web add github:sibetlyf/dsh-knowledge
 ```
+
+本地开发时，Profile 使用 link 依赖：
+
+```json
+"dsh-knowledge": "link:plugins/dsh-knowledge"
+```
+
+`plugins/dsh-knowledge` 指向当前仓库。
 
 安装或升级后重启对应的 DSH Profile；`web` 请按实际使用的 Profile 调整。
 
@@ -39,7 +50,7 @@ dsh plugin --profile web add @lemoncat7/dsh-knowledge@latest
 - [文档分组](docs/document-groups.md)
 - [笔记 @ 引用](docs/note-mentions.md)
 - [空闲读写与后台处理](docs/idle-performance.md)
-- [版本与发布说明](https://github.com/lemoncat7/dsh-knowledge/releases)
+- [版本与发布说明](https://github.com/sibetlyf/dsh-knowledge/releases)
 - [发布维护约定](docs/releases/README.md)
 
 ### 2.17.2
