@@ -69,6 +69,16 @@ cp -a "$TMP/package" "$APP_DIR"
 chown -R "$OWNER:$OWNER" "$APP_DIR"
 chmod -R u+rwX,go+rX "$APP_DIR"
 
+echo "4.5/6 安装 PDF/Office 解析依赖"
+if ! (cd "$APP_DIR" && npm install --omit=dev --ignore-scripts --no-audit --no-fund); then
+  echo "解析依赖安装失败，回滚到 $BACKUP" >&2
+  rm -rf "$APP_DIR"
+  cp -a "$BACKUP" "$APP_DIR"
+  systemctl start "$SERVICE" || true
+  exit 1
+fi
+chown -R "$OWNER:$OWNER" "$APP_DIR"
+
 echo "5/6 启动服务"
 systemctl start "$SERVICE"
 

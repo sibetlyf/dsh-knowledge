@@ -139,7 +139,7 @@ TEAM_ADMIN_NAME=管理员
 
 - 类型：GitHub、Gitee
 - 填写 `owner`、`repo`、分支/引用、路径过滤和 Token
-- 同步 Markdown、MarkdownX、TXT、HTML、RST 等文本文件
+- 同步 Markdown、文本、PDF、DOCX、XLSX/XLS、PPTX、EPUB、RTF 文件，解析后写入知识文档
 - 同一路径重复同步会更新已有文档，不会重复创建
 - Token 只保存在服务端数据库，API 不返回明文
 - 已从仓库删除的文件不会自动删除本地文档
@@ -157,13 +157,17 @@ TEAM_ADMIN_NAME=管理员
 - Markdown：渲染后的 HTML 预览；
 - TXT / 代码 / JSON：代码式文本预览；
 - CSV：表格预览；
+- DOCX / XLSX / PPTX / EPUB：显示解析后的文本预览；
 - 音频/视频：播放器；
-- Office/压缩包/未知格式：下载后打开，不伪装成在线预览。
+- 扫描件/图片：未配置 OCR 时明确显示需 OCR，不伪造正文；
+- 未解析的 Office / 压缩包 / 未知格式：下载后打开。
 
 HTML/SVG 等主动内容不做同源内嵌。
-- 文本类文件（Markdown、TXT、CSV、JSON、HTML、代码等）上传后自动抽取文本，写入 SQLite FTS5 索引；
-- PDF/Office/图片等复杂格式当前标记为“仅存储”，原文件可下载，不伪造“已索引”；
+
+- PDF、DOCX、XLSX/XLS、PPTX、EPUB、RTF 和文本文件上传后自动抽取文本，写入 SQLite FTS5 索引；
+- 图片已保存，但未配置 OCR 时标记为“仅存储”，不伪造“已索引”；
 - 文件列表显示 `已索引 / 待解析 / 仅存储 / 解析失败`，详情支持重新解析；
+- 依赖 `pdfjs-dist`、`mammoth`、`xlsx`、`fflate`；独立部署时应执行 `npm install --omit=dev --ignore-scripts` 安装这些解析依赖；
 - `/api/search` 同时返回文档命中和文件文本命中；
 - `/api/ask` 返回带 `[编号]` 引用的答案和引用列表；没有配置模型时返回可核对证据，不编造答案；
 - `/api/wiki/generate` 生成草稿并记录来源，`/api/wiki/:id/publish` 审核发布，版本可恢复；

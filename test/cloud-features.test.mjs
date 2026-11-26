@@ -6,14 +6,40 @@ import { join } from 'node:path'
 import test from 'node:test'
 import { TeamStore } from '../cloud/team-store.mjs'
 import { extractText } from '../cloud/ingest.mjs'
+import { zipSync, strToU8 } from 'fflate'
 
-test('text-like files are indexed and unsupported files remain downloadable', () => {
-  const markdown = extractText({ name: 'guide.md', mime: 'text/markdown', bytes: Buffer.from('# 发布流程\n\n发布前必须审批。') })
+test('text-like files are indexed and unsupported files remain downloadable', async () => {
+  const markdown = await extractText({ name: 'guide.md', mime: 'text/markdown', bytes: Buffer.from('# 发布流程\n\n发布前必须审批。') })
   assert.equal(markdown.status, 'parsed')
   assert.match(markdown.content, /发布流程/u)
-  const pdf = extractText({ name: 'guide.pdf', mime: 'application/pdf', bytes: Buffer.from('%PDF-1.7') })
-  assert.equal(pdf.status, 'unsupported')
-  assert.match(pdf.error, /仍可下载/u)
+  const zip = await extractText({ name: 'guide.bin', mime: 'application/octet-stream', bytes: Buffer.from('binary') })
+  assert.equal(zip.status, 'unsupported')
+  assert.match(zip.error, /仍可下载/u)
+})
+
+test('office documents are extracted without Markdown', async () => {
+  const docx = zipSync({
+    '[Content_Types].xml': strToU8('<?xml version="1.0"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="xml" ContentType="application/xml"/><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/></Types>'),
+    'word/document.xml': strToU8('<?xml version="1.0"?><w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:p><w:r><w:t>DOCX 发布流程</w:t></w:r></w:p></w:body></w:document>'),
+  })
+  const pptx = zipSync({
+    '[Content_Types].xml': strToU8('<?xml version="1.0"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"/>'),
+    'ppt/slides/slide1.xml': strToU8('<?xml version="1.0"?><p:sld xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main"><p:cSld><p:spTree><p:txBody><a:t xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main">PPTX 发布流程</a:t></p:txBody></p:spTree></p:cSld></p:sld>'),
+  })
+  const xlsx = zipSync({
+    '[Content_Types].xml': strToU8('<?xml version="1.0"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"/>'),
+    'xl/sharedStrings.xml': strToU8('<?xml version="1.0"?><sst xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><si><t>负责人</t></si><si><t>状态</t></si><si><t>Alice</t></si><si><t>已发布</t></si></sst>'),
+    'xl/worksheets/sheet1.xml': strToU8('<?xml version="1.0"?><worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData><row r="1"><c r="A1" t="s"><v>0</v></c><c r="B1" t="s"><v>1</v></c></row><row r="2"><c r="A2" t="s"><v>2</v></c><c r="B2" t="s"><v>3</v></c></row></sheetData></worksheet>'),
+  })
+  const docxResult = await extractText({ name: 'guide.docx', mime: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document', bytes: Buffer.from(docx) })
+  assert.equal(docxResult.status, 'parsed')
+  assert.match(docxResult.content, /DOCX 发布流程/u)
+  const pptxResult = await extractText({ name: 'guide.pptx', mime: 'application/vnd.openxmlformats-officedocument.presentationml.presentation', bytes: Buffer.from(pptx) })
+  assert.equal(pptxResult.status, 'parsed')
+  assert.match(pptxResult.content, /PPTX 发布流程/u)
+  const xlsxResult = await extractText({ name: 'guide.xlsx', mime: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', bytes: Buffer.from(xlsx) })
+  assert.equal(xlsxResult.status, 'parsed')
+  assert.match(xlsxResult.content, /Alice/u)
 })
 
 test('file full-text search and wiki version/restore work', async () => {

@@ -165,9 +165,14 @@ button, input, textarea, select { font: inherit; color: inherit; }
 .breadcrumb { min-width: 0; color: var(--muted); font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .breadcrumb strong { color: var(--text); font-weight: 600; }
 .pill { border: 1px solid var(--line); background: var(--panel); color: var(--muted); border-radius: 999px; padding: 3px 9px; font-size: 11px; white-space: nowrap; }
+.file-support-note { margin: 0; padding: 7px 10px; border-bottom: 1px solid var(--line); color: var(--muted); font-size: 10.5px; line-height: 1.55; }
+.file-status-summary { display: flex; flex-wrap: wrap; gap: 5px; padding: 7px 10px; border-bottom: 1px solid var(--line); }
+.file-status-summary span { padding: 3px 7px; border: 1px solid var(--line); border-radius: 999px; color: var(--muted); font-size: 10px; }
+.file-status-summary .is-parsed { color: var(--accent); border-color: color-mix(in srgb, var(--accent) 30%, var(--line)); }
+.file-status-summary .is-unsupported, .file-status-summary .is-failed { color: var(--warning); }
 .doc-list-wrap { border-bottom: 1px solid var(--line); background: var(--panel); max-height: 190px; overflow: auto; }
 .doc-list { display: grid; padding: 6px; gap: 2px; }
-.doc-row { border: 0; background: transparent; text-align: left; border-radius: 7px; padding: 6px 10px; cursor: pointer; display: grid; grid-template-columns: minmax(0,1fr) auto; gap: 10px; align-items: center; }
+.doc-row { border: 0; background: transparent; text-align: left; border-radius: 7px; padding: 6px 10px; cursor: pointer; display: grid; grid-template-columns: 28px minmax(0, 1fr) auto; gap: 9px; align-items: center; }
 .doc-row:hover { background: var(--panel-2); }
 .doc-row.active { background: var(--accent-soft); }
 .doc-row strong { font-size: 12.5px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 600; }

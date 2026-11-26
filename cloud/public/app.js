@@ -262,13 +262,14 @@ function renderFileDetail() {
   const type = String(file.mime || '').toLowerCase()
   const safeImage = /^image\/(?:png|jpeg|gif|webp)(?:;|$)/u.test(type)
   const safeText = /^text\/(?:plain|markdown|csv)(?:;|$)/u.test(type) || type === 'application/json'
+  const parsedText = file.parseStatus === 'parsed' && !safeImage && type !== 'application/pdf' && !/^audio\//u.test(type) && !/^video\//u.test(type)
   const safeAudio = /^audio\//u.test(type)
   const safeVideo = /^video\//u.test(type)
   const preview = safeImage
     ? h('img', { class: 'file-preview-image', src: file.inlineUrl, alt: file.name })
     : type === 'application/pdf'
       ? h('iframe', { class: 'file-preview-frame', src: file.inlineUrl, title: `${file.name} 预览` })
-      : safeText
+      : safeText || parsedText
         ? h('iframe', { class: 'file-preview-frame text-preview', src: file.previewUrl, title: `${file.name} 预览`, sandbox: '' })
         : safeAudio
           ? h('audio', { class: 'file-preview-audio', controls: true, src: file.inlineUrl, title: file.name })
@@ -282,7 +283,7 @@ function renderFileDetail() {
         state.me.canEdit ? h('button', { type: 'button', class: 'btn', onClick: () => void reparseFile(file), text: file.parseStatus === 'parsed' ? '重新解析' : '解析索引' }) : null,
         state.me.canEdit ? h('button', { type: 'button', class: 'btn danger', onClick: () => void deleteFile(file), text: '删除' }) : null)),
     h('div', { class: 'file-metadata' },
-      h('span', {}, h('small', { text: '类型' }), h('strong', { text: file.mime || '未知' })),
+      h('span', {}, h('small', { text: `类型 · ${file.parser || '未解析'}` }), h('strong', { text: file.mime || '未知' })),
       h('span', {}, h('small', { text: '大小' }), h('strong', { text: formatFileSize(file.size) })),
       h('span', {}, h('small', { text: '上传者' }), h('strong', { text: file.userName || '未署名' })),
       h('span', {}, h('small', { text: '检索状态' }), h('strong', {}, parseBadge(file.parseStatus), file.parseError ? h('span', { class: 'parse-error', text: file.parseError }) : null))),
@@ -475,7 +476,7 @@ function renderSourceDetail() {
       h('span', {}, h('small', { text: '文档分组' }), h('strong', { text: source.sourceGroup || `数据源/${source.provider}/${source.owner}/${source.repo}` }))),
     source.error ? h('p', { class: 'parse-error', text: source.error }) : null,
     h('div', { class: 'source-note' },
-      h('p', { text: '同步规则：读取仓库中 Markdown/文本文件，按路径映射到文档；重复同步会更新已有文档，不会无限创建。已删除的仓库文件不会自动删掉本地文档。' }),
+      h('p', { text: '同步规则：读取仓库中的 Markdown、文本、PDF、DOCX、XLSX、PPTX、EPUB 文件，按路径映射到文档；重复同步会更新已有文档，不会无限创建。已删除的仓库文件不会自动删掉本地文档。' }),
       h('p', { text: '公开仓库无需 Token；私有仓库填写 Token。Token 只保存在服务端数据库，不会从接口返回。' })))
 }
 
@@ -550,6 +551,12 @@ function renderFileList() {
   const folderInput = h('input', { type: 'file', multiple: true, webkitdirectory: true, hidden: true, onChange: event => { const files = event.currentTarget.files; if (files) void uploadFiles([...files]); event.currentTarget.value = '' } })
   const query = state.query.trim().toLowerCase()
   const files = state.files.filter(file => query === '' || `${file.name} ${file.sourceKey || ''} ${file.userName || ''} ${file.mime || ''}`.toLowerCase().includes(query))
+  const statusCounts = {
+    parsed: files.filter(file => file.parseStatus === 'parsed').length,
+    pending: files.filter(file => file.parseStatus === 'pending').length,
+    unsupported: files.filter(file => file.parseStatus === 'unsupported').length,
+    failed: files.filter(file => file.parseStatus === 'failed').length,
+  }
   const users = [...new Set(files.map(file => file.userName || '未署名'))].sort((a, b) => a.localeCompare(b))
   const rows = users.flatMap(user => [
     h('div', { class: 'file-user-heading', text: user }),
@@ -565,6 +572,12 @@ function renderFileList() {
       state.me.canEdit ? h('div', { class: 'upload-actions' },
         h('button', { type: 'button', class: 'btn primary', onClick: () => fileInput.click(), text: '上传' }),
         h('button', { type: 'button', class: 'btn', onClick: () => folderInput.click(), text: '上传文件夹' }), fileInput, folderInput) : null),
+    h('p', { class: 'file-support-note', text: '支持 PDF、DOCX、XLSX、PPTX、EPUB、Markdown/文本、图片和音视频；图片需配置 OCR 后才能进入检索。' }),
+    h('div', { class: 'file-status-summary', 'aria-label': '文件解析状态汇总' },
+      h('span', { class: 'is-parsed', text: `已索引 ${statusCounts.parsed}` }),
+      h('span', { class: 'is-pending', text: `待解析 ${statusCounts.pending}` }),
+      h('span', { class: 'is-unsupported', text: `仅存储 ${statusCounts.unsupported}` }),
+      statusCounts.failed > 0 ? h('span', { class: 'is-failed', text: `失败 ${statusCounts.failed}` }) : null),
     rows.length === 0 ? h('div', { class: 'doc-empty', text: query ? '没有匹配的文件。' : '这个知识库还没有文件。' }) : h('div', { class: 'doc-list file-list-panel' }, ...rows))
 }
 

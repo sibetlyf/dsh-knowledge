@@ -114,7 +114,10 @@
   "dependencies": {
     "@deepseek-ai/schemastery": "~3.19.0",
     "ajv": "^8.20.0",
+    "fflate": "^0.8.3",
+    "mammoth": "^1.13.0",
     "marked": "^18.0.10",
+    "pdfjs-dist": "^6.5.438",
     "yaml": "^2.9.0"
   },
   "peerDependencies": {

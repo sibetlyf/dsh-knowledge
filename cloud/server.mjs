@@ -268,6 +268,7 @@ function fileMetadata(row, prefix = '/api/files') {
     userName: row.user_name ?? null,
     parseStatus: text?.status ?? 'pending',
     parseError: text?.error ?? null,
+    parser: text?.parser ?? null,
     excerpt: text?.content ? text.content.slice(0, 700) : null,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
@@ -278,7 +279,7 @@ function fileMetadata(row, prefix = '/api/files') {
 }
 
 async function indexFile(row, bytes) {
-  const result = extractText({ name: row.name, mime: row.mime, bytes })
+  const result = await extractText({ name: row.name, mime: row.mime, bytes })
   team.setFileText({
     fileId: row.id,
     baseId: row.base_id,

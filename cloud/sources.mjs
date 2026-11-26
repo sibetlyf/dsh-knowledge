@@ -1,10 +1,22 @@
-// GitHub/Gitee 仓库知识库同步：把 Markdown/文本文件 upsert 为知识库文档。
-// 只处理可读文本文件；不做代码执行，不把 token 写入日志或 API 响应。
+// GitHub/Gitee 仓库知识库同步：把可解析文件 upsert 为知识库文档。
+// 只处理可读文本和可解析文档；不做代码执行，不把 token 写入日志或 API 响应。
 import { basename } from 'node:path'
+import { extractText } from './ingest.mjs'
 
-const TEXT_PATH = /\.(?:md|markdown|mdx|txt|text|html|htm|rst|org)$/iu
+const SOURCE_PATH = /\.(?:md|markdown|mdx|txt|text|html|htm|rst|org|pdf|docx|xlsx|xls|pptx|epub|rtf)$/iu
 const MAX_FILES = 80
-const MAX_BYTES = 2 * 1024 * 1024
+const MAX_BYTES = 30 * 1024 * 1024
+
+function mimeForPath(path) {
+  const extension = String(path).toLowerCase().match(/\.([a-z0-9]+)$/u)?.[1] ?? ''
+  return {
+    md: 'text/markdown', markdown: 'text/markdown', mdx: 'text/markdown', txt: 'text/plain', text: 'text/plain',
+    html: 'text/html', htm: 'text/html', csv: 'text/csv', json: 'application/json', rst: 'text/plain', org: 'text/plain',
+    pdf: 'application/pdf', docx: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+    xlsx: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', xls: 'application/vnd.ms-excel',
+    pptx: 'application/vnd.openxmlformats-officedocument.presentationml.presentation', epub: 'application/epub+zip', rtf: 'application/rtf',
+  }[extension] ?? 'application/octet-stream'
+}
 
 function clean(value, fallback = '') {
   return String(value ?? '').trim() || fallback
@@ -42,7 +54,7 @@ async function treeFiles(source, ref) {
   const entries = Array.isArray(tree?.tree) ? tree.tree : []
   const pattern = clean(source.include_pattern)
   return entries
-    .filter(entry => entry?.type === 'blob' && typeof entry.path === 'string' && TEXT_PATH.test(entry.path))
+    .filter(entry => entry?.type === 'blob' && typeof entry.path === 'string' && SOURCE_PATH.test(entry.path))
     .filter(entry => pattern === '' || entry.path.toLowerCase().includes(pattern.toLowerCase()))
     .slice(0, MAX_FILES)
 }
@@ -53,13 +65,13 @@ async function fileContent(source, path, ref) {
   if (Array.isArray(contents)) throw new Error('路径是目录，不是文件')
   if (typeof contents?.content !== 'string') throw new Error('仓库 API 未返回文件正文')
   const bytes = Buffer.from(contents.content.replaceAll('\n', ''), 'base64')
-  if (bytes.length > MAX_BYTES) throw new Error('文件超过 2 MiB，未导入')
-  return bytes.toString('utf8')
+  if (bytes.length > MAX_BYTES) throw new Error('文件超过 30 MiB，未导入')
+  return bytes
 }
 
 function titleFor(path) {
   const name = basename(path)
-  return name.replace(/\.(?:md|markdown|mdx|txt|text|html|htm|rst|org)$/iu, '').replace(/[-_]+/gu, ' ') || path
+  return name.replace(/\.(?:md|markdown|mdx|txt|text|html|htm|rst|org|pdf|docx|xlsx|xls|pptx|epub|rtf)$/iu, '').replace(/[-_]+/gu, ' ') || path
 }
 
 export async function syncRepositorySource({ source, provider, team }) {
@@ -76,8 +88,15 @@ export async function syncRepositorySource({ source, provider, team }) {
     const group = clean(source.source_group, `数据源/${source.provider}/${source.owner}/${source.repo}`)
     for (const file of files) {
       try {
-        const body = await fileContent(source, file.path, ref)
+        const bytes = await fileContent(source, file.path, ref)
+        const parsed = await extractText({ name: file.path, mime: mimeForPath(file.path), bytes })
+        if (parsed.status !== 'parsed' || parsed.content.trim() === '') {
+          result.skipped += 1
+          result.errors.push(`${file.path}: ${parsed.error ?? '没有可索引文本'}`)
+          continue
+        }
         const title = titleFor(file.path)
+        const body = parsed.content
         const item = team.getSourceItem(source.id, file.path)
         let entry = item === undefined ? undefined : await provider.get(item.document_id)
         if (entry !== undefined && entry.status === 'active') {
@@ -112,7 +131,7 @@ export async function syncRepositorySource({ source, provider, team }) {
       }
     }
     team.updateDataSource(source.id, {
-      status: result.failed > 0 ? 'partial' : 'synced',
+      status: result.failed > 0 || result.skipped > 0 ? 'partial' : 'synced',
       error: result.errors.length > 0 ? result.errors.slice(0, 3).join('；') : null,
       lastSyncedAt: new Date().toISOString(),
     })
