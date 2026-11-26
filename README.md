@@ -22,11 +22,61 @@
 
 需要 Node.js **>=24.9.0**。不按 DSH 版本号限制安装或加载；兼容性测试作为历史记录保留，见[宿主兼容策略](docs/host-compatibility-policy.md)。
 
-从本仓库安装：
+### 方式一：预构建包（推荐）
+
+从 GitHub 安装已构建的源码包，不需要在客户端运行 `prepare` 构建：
+
+```bash
+dsh plugin --profile web add "https://github.com/sibetlyf/dsh-knowledge/archive/refs/heads/main.tar.gz"
+```
+
+也可以在仓库本地执行：
+
+```bash
+npm pack
+dsh plugin --profile web add .\dsh-knowledge-*.tgz
+```
+
+### 方式二：GitHub 源码
 
 ```bash
 dsh plugin --profile web add github:sibetlyf/dsh-knowledge
 ```
+
+GitHub 源码安装会执行 `prepare`，pnpm 默认会拦截构建；如果报 `allowBuilds` 或 `bad indentation of a mapping entry`，先修 Profile 的 `pnpm-workspace.yaml`，而不是反复重试。
+
+### 修复 pnpm-workspace.yaml
+
+文件位置：
+
+```text
+C:\Users\<用户名>\.dsh\profiles\web\pnpm-workspace.yaml
+```
+
+错误格式通常长这样：
+
+```yaml
+packages:
+  - '.'
+  soulmirror: true
+  '@deepseek-ai/dsh-subprocess-loc...': true
+  '@google/genai': true
+```
+
+缺少 `allowBuilds:` 这一级，导致 `bad indentation of a mapping entry`。改成：
+
+```yaml
+packages:
+  - '.'
+
+allowBuilds:
+  soulmirror: true
+  '@deepseek-ai/dsh-subprocess-loc...': true
+  '@google/genai': true
+  # 再把 pnpm 日志给出的本插件精确 key 加在这里
+```
+
+如果 pnpm 日志打印了其他精确 key，以日志中的 key 为准。修改后重新运行安装命令。
 
 本地开发时，Profile 使用 link 依赖：
 
