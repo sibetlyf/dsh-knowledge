@@ -36,8 +36,19 @@ npm pack
 `npm pack` 会执行 `prepare`（`clean + build`），生成带 `lib/` 的安装包。然后在 DSH 中安装：
 
 ```bash
+dsh plugin --profile web remove @lemoncat7/dsh-knowledge
 dsh plugin --profile web add .\dsh-knowledge-*.tgz
 ```
+
+> **版本注意**：npm 上的最新版目前还是旧的 `2.18.1`，不包含本仓库的云端同步、数据源、问答和 Wiki 功能。本仓库当前版本是 `2.22.10-custom.1`，不能通过 `@lemoncat7/dsh-knowledge@latest` 安装到。
+>
+> 安装后必须确认：
+>
+> ```bash
+> dsh plugin --profile web list
+> ```
+>
+> 显示 `@lemoncat7/dsh-knowledge@2.22.10-custom.1`，而不是 `2.18.1`。
 
 > 如果你直接安装 GitHub 的 `archive/refs/heads/main.tar.gz`，那只是源码，不是预构建包；没有 `lib/client.js` 时，DSH 不会出现「云端同步」等新客户端功能。
 
