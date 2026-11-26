@@ -11,10 +11,11 @@ import { RemoteKnowledgeProvider } from '../lib/remote-provider.js'
 
 function usage() {
   console.log(`用法:
-  node cloud/sync-local.mjs --db <本地 knowledge.sqlite> --url <云端 /knowledge-api/v1> --token <DSH Token> [--files <上传目录>] [--base <知识库>] [--map <映射文件>] [--pull]
+  node cloud/sync-local.mjs --db <本地 knowledge.sqlite> --url <云端 /knowledge-api/v1> --token <DSH Token> [--files <上传目录>] [--base <知识库>] [--map <映射文件>] [--pull] [--restore-mirror]
 
   --pull  从云端拉取新增/更新到本地
   --mirror  拉取到本地镜像库“云端·<库名>”，本地原库保持不变
+  --restore-mirror  云端数据丢失时，把本地“云端·”镜像库回灌到云端同名知识库
   --user <名字>  文件按这个名字建立云端子目录，默认本机用户名
   --files-out <目录>  同时下载云端文件
 
@@ -44,6 +45,7 @@ const token = options.token ?? process.env.CLOUD_TOKEN ?? ''
 const filesDir = options.files ?? process.env.CLOUD_SYNC_FILES
 const filesOut = options['files-out'] ?? process.env.CLOUD_SYNC_FILES_OUT
 const pull = options.pull === '1' || process.env.CLOUD_SYNC_PULL === '1'
+const restoreMirror = options['restore-mirror'] === '1' || process.env.CLOUD_SYNC_RESTORE_MIRROR === '1'
 const mirror = options.mirror === '1' || process.env.CLOUD_SYNC_MIRROR === '1'
 const mirrorPrefix = options['mirror-prefix'] ?? process.env.CLOUD_SYNC_MIRROR_PREFIX ?? '云端·'
 const userName = String(options.user ?? process.env.CLOUD_SYNC_USER ?? userInfo().username ?? 'user').trim() || 'user'
@@ -332,6 +334,68 @@ async function pullCloud(local, remote, map, remoteBases, localBases) {
   await saveMap(map)
 }
 
+async function restoreMirrorToCloud(local, remote, map, localBases) {
+  const mirrors = localBases.filter(base => base.name.startsWith(mirrorPrefix) && (baseFilter === undefined || base.name === baseFilter || base.id === baseFilter))
+  if (mirrors.length === 0) throw new Error(`没有找到“${mirrorPrefix}”开头的本地镜像库`)
+  map.restore ??= {}
+  const remoteBases = await remote.listKnowledgeBases()
+  let created = 0
+  let updated = 0
+  let failed = 0
+  for (const localBase of mirrors) {
+    const targetName = localBase.name.slice(mirrorPrefix.length)
+    let cloudBase = remoteBases.find(base => base.name === targetName)
+    if (cloudBase === undefined) {
+      cloudBase = await remote.createKnowledgeBase({
+        name: targetName,
+        description: localBase.description ?? '',
+        defaultTags: localBase.defaultTags ?? [],
+        writebackPolicy: localBase.writebackPolicy ?? 'conservative',
+      })
+      console.log(`创建云端知识库: ${cloudBase.name}`)
+    }
+    map.bases[localBase.id] = cloudBase.id
+    const docs = await local.listDocuments(localBase.id)
+    console.log(`\n回灌 ${localBase.name} → ${cloudBase.name}: ${docs.length} 篇`)
+    for (const summary of docs) {
+      try {
+        const entry = await local.get(summary.id)
+        if (entry === undefined || entry.status !== 'active') continue
+        const known = map.restore[entry.id]
+        const previousCloudId = map.mirrorDocs?.[entry.id]?.cloudId
+        let cloud = known === undefined ? undefined : await remote.get(known).catch(() => undefined)
+        if (cloud === undefined && typeof previousCloudId === 'string') cloud = await remote.get(previousCloudId).catch(() => undefined)
+        const draft = {
+          knowledgeBaseId: cloudBase.id,
+          title: entry.title,
+          body: entry.body,
+          group: entry.group && entry.group !== '' ? entry.group : '云端恢复',
+          type: entry.type,
+          tags: entry.tags,
+          scope: entry.scope,
+          confidence: entry.confidence,
+        }
+        if (cloud === undefined) {
+          cloud = await remote.create(draft)
+          created += 1
+          console.log(`  新建: ${entry.title}`)
+        } else {
+          cloud = await remote.update(cloud.id, draft, undefined, cloud.version)
+          updated += 1
+          console.log(`  更新: ${entry.title}`)
+        }
+        map.restore[entry.id] = cloud.id
+        await saveMap(map)
+      } catch (error) {
+        failed += 1
+        console.error(`  回灌失败: ${summary.title} — ${error.message}`)
+      }
+    }
+  }
+  console.log(`\n镜像回灌完成：新建 ${created}，更新 ${updated}，失败 ${failed}`)
+  await saveMap(map)
+}
+
 async function main() {
   const local = new LocalKnowledgeProvider(db)
   const remote = new RemoteKnowledgeProvider({ url: apiBase, token, timeoutMs: 30_000 })
@@ -353,6 +417,11 @@ async function main() {
   }
 
   const remoteBases = await remote.listKnowledgeBases()
+  if (restoreMirror) {
+    await restoreMirrorToCloud(local, remote, map, localBases)
+    await local.close().catch(() => {})
+    return
+  }
   if (pull) {
     await pullCloud(local, remote, map, remoteBases, localBases)
     await local.close().catch(() => {})

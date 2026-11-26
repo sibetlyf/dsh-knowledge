@@ -4,6 +4,13 @@
 set -euo pipefail
 
 TARBALL="${1:?用法: update-app.sh <package.tgz>}"
+ENV_FILE="${TEAM_ENV_FILE:-/etc/team-kb.env}"
+if [ -f "$ENV_FILE" ]; then
+  set -a
+  # shellcheck disable=SC1090
+  . "$ENV_FILE"
+  set +a
+fi
 APP_DIR="${TEAM_APP_DIR:-/opt/team-kb/app}"
 SERVICE="${TEAM_SERVICE:-team-kb}"
 DATA_DIR="${TEAM_DATA_DIR:-/opt/team-kb/data}"
@@ -16,6 +23,26 @@ if [ "$(id -u)" -ne 0 ]; then
   echo "请用 sudo 运行" >&2
   exit 2
 fi
+
+# 旧部署可能没有设置 TEAM_DATA_DIR，SQLite 实际在 app/cloud-data。
+# 替换 app 前必须拒绝，避免把知识库一起删掉。
+if [ -d "$APP_DIR/cloud-data" ]; then
+  cat >&2 <<EOF
+检测到数据目录位于应用目录内：$APP_DIR/cloud-data
+替换 $APP_DIR 会删除知识库，已中止，未做任何修改。
+
+请先把数据迁到独立目录，例如：
+  sudo systemctl stop $SERVICE
+  sudo mkdir -p /opt/team-kb/data
+  sudo cp -a "$APP_DIR/cloud-data/." /opt/team-kb/data/
+  sudo chown -R $OWNER:$OWNER /opt/team-kb/data
+  # 确认 /etc/team-kb.env 中 TEAM_DATA_DIR=/opt/team-kb/data
+  sudo systemctl start $SERVICE
+然后再运行本脚本。
+EOF
+  exit 2
+fi
+
 for file in "$TARBALL" "$APP_DIR/cloud/server.mjs" "$DATA_DIR"; do
   if [ ! -e "$file" ]; then echo "找不到: $file" >&2; exit 2; fi
 done
