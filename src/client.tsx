@@ -500,9 +500,11 @@ function CloudSyncSettings() {
   const [base, setBase] = useState('')
   const [message, setMessage] = useState<{ kind: 'success' | 'error'; text: string }>()
   const [busy, setBusy] = useState(false)
+  const editingRef = useRef(false)
 
   const apply = useCallback((value: CloudSyncStatusView) => {
     setStatus(value)
+    if (editingRef.current) return
     setUrl(value.url)
     setUserName(value.userName)
     setAutoSync(value.autoSync)
@@ -511,6 +513,10 @@ function CloudSyncSettings() {
     setFilesOut(value.filesOut)
     setBase(value.base)
   }, [])
+  const update = <T,>(setter: (value: T) => void, value: T): void => {
+    editingRef.current = true
+    setter(value)
+  }
 
   const load = useCallback(async () => {
     try { apply(await cloudSyncRequest('GET')) } catch (error) { setMessage({ kind: 'error', text: error instanceof Error ? error.message : String(error) }) }
@@ -529,13 +535,18 @@ function CloudSyncSettings() {
       const intervalNumber = Number(interval)
       if (!Number.isInteger(intervalNumber) || intervalNumber < 1 || intervalNumber > 60) throw new Error('自动同步间隔必须是 1-60 分钟')
       const next = await cloudSyncRequest('PUT', { url, token, userName, autoSync, intervalMinutes: intervalNumber, filesDir, filesOut, base })
+      editingRef.current = false
       apply(next)
       setToken('')
-      if (runAfterSave && next.configured) {
+      if (!next.configured) {
+        setMessage({ kind: 'error', text: '配置已保存，但还缺少云端地址或 Token；填好后点“连接并立即同步”。' })
+        return
+      }
+      if (runAfterSave || next.autoSync) {
         apply(await cloudSyncRequest('POST', { mode: 'sync' }))
         setMessage({ kind: 'success', text: '已连接云端并开始首次同步；下方状态会自动刷新。' })
       } else {
-        setMessage({ kind: 'success', text: '云端同步配置已保存。' })
+        setMessage({ kind: 'success', text: '配置已保存；开启自动同步或点“上传/拉取”开始。' })
       }
     } catch (error) {
       setMessage({ kind: 'error', text: error instanceof Error ? error.message : String(error) })
@@ -562,30 +573,30 @@ function CloudSyncSettings() {
       <p className="dsh-knowledge-settings-note">云端需要先部署团队知识库服务，并在「成员与邀请」生成 DSH Token。Token 随本机配置保存在知识库数据目录，不进入 Git。</p>
       <div className="dsh-knowledge-remote-fields">
         <label>云端服务地址
-          <input type="url" value={url} placeholder="https://知识库域名/knowledge-api/v1" onChange={event => setUrl(event.target.value)} />
+          <input type="url" value={url} placeholder="https://知识库域名/knowledge-api/v1" onChange={event => update(setUrl, event.target.value)} />
         </label>
         <label>DSH Token
-          <input type="password" value={token} placeholder={status?.configured ? '已保存；留空保持不变' : '粘贴 dshk_...'} autoComplete="new-password" onChange={event => setToken(event.target.value)} />
+          <input type="password" value={token} placeholder={status?.configured ? '已保存；留空保持不变' : '粘贴 dshk_...'} autoComplete="new-password" onChange={event => update(setToken, event.target.value)} />
         </label>
         <label>文件归属用户名
-          <input type="text" value={userName} placeholder="默认本机用户名" maxLength={100} onChange={event => setUserName(event.target.value)} />
+          <input type="text" value={userName} placeholder="默认本机用户名" maxLength={100} onChange={event => update(setUserName, event.target.value)} />
         </label>
         <label>自动同步间隔（分钟）
-          <input type="number" min="1" max="60" step="1" value={interval} onChange={event => setIntervalValue(event.target.value)} />
+          <input type="number" min="1" max="60" step="1" value={interval} onChange={event => update(setIntervalValue, event.target.value)} />
         </label>
       </div>
       <label className="dsh-knowledge-settings-note">
-        <input type="checkbox" checked={autoSync} onChange={event => setAutoSync(event.target.checked)} /> 自动同步（本地/云端变化后轮询）
+        <input type="checkbox" checked={autoSync} onChange={event => update(setAutoSync, event.target.checked)} /> 自动同步（本地/云端变化后轮询）
       </label>
       <div className="dsh-knowledge-remote-fields">
         <label>本地文件上传目录（可选）
-          <input type="text" value={filesDir} placeholder="例如 G:\dsh-knowledge\artifacts\blobs" onChange={event => setFilesDir(event.target.value)} />
+          <input type="text" value={filesDir} placeholder="例如 G:\dsh-knowledge\artifacts\blobs" onChange={event => update(setFilesDir, event.target.value)} />
         </label>
         <label>云端文件下载目录（可选）
-          <input type="text" value={filesOut} placeholder="例如 G:\dsh-knowledge\cloud-files" onChange={event => setFilesOut(event.target.value)} />
+          <input type="text" value={filesOut} placeholder="例如 G:\dsh-knowledge\cloud-files" onChange={event => update(setFilesOut, event.target.value)} />
         </label>
         <label>指定本地知识库（可选）
-          <input type="text" value={base} placeholder="留空同步全部；填库名或 ID 限定上传文件" onChange={event => setBase(event.target.value)} />
+          <input type="text" value={base} placeholder="留空同步全部；填库名或 ID 限定上传文件" onChange={event => update(setBase, event.target.value)} />
         </label>
       </div>
       {message && <p className={`dsh-knowledge-settings-message is-${message.kind}`} role={message.kind === 'error' ? 'alert' : 'status'}>{message.text}</p>}
