@@ -10,6 +10,7 @@ import { registerKnowledgeApi } from '../lib/api.js'
 import { renderSharedMarkdown } from '../lib/notes/share-markdown.js'
 import { extractText } from './ingest.mjs'
 import { chatCompletion, llmConfig } from './llm.mjs'
+import { syncRepositorySource } from './sources.mjs'
 import { TeamError, TeamStore } from './team-store.mjs'
 import { renderAppPage, renderErrorPage, renderInvitePage, renderLoginPage, renderSetupPage, roleLabel } from './views.mjs'
 
@@ -237,7 +238,7 @@ function sendFile(res, row, inline = false) {
   const absolute = join(dataDir, row.storage_path)
   if (!existsSync(absolute)) throw new HttpError(410, '文件内容已丢失')
   // 不把 HTML/SVG 等主动内容 inline 到同源页面，避免上传文件执行脚本。
-  const safeInline = /^(?:image\/(?:png|jpeg|gif|webp)|application\/pdf|text\/(?:plain|markdown|csv)|application\/json)/u.test(row.mime ?? '')
+  const safeInline = /^(?:image\/(?:png|jpeg|gif|webp)|application\/pdf|audio\/|video\/|text\/(?:plain|markdown|csv)|application\/json)/u.test(row.mime ?? '')
   const disposition = inline && safeInline ? 'inline' : 'attachment'
   res.writeHead(200, {
     'content-type': row.mime || 'application/octet-stream',
@@ -247,6 +248,11 @@ function sendFile(res, row, inline = false) {
     'cache-control': inline && safeInline ? 'private, max-age=300' : 'no-store',
   })
   createReadStream(absolute).pipe(res)
+}
+
+function escapeHtml(value) {
+  return String(value ?? '').replaceAll('&', '&amp;').replaceAll('<', '&lt;').replaceAll('>', '&gt;')
+    .replaceAll('"', '&quot;').replaceAll("'", '&#39;')
 }
 
 function fileMetadata(row, prefix = '/api/files') {
@@ -266,6 +272,7 @@ function fileMetadata(row, prefix = '/api/files') {
     createdAt: row.created_at,
     updatedAt: row.updated_at,
     inlineUrl: `${prefix}/${row.id}?inline=1`,
+    previewUrl: `/api/files/${row.id}/preview`,
     downloadUrl: `${prefix}/${row.id}`,
   }
 }
@@ -340,6 +347,29 @@ async function handleTeamFiles(req, res, url, path, method, session) {
     const row = await storeUploadedFile({ baseId, name, mime, bytes, actorId: session.user.id, sourceKey, userName })
     team.audit(session.user.id, 'file.upload', row.id, `${name} ${bytes.length}`)
     return sendJson(res, 201, { file: fileMetadata(row) })
+  }
+  const previewMatch = /^\/api\/files\/([a-f0-9-]{36})\/preview$/u.exec(path)
+  if (previewMatch !== null && method === 'GET') {
+    const row = team.getFile(previewMatch[1])
+    if (row === undefined) throw new HttpError(404, '文件不存在')
+    const parsed = team.getFileText(row.id)
+    if (parsed === undefined || parsed.status !== 'parsed') {
+      return send(res, 200, '<!doctype html><html><body style="font-family:system-ui;padding:24px;color:#666">该文件尚未建立文本预览。请先解析索引，或下载原文件。</body></html>', { 'content-type': 'text/html; charset=utf-8', 'content-security-policy': "default-src 'none'; style-src 'unsafe-inline'" })
+    }
+    let html
+    if (row.mime === 'text/markdown' || row.mime === 'text/plain') {
+      html = `<article style="max-width:760px;margin:32px auto;line-height:1.75;font-family:system-ui">${renderSharedMarkdown(parsed.content).html}</article>`
+    } else if (row.mime === 'text/csv') {
+      const rows = parsed.content.split(/\r?\n/u).slice(0, 100).map(line => line.split(',').slice(0, 20))
+      const cells = rows.map((line, index) => `<tr>${line.map(cell => index === 0 ? `<th>${escapeHtml(cell)}</th>` : `<td>${escapeHtml(cell)}</td>`).join('')}</tr>`).join('')
+      html = `<div style="padding:20px;overflow:auto"><table style="border-collapse:collapse;font:12px/1.5 system-ui">${cells}</table></div>`
+    } else {
+      html = `<pre style="white-space:pre-wrap;word-break:break-word;padding:24px;font:12px/1.65 monospace">${escapeHtml(parsed.content)}</pre>`
+    }
+    return send(res, 200, `<!doctype html><html><head><meta charset="utf-8"><style>body{margin:0;background:#fffefb;color:#24221e}article,pre,table{border:0}th,td{border:1px solid #e5e1d9;padding:5px 8px;text-align:left}</style></head><body>${html}</body></html>`, {
+      'content-type': 'text/html; charset=utf-8',
+      'content-security-policy': "default-src 'none'; style-src 'unsafe-inline'",
+    })
   }
   const reparseMatch = /^\/api\/files\/([a-f0-9-]{36})\/reparse$/u.exec(path)
   if (reparseMatch !== null && method === 'POST') {
@@ -840,6 +870,70 @@ async function handle(req, res) {
       requireRole(session, ['admin', 'editor'])
       team.deleteWikiPage(id)
       return sendJson(res, 200, { ok: true })
+    }
+  }
+
+  if (path === '/api/sources' && method === 'GET') {
+    const baseId = url.searchParams.get('baseId') ?? ''
+    if (baseId === '') throw new HttpError(400, 'baseId 不能为空')
+    return sendJson(res, 200, { sources: team.listDataSources(baseId) })
+  }
+
+  if (path === '/api/sources' && method === 'POST') {
+    requireRole(session, ['admin', 'editor'])
+    const body = await readJson(req)
+    const baseId = String(body.baseId ?? '')
+    const base = await provider.getKnowledgeBase(baseId)
+    if (base === undefined || base.status !== 'active') throw new HttpError(404, '知识库不存在')
+    const providerName = String(body.provider ?? '').toLowerCase()
+    if (!['github', 'gitee'].includes(providerName)) throw new HttpError(400, '目前支持 github、gitee')
+    const owner = String(body.owner ?? '').trim()
+    const repo = String(body.repo ?? '').trim()
+    if (owner === '' || repo === '') throw new HttpError(400, '仓库 owner 和 repo 不能为空')
+    const source = team.createDataSource({
+      baseId, provider: providerName, name: String(body.name ?? `${owner}/${repo}`).trim().slice(0, 120),
+      owner: owner.slice(0, 120), repo: repo.slice(0, 120), ref: String(body.ref ?? '').trim().slice(0, 120),
+      token: body.token === undefined || String(body.token).trim() === '' ? null : String(body.token).trim(),
+      includePattern: String(body.includePattern ?? '').trim().slice(0, 200),
+      sourceGroup: String(body.group ?? '').trim().slice(0, 160),
+      createdBy: session.user.id,
+    })
+    team.audit(session.user.id, 'source.create', source.id, `${providerName} ${owner}/${repo}`)
+    return sendJson(res, 201, { source: team.listDataSources(baseId).find(item => item.id === source.id) })
+  }
+
+  const sourceMatch = /^\/api\/sources\/([a-f0-9-]{36})(?:\/sync)?$/u.exec(path)
+  if (sourceMatch !== null) {
+    const id = sourceMatch[1]
+    const source = team.getDataSource(id)
+    if (source === undefined) throw new HttpError(404, '数据源不存在')
+    if (method === 'PUT' && !path.endsWith('/sync')) {
+      requireRole(session, ['admin', 'editor'])
+      const body = await readJson(req)
+      const updated = team.updateDataSource(id, {
+        name: String(body.name ?? source.name).trim().slice(0, 120),
+        ref: body.ref === undefined ? source.ref : String(body.ref).trim().slice(0, 120),
+        token: body.token === undefined || String(body.token).trim() === '' ? source.token : String(body.token).trim(),
+        includePattern: body.includePattern === undefined ? source.include_pattern : String(body.includePattern).trim().slice(0, 200),
+        sourceGroup: body.group === undefined ? source.source_group : String(body.group).trim().slice(0, 160),
+      })
+      return sendJson(res, 200, { source: team.listDataSources(source.base_id).find(item => item.id === id) ?? updated })
+    }
+    if (method === 'DELETE' && !path.endsWith('/sync')) {
+      requireRole(session, ['admin', 'editor'])
+      team.deleteDataSource(id)
+      team.audit(session.user.id, 'source.delete', id, `${source.owner}/${source.repo}`)
+      return sendJson(res, 200, { ok: true })
+    }
+    if (method === 'POST' && path.endsWith('/sync')) {
+      requireRole(session, ['admin', 'editor'])
+      try {
+        const result = await syncRepositorySource({ source, provider, team })
+        team.audit(session.user.id, 'source.sync', id, JSON.stringify({ created: result.created, updated: result.updated, failed: result.failed }))
+        return sendJson(res, 200, { ...result, source: team.listDataSources(source.base_id).find(item => item.id === id) })
+      } catch (error) {
+        throw new HttpError(502, error instanceof Error ? error.message : String(error))
+      }
     }
   }
 

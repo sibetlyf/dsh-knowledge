@@ -144,6 +144,33 @@ export class TeamStore {
         created_at TEXT NOT NULL
       );
       CREATE INDEX IF NOT EXISTS wiki_sources_page ON wiki_sources(page_id);
+      CREATE TABLE IF NOT EXISTS data_sources (
+        id TEXT PRIMARY KEY,
+        base_id TEXT NOT NULL,
+        provider TEXT NOT NULL,
+        name TEXT NOT NULL,
+        owner TEXT NOT NULL,
+        repo TEXT NOT NULL,
+        ref TEXT NOT NULL DEFAULT '',
+        token TEXT,
+        include_pattern TEXT NOT NULL DEFAULT '',
+        source_group TEXT NOT NULL DEFAULT '',
+        status TEXT NOT NULL DEFAULT 'idle',
+        error TEXT,
+        last_synced_at TEXT,
+        created_by TEXT,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS data_sources_base ON data_sources(base_id, updated_at);
+      CREATE TABLE IF NOT EXISTS source_items (
+        source_id TEXT NOT NULL REFERENCES data_sources(id) ON DELETE CASCADE,
+        path TEXT NOT NULL,
+        document_id TEXT NOT NULL,
+        sha256 TEXT,
+        updated_at TEXT NOT NULL,
+        PRIMARY KEY(source_id, path)
+      );
     `)
     const fileColumns = this.db.prepare('PRAGMA table_info(files)').all().map(column => column.name)
     if (!fileColumns.includes('user_name')) this.db.exec('ALTER TABLE files ADD COLUMN user_name TEXT')
@@ -345,8 +372,63 @@ export class TeamStore {
       ORDER BY t.updated_at DESC LIMIT ?`).all(raw.slice(0, 80), baseId, pattern, pattern, Math.min(Math.max(limit, 1), 100))
   }
 
-  listWikiPages(baseId) {
-    return this.db.prepare('SELECT id,base_id,slug,title,status,version,created_by,updated_by,created_at,updated_at FROM wiki_pages WHERE base_id=? ORDER BY updated_at DESC').all(baseId)
+  listDataSources(baseId) {
+    return this.db.prepare(`SELECT id,base_id,provider,name,owner,repo,ref,include_pattern,source_group,status,error,last_synced_at,created_by,created_at,updated_at
+      FROM data_sources WHERE base_id=? ORDER BY updated_at DESC`).all(baseId).map(row => ({
+      ...row,
+      includePattern: row.include_pattern,
+      sourceGroup: row.source_group,
+      lastSyncedAt: row.last_synced_at,
+      hasToken: this.db.prepare('SELECT token FROM data_sources WHERE id=?').get(row.id)?.token !== null,
+    }))
+  }
+
+  getDataSource(id) {
+    return this.db.prepare('SELECT * FROM data_sources WHERE id=?').get(id)
+  }
+
+  createDataSource({ baseId, provider, name, owner, repo, ref = '', token = null, includePattern = '', sourceGroup = '', createdBy = null }) {
+    const id = randomUUID()
+    const now = new Date().toISOString()
+    this.db.prepare(`INSERT INTO data_sources
+      (id,base_id,provider,name,owner,repo,ref,token,include_pattern,source_group,status,created_by,created_at,updated_at)
+      VALUES (?,?,?,?,?,?,?,?,?,?,'idle',?,?,?)`)
+      .run(id, baseId, provider, name, owner, repo, ref, token, includePattern, sourceGroup, createdBy, now, now)
+    return this.getDataSource(id)
+  }
+
+  updateDataSource(id, { name, ref, token, includePattern, sourceGroup, status, error, lastSyncedAt }) {
+    const source = this.getDataSource(id)
+    if (source === undefined) throw new TeamError('数据源不存在', 404)
+    this.db.prepare(`UPDATE data_sources SET name=COALESCE(?,name), ref=COALESCE(?,ref), token=COALESCE(?,token),
+      include_pattern=COALESCE(?,include_pattern), source_group=COALESCE(?,source_group), status=COALESCE(?,status),
+      error=?, last_synced_at=COALESCE(?,last_synced_at), updated_at=? WHERE id=?`)
+      .run(name ?? null, ref ?? null, token ?? null, includePattern ?? null, sourceGroup ?? null, status ?? null,
+        error ?? null, lastSyncedAt ?? null, new Date().toISOString(), id)
+    return this.getDataSource(id)
+  }
+
+  deleteDataSource(id) {
+    return this.db.prepare('DELETE FROM data_sources WHERE id=?').run(id).changes
+  }
+
+  getSourceItem(sourceId, path) {
+    return this.db.prepare('SELECT * FROM source_items WHERE source_id=? AND path=?').get(sourceId, path)
+  }
+
+  setSourceItem({ sourceId, path, documentId, sha256 = null }) {
+    const now = new Date().toISOString()
+    this.db.prepare(`INSERT INTO source_items (source_id,path,document_id,sha256,updated_at)
+      VALUES (?,?,?,?,?)
+      ON CONFLICT(source_id,path) DO UPDATE SET document_id=excluded.document_id,sha256=excluded.sha256,updated_at=excluded.updated_at`)
+      .run(sourceId, path, documentId, sha256, now)
+  }
+
+  listSourceItems(sourceId) {
+    return this.db.prepare('SELECT * FROM source_items WHERE source_id=? ORDER BY path').all(sourceId)
+  }
+
+  listWikiPages(baseId) {    return this.db.prepare('SELECT id,base_id,slug,title,status,version,created_by,updated_by,created_at,updated_at FROM wiki_pages WHERE base_id=? ORDER BY updated_at DESC').all(baseId)
   }
 
   getWikiPage(id) {

@@ -125,8 +125,20 @@ TEAM_ADMIN_NAME=管理员
 | `TEAM_LLM_API_KEY` | 可选模型 API Key |
 | `TEAM_LLM_MODEL` | 可选模型名；配置后才能生成模型回答 |
 
-### 文件解析、搜索、问答与 Wiki
+### GitHub / Gitee 数据源
 
+云端「数据源」页支持连接多个仓库：
+
+- 类型：GitHub、Gitee
+- 填写 `owner`、`repo`、分支/引用、路径过滤和 Token
+- 同步 Markdown、MarkdownX、TXT、HTML、RST 等文本文件
+- 同一路径重复同步会更新已有文档，不会重复创建
+- Token 只保存在服务端数据库，API 不返回明文
+- 已从仓库删除的文件不会自动删除本地文档
+
+当前首批连接器是 GitHub 和 Gitee；数据源 registry 的设计允许后续增加 GitLab、通用 Git、WebDAV 等。
+
+### 文件解析、搜索、问答与 Wiki
 - 文本类文件（Markdown、TXT、CSV、JSON、HTML、代码等）上传后自动抽取文本，写入 SQLite FTS5 索引；
 - PDF/Office/图片等复杂格式当前标记为“仅存储”，原文件可下载，不伪造“已索引”；
 - 文件列表显示 `已索引 / 待解析 / 仅存储 / 解析失败`，详情支持重新解析；

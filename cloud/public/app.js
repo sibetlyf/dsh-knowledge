@@ -11,6 +11,8 @@ const state = {
   view: 'documents',
   ask: { question: '', answer: '', citations: [], engine: '', busy: false, error: '' },
   wiki: { pages: [], page: null, versions: [], draftTitle: '', draftContent: '', busy: false },
+  sources: [],
+  source: null,
   editing: false,
   draftTitle: '',
   draftBody: '',
@@ -23,6 +25,16 @@ const state = {
   admin: null,
   invite: null,
 }
+
+function showBootError(error) {
+  const boot = document.getElementById('boot')
+  if (boot === null) return
+  boot.classList.remove('hidden')
+  boot.innerHTML = ''
+  boot.append(h('div', { class: 'boot-error', text: `页面初始化失败：${error instanceof Error ? error.message : String(error)}` }))
+}
+window.addEventListener('error', event => showBootError(event.error ?? event.message))
+window.addEventListener('unhandledrejection', event => showBootError(event.reason))
 
 function h(tag, props = {}, ...children) {
   const node = document.createElement(tag)
@@ -82,7 +94,7 @@ function render() {
   const hasBase = state.kbs.some(base => base.id === state.baseId)
   root.dataset.hasBase = String(hasBase)
   root.append(sidebar)
-  if (hasBase && state.view !== 'ask' && state.view !== 'wiki') root.append(renderResourceList())
+  if (hasBase && (state.view === 'documents' || state.view === 'files')) root.append(renderResourceList())
   else if (hasBase) root.append(renderContextList())
   root.append(renderMain())
   if (state.admin !== null) root.append(renderAdmin())
@@ -93,10 +105,10 @@ function render() {
 function renderSidebar() {
   const baseList = state.kbs.map(base => h('button', {
     type: 'button',
-    class: `kb-item${base.id === state.baseId ? ' active' : ''}`,
+    class: `kb-item${base.id === state.baseId ? ' active' : ''}${base.name.startsWith('云端·') ? ' cloud' : ''}`,
     onClick: () => void selectBase(base.id),
     'aria-pressed': String(base.id === state.baseId),
-  }, h('strong', { text: base.name }), h('small', { text: `${base.documentCount} 篇文档` })))
+  }, h('strong', { text: base.name }), h('small', { text: `${base.documentCount} 篇文档${base.name.startsWith('云端·') ? ' · 云端镜像' : ''}` })))
   return h('aside', { class: 'sidebar' },
     h('div', { class: 'sidebar-head' },
       h('div', { class: 'brand-row' },
@@ -124,7 +136,9 @@ function renderSidebar() {
       h('button', { type: 'button', class: `workspace-tab${state.view === 'files' ? ' active' : ''}`, onClick: () => switchView('files') }, '文件'),
       h('button', { type: 'button', class: `workspace-tab${state.view === 'ask' ? ' active' : ''}`, onClick: () => switchView('ask') }, '问答'),
       h('button', { type: 'button', class: `workspace-tab${state.view === 'wiki' ? ' active' : ''}`, onClick: () => switchView('wiki') }, 'Wiki'),
+      h('button', { type: 'button', class: `workspace-tab${state.view === 'sources' ? ' active' : ''}`, onClick: () => switchView('sources') }, '数据源'),
     ),
+    h('p', { class: 'kb-section-label', text: '团队知识库' }),
     h('nav', { class: 'kb-list', 'aria-label': '知识库' },
       ...(baseList.length === 0 ? [h('p', { class: 'note', text: '还没有可访问的知识库。' })] : baseList)),
     h('div', { class: 'sidebar-foot' },
@@ -138,13 +152,13 @@ function renderSidebar() {
 function renderMain() {
   const main = h('main', { class: 'main' })
   const base = state.kbs.find(item => item.id === state.baseId)
-  const currentTitle = state.view === 'files' ? state.selectedFile?.name : state.view === 'wiki' ? state.wiki.page?.title : state.selected?.title
+  const currentTitle = state.view === 'files' ? state.selectedFile?.name : state.view === 'wiki' ? state.wiki.page?.title : state.view === 'sources' ? state.source?.name : state.selected?.title
   main.append(h('header', { class: 'topbar' },
     h('div', { class: 'breadcrumb' },
       h('span', { text: '工作区' }), h('span', { class: 'crumb-separator', text: '/' }),
       h('strong', { text: base?.name ?? '全部知识库' }),
       h('span', { class: 'crumb-separator', text: '/' }),
-      h('span', { text: state.view === 'files' ? '文件' : state.view === 'ask' ? '问答' : state.view === 'wiki' ? 'Wiki' : '文档' }),
+      h('span', { text: state.view === 'files' ? '文件' : state.view === 'ask' ? '问答' : state.view === 'wiki' ? 'Wiki' : state.view === 'sources' ? '数据源' : '文档' }),
       currentTitle ? h('span', { class: 'crumb-current', text: ` / ${currentTitle}` }) : null),
     h('div', { class: 'doc-actions' },
       state.view === 'documents' && state.baseId !== null && state.me.canEdit ? h('button', { type: 'button', class: 'btn primary', onClick: openCreate, text: '+ 新建文档' }) : null,
@@ -157,6 +171,7 @@ function renderMain() {
   else if (state.error !== '') content.append(h('div', { class: 'welcome' }, h('p', { text: state.error })))
   else if (state.view === 'ask') content.append(renderAskDetail())
   else if (state.view === 'wiki') content.append(renderWikiDetail())
+  else if (state.view === 'sources') content.append(renderSourceDetail())
   else if (state.view === 'files') content.append(state.selectedFile === null ? renderEmptyDetail('选择一个文件查看详情') : renderFileDetail())
   else if (state.selected === null) content.append(renderWelcome())
   else content.append(state.editing ? renderEditor() : renderReader())
@@ -247,13 +262,19 @@ function renderFileDetail() {
   const type = String(file.mime || '').toLowerCase()
   const safeImage = /^image\/(?:png|jpeg|gif|webp)(?:;|$)/u.test(type)
   const safeText = /^text\/(?:plain|markdown|csv)(?:;|$)/u.test(type) || type === 'application/json'
+  const safeAudio = /^audio\//u.test(type)
+  const safeVideo = /^video\//u.test(type)
   const preview = safeImage
     ? h('img', { class: 'file-preview-image', src: file.inlineUrl, alt: file.name })
     : type === 'application/pdf'
       ? h('iframe', { class: 'file-preview-frame', src: file.inlineUrl, title: `${file.name} 预览` })
       : safeText
-        ? h('iframe', { class: 'file-preview-frame text-preview', src: file.inlineUrl, title: `${file.name} 预览` })
-        : h('div', { class: 'file-preview-unavailable' }, h('div', { class: 'empty-mark', text: '↓' }), h('p', { text: '此格式可下载后在本地打开。' }), h('a', { class: 'btn primary', href: file.downloadUrl, text: '下载文件' }))
+        ? h('iframe', { class: 'file-preview-frame text-preview', src: file.previewUrl, title: `${file.name} 预览`, sandbox: '' })
+        : safeAudio
+          ? h('audio', { class: 'file-preview-audio', controls: true, src: file.inlineUrl, title: file.name })
+          : safeVideo
+            ? h('video', { class: 'file-preview-video', controls: true, src: file.inlineUrl, title: file.name })
+            : h('div', { class: 'file-preview-unavailable' }, h('div', { class: 'empty-mark', text: '↓' }), h('p', { text: '此格式可下载后在本地打开。' }), h('a', { class: 'btn primary', href: file.downloadUrl, text: '下载文件' }))
   return h('article', { class: 'file-detail' },
     h('header', { class: 'file-detail-head' },
       h('div', {}, h('p', { class: 'eyebrow', text: `${file.userName || '未署名'} · 文件` }), h('h1', { class: 'doc-title', text: file.name })),
@@ -308,11 +329,13 @@ function switchView(view) {
   state.selectedFile = null
   if (view === 'files') { render(); void loadFiles(); return }
   if (view === 'wiki') { render(); void loadWiki(); return }
+  if (view === 'sources') { render(); void loadSources(); return }
   if (view === 'documents') { render(); void loadDocuments(); return }
   render()
 }
 
 function renderContextList() {
+  if (state.view === 'sources') return renderSourceList()
   if (state.view === 'ask') {
     return h('section', { class: 'resource-list' },
       h('header', { class: 'resource-list-head' }, h('div', {}, h('p', { class: 'eyebrow', text: '引用问答' }), h('strong', { text: state.ask.citations.length ? `${state.ask.citations.length} 条证据` : '等待提问' }))),
@@ -340,6 +363,120 @@ function renderContextList() {
     pages.length === 0
       ? h('div', { class: 'doc-empty', text: '还没有 Wiki。生成草稿后由团队审核发布。' })
       : h('div', { class: 'doc-list' }, ...rows))
+}
+
+function renderSourceList() {
+  const sources = state.sources
+  const rows = sources.map(source => h('button', {
+    type: 'button', class: `doc-row${state.source?.id === source.id ? ' active' : ''}`,
+    onClick: () => { state.source = source; render() },
+  },
+  h('span', { class: 'resource-icon', text: source.provider === 'github' ? '⌘' : 'G' }),
+  h('span', { class: 'resource-label' },
+    h('strong', { text: source.name }),
+    h('small', { text: `${source.provider} · ${source.owner}/${source.repo}${source.ref ? ` @${source.ref}` : ''} · ${source.status}` }))))
+  return h('section', { class: 'resource-list' },
+    h('header', { class: 'resource-list-head' },
+      h('div', {}, h('p', { class: 'eyebrow', text: '数据源' }), h('strong', { text: `${sources.length} 个连接器` })),
+      state.me.canEdit ? h('button', { type: 'button', class: 'btn primary compact', onClick: () => openSourceForm(), text: '+ 连接' }) : null),
+    sources.length === 0
+      ? h('div', { class: 'doc-empty', text: '连接 GitHub 或 Gitee 仓库，把 Markdown 同步为知识库文档。' })
+      : h('div', { class: 'doc-list' }, ...rows))
+}
+
+async function loadSources() {
+  if (state.baseId === null) return
+  setLoading(true)
+  try {
+    const result = await api(`/api/sources?baseId=${encodeURIComponent(state.baseId)}`)
+    state.sources = result.sources
+    if (state.source && !state.sources.some(source => source.id === state.source.id)) state.source = null
+    state.error = ''
+  } catch (error) { state.error = error.message } finally { setLoading(false); render() }
+}
+
+function openSourceForm(source = null) {
+  if (state.baseId === null) { toast('请先选择知识库', 'error'); return }
+  const providerInput = h('select', {}, h('option', { value: 'github', selected: source?.provider === 'github', text: 'GitHub' }), h('option', { value: 'gitee', selected: source?.provider === 'gitee', text: 'Gitee' }))
+  const nameInput = h('input', { value: source?.name ?? '', placeholder: '例如：产品文档', maxlength: '120', required: true })
+  const ownerInput = h('input', { value: source?.owner ?? '', placeholder: 'owner', maxlength: '120', required: true })
+  const repoInput = h('input', { value: source?.repo ?? '', placeholder: 'repo', maxlength: '120', required: true })
+  const refInput = h('input', { value: source?.ref ?? '', placeholder: 'main（留空使用默认分支）', maxlength: '120' })
+  const includeInput = h('input', { value: source?.includePattern ?? '', placeholder: '路径包含，例如 docs/ 或 .md', maxlength: '200' })
+  const groupInput = h('input', { value: source?.sourceGroup ?? '', placeholder: '默认 数据源/provider/owner/repo', maxlength: '160' })
+  const tokenInput = h('input', { type: 'password', value: '', placeholder: source?.hasToken ? '已保存 Token；留空保持不变' : '私有仓库 Token（可选）', autocomplete: 'new-password' })
+  const close = () => document.querySelector('.modal-backdrop')?.remove()
+  const save = async event => {
+    event.preventDefault()
+    try {
+      const body = { baseId: state.baseId, provider: providerInput.value, name: nameInput.value, owner: ownerInput.value, repo: repoInput.value, ref: refInput.value, token: tokenInput.value, includePattern: includeInput.value, group: groupInput.value }
+      const result = source
+        ? await api(`/api/sources/${encodeURIComponent(source.id)}`, { method: 'PUT', body: JSON.stringify(body) })
+        : await api('/api/sources', { method: 'POST', body: JSON.stringify(body) })
+      close()
+      await loadSources()
+      state.source = result.source ?? null
+      toast(source ? '数据源已更新' : '数据源已连接')
+    } catch (error) { toast(error.message, 'error') }
+  }
+  const modal = h('div', { class: 'modal-backdrop', onClick: event => { if (event.target === event.currentTarget) close() } },
+    h('div', { class: 'modal', role: 'dialog', 'aria-label': '连接数据源' },
+      h('div', { class: 'modal-head' }, h('h2', { text: source ? '编辑数据源' : '连接数据源' }), h('button', { type: 'button', class: 'icon-btn', onClick: close, text: '关闭' })),
+      h('form', { class: 'form-grid', onSubmit: save },
+        h('label', {}, '类型', providerInput),
+        h('label', {}, '显示名称', nameInput),
+        h('label', {}, '仓库 owner', ownerInput),
+        h('label', {}, '仓库 repo', repoInput),
+        h('label', {}, '分支或引用', refInput),
+        h('label', {}, '路径过滤', includeInput),
+        h('label', {}, '文档分组', groupInput),
+        h('label', {}, 'Token', tokenInput),
+        h('div', { class: 'row' }, h('button', { type: 'button', class: 'btn', onClick: close, text: '取消' }), h('button', { type: 'submit', class: 'btn primary', text: '保存' })))))
+  document.body.append(modal)
+  nameInput.focus()
+}
+
+async function syncSource(source) {
+  try {
+    state.source = { ...source, status: 'syncing' }
+    render()
+    const result = await api(`/api/sources/${encodeURIComponent(source.id)}/sync`, { method: 'POST', body: '{}' })
+    await loadSources()
+    state.source = result.source
+    render()
+    toast(`同步完成：新增 ${result.created}，更新 ${result.updated}，失败 ${result.failed}`)
+  } catch (error) { toast(error.message, 'error') }
+}
+
+async function deleteSource(source) {
+  if (!confirm(`删除数据源「${source.name}」？已导入的文档会保留。`)) return
+  try {
+    await api(`/api/sources/${encodeURIComponent(source.id)}`, { method: 'DELETE' })
+    state.source = null
+    await loadSources()
+    toast('数据源已删除')
+  } catch (error) { toast(error.message, 'error') }
+}
+
+function renderSourceDetail() {
+  const source = state.source
+  if (source === null) return h('div', { class: 'welcome' }, h('div', { class: 'empty-mark', text: '⇄' }), h('h2', { text: '数据源' }), h('p', { text: '连接 GitHub 或 Gitee 仓库，把 Markdown 和文本文件同步到当前知识库。' }))
+  return h('article', { class: 'source-detail' },
+    h('header', { class: 'source-head' },
+      h('div', {}, h('p', { class: 'eyebrow', text: `${source.provider} · 数据源` }), h('h1', { text: source.name }), h('p', { class: 'source-repo', text: `${source.owner}/${source.repo}${source.ref ? ` @ ${source.ref}` : ''}` })),
+      h('div', { class: 'doc-actions' },
+        state.me.canEdit ? h('button', { type: 'button', class: 'btn primary', onClick: () => void syncSource(source), text: source.status === 'syncing' ? '同步中…' : '立即同步' }) : null,
+        state.me.canEdit ? h('button', { type: 'button', class: 'btn', onClick: () => openSourceForm(source), text: '编辑' }) : null,
+        state.me.canEdit ? h('button', { type: 'button', class: 'btn danger', onClick: () => void deleteSource(source), text: '删除' }) : null)),
+    h('div', { class: 'file-metadata' },
+      h('span', {}, h('small', { text: '状态' }), h('strong', {}, h('span', { class: `parse-badge is-${source.status === 'synced' ? 'parsed' : source.status === 'error' ? 'failed' : 'pending'}`, text: sourceStatusLabel(source.status) }))),
+      h('span', {}, h('small', { text: '上次同步' }), h('strong', { text: source.lastSyncedAt ? new Date(source.lastSyncedAt).toLocaleString() : '从未同步' })),
+      h('span', {}, h('small', { text: '路径过滤' }), h('strong', { text: source.includePattern || '全部文本文件' })),
+      h('span', {}, h('small', { text: '文档分组' }), h('strong', { text: source.sourceGroup || `数据源/${source.provider}/${source.owner}/${source.repo}` }))),
+    source.error ? h('p', { class: 'parse-error', text: source.error }) : null,
+    h('div', { class: 'source-note' },
+      h('p', { text: '同步规则：读取仓库中 Markdown/文本文件，按路径映射到文档；重复同步会更新已有文档，不会无限创建。已删除的仓库文件不会自动删掉本地文档。' }),
+      h('p', { text: '公开仓库无需 Token；私有仓库填写 Token。Token 只保存在服务端数据库，不会从接口返回。' })))
 }
 
 async function generateWiki() {
@@ -384,14 +521,28 @@ function renderDocumentList() {
   const filter = h('select', { class: 'list-filter', value: state.groupFilter, 'aria-label': '按分组筛选', onChange: event => { state.groupFilter = event.currentTarget.value; render() } },
     ...groups.map(group => h('option', { value: group === '全部分组' ? '' : group, selected: (group === '全部分组' ? '' : group) === state.groupFilter, text: group })))
   const documents = state.groupFilter === '' ? state.documents : state.documents.filter(row => (row.group || '未分组') === state.groupFilter)
-  const rows = documents.map(document => h('button', {
-    type: 'button', class: `doc-row${state.selected?.id === document.id ? ' active' : ''}`,
-    onClick: () => void openDocument(document.id),
-  }, h('span', { class: 'resource-icon', text: '▤' }), h('span', { class: 'resource-label' },
-    h('strong', { text: document.title }), h('small', { text: document.group || '未分组' }))))
+  const byGroup = new Map()
+  for (const document of documents) {
+    const group = document.group || '未分组'
+    if (!byGroup.has(group)) byGroup.set(group, [])
+    byGroup.get(group).push(document)
+  }
+  const sections = [...byGroup.entries()].map(([group, items]) => {
+    const rows = items.map(document => h('button', {
+      type: 'button', class: `doc-row${state.selected?.id === document.id ? ' active' : ''}`,
+      onClick: () => void openDocument(document.id),
+    },
+    h('span', { class: 'resource-icon', text: '▤' }),
+    h('span', { class: 'resource-label' },
+      h('strong', { text: document.title }),
+      h('small', { text: document.group || '未分组' }))))
+    return h('section', { class: 'doc-group' },
+      h('div', { class: 'doc-group-head' }, h('strong', { text: group }), h('span', { text: `${items.length}` })),
+      ...rows)
+  })
   return h('section', { class: 'resource-list' },
-    h('header', { class: 'resource-list-head' }, h('div', {}, h('p', { class: 'eyebrow', text: '文档' }), h('strong', { text: `${documents.length} 篇` })), filter),
-    rows.length === 0 ? h('div', { class: 'doc-empty', text: state.query === '' ? '这个知识库还没有文档。' : '没有匹配的文档。' }) : h('div', { class: 'doc-list' }, ...rows))
+    h('header', { class: 'resource-list-head' }, h('div', {}, h('p', { class: 'eyebrow', text: '文档目录' }), h('strong', { text: `${documents.length} 篇 · ${byGroup.size} 个分组` })), filter),
+    sections.length === 0 ? h('div', { class: 'doc-empty', text: state.query === '' ? '这个知识库还没有文档。' : '没有匹配的文档。' }) : h('div', { class: 'doc-list' }, ...sections))
 }
 
 function renderFileList() {
@@ -548,7 +699,9 @@ async function selectBase(id) {
   state.query = ''
   await loadGroups()
   if (state.view === 'files') await loadFiles()
-  else await loadDocuments()
+  else if (state.view === 'sources') await loadSources()
+  else if (state.view === 'wiki') await loadWiki()
+  else if (state.view !== 'ask') await loadDocuments()
 }
 
 async function loadGroups() {
@@ -597,7 +750,9 @@ async function refreshAll() {
     await refreshKbs()
     await loadGroups()
     if (state.view === 'files') await loadFiles()
-    else await loadDocuments()
+    else if (state.view === 'sources') await loadSources()
+    else if (state.view === 'wiki') await loadWiki()
+    else if (state.view !== 'ask') await loadDocuments()
     render()
   } catch (error) {
     state.error = error.message
@@ -671,6 +826,10 @@ function parseLabel(status) {
 
 function parseBadge(status) {
   return h('span', { class: `parse-badge is-${status || 'pending'}`, text: parseLabel(status) })
+}
+
+function sourceStatusLabel(status) {
+  return { synced: '已同步', syncing: '同步中', partial: '部分失败', error: '同步失败', idle: '未同步' }[status] || status || '未同步'
 }
 
 async function openAdmin() {

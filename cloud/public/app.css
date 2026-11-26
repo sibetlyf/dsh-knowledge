@@ -54,6 +54,10 @@ button, input, textarea, select { font: inherit; color: inherit; }
 .resource-icon { display: grid; place-items: center; width: 28px; height: 28px; flex: none; border: 1px solid var(--line); border-radius: 7px; background: var(--panel); color: var(--accent); font-size: 16px; }
 .doc-row { width: 100%; grid-template-columns: 28px minmax(0, 1fr); text-align: left; gap: 9px; padding: 9px 10px; }
 .doc-row .resource-label small { color: var(--muted); font-size: 10px; }
+.doc-group { display: grid; gap: 2px; margin-bottom: 8px; }
+.doc-group-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 8px 10px 3px; color: var(--muted); font-size: 10.5px; letter-spacing: .03em; border-bottom: 1px solid var(--line); }
+.doc-group-head strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 600; }
+.doc-group-head span { flex: none; min-width: 18px; text-align: center; border-radius: 999px; background: var(--panel-2); padding: 1px 5px; font-size: 9px; }
 .main { min-width: 0; display: flex; flex-direction: column; min-height: 100dvh; }
 .topbar { height: 58px; flex: none; display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 0 22px; border-bottom: 1px solid var(--line); background: var(--panel); }
 .crumb-separator, .crumb-current { color: var(--muted); }
@@ -81,6 +85,8 @@ button, input, textarea, select { font: inherit; color: inherit; }
 .file-preview-image { max-width: 100%; max-height: min(68vh, 900px); object-fit: contain; }
 .file-preview-frame { width: 100%; height: min(72vh, 900px); border: 0; background: #fff; }
 .file-preview-frame.text-preview { background: var(--panel); }
+.file-preview-audio { width: min(640px, 100%); }
+.file-preview-video { width: 100%; max-height: min(68vh, 900px); background: #000; }
 .file-preview-unavailable { max-width: 320px; padding: 32px; text-align: center; color: var(--muted); }
 .file-preview-unavailable p { margin: 12px 0 18px; font-size: 12px; }
 .empty-mark { width: 48px; height: 48px; margin: 0 auto 16px; display: grid; place-items: center; border: 1px solid var(--line); border-radius: 14px; background: var(--panel); color: var(--accent); font-size: 22px; }
@@ -118,6 +124,11 @@ button, input, textarea, select { font: inherit; color: inherit; }
 .wiki-source strong { font-size: 11.5px; }
 .wiki-source small { color: var(--muted); font-size: 10.5px; }
 .wiki-version { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 7px 0; border-top: 1px solid var(--line); color: var(--muted); font-size: 11px; }
+.source-detail { max-width: 900px; margin: 0 auto; display: grid; gap: 16px; }
+.source-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; }
+.source-head h1 { margin: 3px 0 6px; font-size: clamp(24px, 3vw, 34px); line-height: 1.15; letter-spacing: -.025em; }
+.source-repo { color: var(--muted); font: 12px/1.6 "Cascadia Code", Consolas, monospace; }
+.source-note { padding: 12px 14px; border: 1px solid var(--line); border-radius: 9px; background: var(--panel); color: var(--muted); font-size: 11.5px; line-height: 1.7; display: grid; gap: 6px; }
 
 .sidebar-head { padding: 18px 18px 12px; border-bottom: 1px solid var(--line); }
 .brand-row { display: flex; align-items: center; gap: 10px; }
@@ -134,6 +145,8 @@ button, input, textarea, select { font: inherit; color: inherit; }
 .sidebar-search input { width: 100%; border: 1px solid var(--line); background: var(--bg); border-radius: 8px; padding: 8px 10px; outline: none; }
 .sidebar-search input:focus { border-color: var(--accent); }
 .kb-list { padding: 10px; display: grid; gap: 4px; }
+.kb-section-label { margin: 7px 14px 0; color: var(--muted); font-size: 9px; font-weight: 700; letter-spacing: .1em; text-transform: uppercase; }
+.kb-item.cloud { border-left: 2px solid color-mix(in srgb, var(--accent) 35%, transparent); }
 .kb-item { border: 1px solid transparent; background: transparent; text-align: left; border-radius: 9px; padding: 8px 10px; cursor: pointer; display: grid; gap: 1px; }
 .kb-item:hover { background: var(--panel-2); }
 .kb-item.active { background: var(--accent-soft); border-color: color-mix(in srgb, var(--accent) 25%, transparent); }
