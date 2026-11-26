@@ -22,33 +22,40 @@
 
 需要 Node.js **>=24.9.0**。不按 DSH 版本号限制安装或加载；兼容性测试作为历史记录保留，见[宿主兼容策略](docs/host-compatibility-policy.md)。
 
-### 方式一：本地打包（推荐）
+### 方式一：预构建 tarball（推荐）
 
-仓库的 `lib/` 是构建产物，不提交到 Git；**GitHub archive/`github:` 源码安装不会自动包含 `lib/`**。必须在本机先构建，再安装生成的 `.tgz`：
+仓库自带已构建的安装包，DSH 可以直接安装，不需要执行 `prepare`，也不需要 `allowBuilds`：
+
+```bash
+dsh plugin --profile web add "https://raw.githubusercontent.com/sibetlyf/dsh-knowledge/main/release/dsh-knowledge-2.22.10-custom.1.tgz"
+```
+
+如果已经有旧版依赖，先移除再安装：
+
+```bash
+dsh plugin --profile web remove @lemoncat7/dsh-knowledge
+dsh plugin --profile web add "https://raw.githubusercontent.com/sibetlyf/dsh-knowledge/main/release/dsh-knowledge-2.22.10-custom.1.tgz"
+```
+
+安装后确认版本：
+
+```bash
+dsh plugin --profile web list
+```
+
+必须显示 `2.22.10-custom.1`，而不是 `2.18.1`；然后重启对应 Profile，在「设置 → 插件 → 云端同步」查看。
+
+### 方式二：本地构建
+
+如果 tarball 下载受网络限制，可以本地构建：
 
 ```bash
 git clone https://github.com/sibetlyf/dsh-knowledge.git
 cd dsh-knowledge
 npm ci
 npm pack
-```
-
-`npm pack` 会执行 `prepare`（`clean + build`），生成带 `lib/` 的安装包。然后在 DSH 中安装：
-
-```bash
-dsh plugin --profile web remove @lemoncat7/dsh-knowledge
 dsh plugin --profile web add .\dsh-knowledge-*.tgz
 ```
-
-> **版本注意**：npm 上的最新版目前还是旧的 `2.18.1`，不包含本仓库的云端同步、数据源、问答和 Wiki 功能。本仓库当前版本是 `2.22.10-custom.1`，不能通过 `@lemoncat7/dsh-knowledge@latest` 安装到。
->
-> 安装后必须确认：
->
-> ```bash
-> dsh plugin --profile web list
-> ```
->
-> 显示 `@lemoncat7/dsh-knowledge@2.22.10-custom.1`，而不是 `2.18.1`。
 
 > 如果你直接安装 GitHub 的 `archive/refs/heads/main.tar.gz`，那只是源码，不是预构建包；没有 `lib/client.js` 时，DSH 不会出现「云端同步」等新客户端功能。
 
@@ -63,7 +70,7 @@ dsh plugin --profile web add .\dsh-knowledge-*.tgz
 
 > 安装日志里的 `@lemoncat7/dsh-knowledge@2.22.10-custom.1` 是 `package.json` 的包名和版本，不是第二个插件。
 
-### 方式二：GitHub 源码
+### 方式三：GitHub 源码
 
 ```bash
 dsh plugin --profile web add github:sibetlyf/dsh-knowledge
