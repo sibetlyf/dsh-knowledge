@@ -22,22 +22,26 @@
 
 需要 Node.js **>=24.9.0**。不按 DSH 版本号限制安装或加载；兼容性测试作为历史记录保留，见[宿主兼容策略](docs/host-compatibility-policy.md)。
 
-### 方式一：预构建包（推荐）
+### 方式一：本地打包（推荐）
 
-从 GitHub 安装已构建的源码包，不需要在客户端运行 `prepare` 构建：
+仓库的 `lib/` 是构建产物，不提交到 Git；**GitHub archive/`github:` 源码安装不会自动包含 `lib/`**。必须在本机先构建，再安装生成的 `.tgz`：
 
 ```bash
-dsh plugin --profile web add "https://github.com/sibetlyf/dsh-knowledge/archive/refs/heads/main.tar.gz"
+git clone https://github.com/sibetlyf/dsh-knowledge.git
+cd dsh-knowledge
+npm ci
+npm pack
 ```
 
-> 安装日志里可能出现 `@lemoncat7/dsh-knowledge@2.22.10-custom.1`。这是仓库 `package.json` 中的包名 + 自定义版本，不是第二个插件。该包声明了 `prepare: clean + build`，所以只有“GitHub 源码安装”才会要求编译；预构建 tarball 安装不执行 `prepare`。
-
-也可以在仓库本地执行：
+`npm pack` 会执行 `prepare`（`clean + build`），生成带 `lib/` 的安装包。然后在 DSH 中安装：
 
 ```bash
-npm pack
 dsh plugin --profile web add .\dsh-knowledge-*.tgz
 ```
+
+> 如果你直接安装 GitHub 的 `archive/refs/heads/main.tar.gz`，那只是源码，不是预构建包；没有 `lib/client.js` 时，DSH 不会出现「云端同步」等新客户端功能。
+
+> 安装日志里的 `@lemoncat7/dsh-knowledge@2.22.10-custom.1` 是 `package.json` 的包名和版本，不是第二个插件。
 
 ### 方式二：GitHub 源码
 
