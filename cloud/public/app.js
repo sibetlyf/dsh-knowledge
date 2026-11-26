@@ -126,7 +126,7 @@ function renderSidebar() {
       h('button', { type: 'button', class: `workspace-tab${state.view === 'wiki' ? ' active' : ''}`, onClick: () => switchView('wiki') }, 'Wiki'),
     ),
     h('nav', { class: 'kb-list', 'aria-label': '知识库' },
-      baseList.length === 0 ? h('p', { class: 'note', text: '还没有可访问的知识库。' }) : baseList),
+      ...(baseList.length === 0 ? [h('p', { class: 'note', text: '还没有可访问的知识库。' })] : baseList)),
     h('div', { class: 'sidebar-foot' },
       state.me.canEdit && state.view === 'documents' ? h('button', { type: 'button', class: 'side-btn accent', onClick: openCreate, text: state.baseId === null ? '+ 新建文档' : '+ 在这个库中新建' }) : null,
       state.me.isAdmin ? h('button', { type: 'button', class: 'side-btn', onClick: () => void openAdmin(), text: '成员与邀请' }) : null,
@@ -175,6 +175,7 @@ function renderAskDetail() {
     onInput: event => { ask.question = event.currentTarget.value },
     onKeyDown: event => { if ((event.ctrlKey || event.metaKey) && event.key === 'Enter') { event.preventDefault(); void submit() } },
   })
+  input.value = ask.question
   const submit = async () => {
     if (ask.question.trim() === '' || ask.busy) return
     ask.busy = true
@@ -211,6 +212,7 @@ function renderWikiDetail() {
   if (page === null) return h('div', { class: 'welcome' }, h('div', { class: 'empty-mark', text: '▤' }), h('h2', { text: '自动 Wiki' }), h('p', { text: '从文档和已索引文件生成带引用的 Wiki 草稿，审核后再发布。' }))
   const titleInput = h('input', { class: 'wiki-title-input', value: state.wiki.draftTitle, maxlength: '240', onInput: event => { state.wiki.draftTitle = event.currentTarget.value } })
   const contentInput = h('textarea', { class: 'wiki-editor', value: state.wiki.draftContent, onInput: event => { state.wiki.draftContent = event.currentTarget.value } })
+  contentInput.value = state.wiki.draftContent
   const save = async (status) => {
     state.wiki.busy = true
     try {
