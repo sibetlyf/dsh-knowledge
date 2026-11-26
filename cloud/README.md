@@ -85,6 +85,14 @@ curl -s http://127.0.0.1:8787/knowledge-api/v1/health
 curl -s http://127.0.0.1:8787/assets/app.js | grep workspace-tab
 ```
 
+**数据目录必须在应用目录之外**，例如：
+
+```text
+TEAM_DATA_DIR=/opt/team-kb/data
+```
+
+如果历史上没有设置，数据实际可能位于 `/opt/team-kb/app/cloud-data`。更新脚本检测到这种情况会直接中止，避免替换 app 时删掉知识库；请先迁移数据并设置环境变量。
+
 `/health` 返回的 `buildId` 与页面左下角 `build ...` 应一致。
 
 ### 4. 配置环境变量
@@ -365,6 +373,18 @@ CLOUD_SYNC_MIRROR=1 \
 CLOUD_SYNC_FILES_OUT=/data/cloud-files \
 node cloud/sync-local.mjs
 ```
+
+云端数据丢失、但本地还保留 `云端·` 镜像库时，可以把镜像回灌到云端同名知识库：
+
+```bash
+node cloud/sync-local.mjs \
+  --db "G:\dsh-knowledge\knowledge.sqlite" \
+  --url "https://你的域名/knowledge-api/v1" \
+  --token "<Token>" \
+  --restore-mirror
+```
+
+镜像回灌按本地文档 ID 映射，重复执行不会重复创建；文件正文不在镜像库中，需要另行从本地文件目录上传。
 
 同步规则：
 
