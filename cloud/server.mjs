@@ -52,7 +52,7 @@ registerKnowledgeApi(remoteApiContext, provider, '/knowledge-api/v1', { authMode
 
 function readBuildInfo() {
   const hasher = createHash('sha256')
-  for (const file of ['server.mjs', 'team-store.mjs', 'views.mjs', 'public/app.js', 'public/app.css']) {
+  for (const file of ['server.mjs', 'team-store.mjs', 'sources.mjs', 'ingest.mjs', 'llm.mjs', 'views.mjs', 'public/app.js', 'public/app.css']) {
     try { hasher.update(readFileSync(join(here, file))) } catch { hasher.update(file) }
   }
   let version = '0.0.0'
