@@ -139,6 +139,20 @@ TEAM_ADMIN_NAME=管理员
 当前首批连接器是 GitHub 和 Gitee；数据源 registry 的设计允许后续增加 GitLab、通用 Git、WebDAV 等。
 
 ### 文件解析、搜索、问答与 Wiki
+
+#### 多格式文件渲染
+
+文件详情根据类型选择安全预览：
+
+- 图片：`png/jpeg/gif/webp` 内嵌显示；
+- PDF：内嵌 PDF 阅读；
+- Markdown：渲染后的 HTML 预览；
+- TXT / 代码 / JSON：代码式文本预览；
+- CSV：表格预览；
+- 音频/视频：播放器；
+- Office/压缩包/未知格式：下载后打开，不伪装成在线预览。
+
+HTML/SVG 等主动内容不做同源内嵌。
 - 文本类文件（Markdown、TXT、CSV、JSON、HTML、代码等）上传后自动抽取文本，写入 SQLite FTS5 索引；
 - PDF/Office/图片等复杂格式当前标记为“仅存储”，原文件可下载，不伪造“已索引”；
 - 文件列表显示 `已索引 / 待解析 / 仅存储 / 解析失败`，详情支持重新解析；
