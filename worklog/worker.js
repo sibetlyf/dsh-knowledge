@@ -26,7 +26,20 @@ export class Worker {
     }
     const payload = JSON.parse(job.body), attempts = job.attempts + 1, started = Date.now()
     this.active = job.id; this.controller = new AbortController()
-    const timeout = setTimeout(() => this.controller?.abort(new Error('整理超时')), 180000)
+    // 不再用总耗时 180 秒。模型一旦开始返回 chunk，就只按“无输出”计时；
+    // 未返回任何 chunk 时给 10 分钟连接/首包窗口，避免长时间正常推理被误杀。
+    let lastActivity = Date.now(), receivedChunk = false
+    const touch = phase => {
+      lastActivity = Date.now()
+      if (phase === 'chunk') receivedChunk = true
+    }
+    const timeout = setInterval(() => {
+      const idleMs = Date.now() - lastActivity
+      if (idleMs >= 600_000) {
+        this.controller?.abort(new Error(receivedChunk ? '模型 10 分钟没有输出，已中止' : '等待模型连接或首个输出超过 10 分钟，已中止'))
+      }
+    }, 5_000)
+    timeout.unref?.()
     this.store.status(job.id, 'running', payload, attempts)
     let step
     try {
@@ -37,7 +50,7 @@ export class Worker {
       }
       valid()
       step = nextBatch(payload)
-      const result = await this.render(this.llm, step.payload, this.controller.signal)
+      const result = await this.render(this.llm, step.payload, this.controller.signal, touch)
       if (this.closed || this.store.job(job.id).status === 'cancelled') return
       valid()
       const checkpoint = structuredClone(payload)
@@ -54,13 +67,13 @@ export class Worker {
         const retryable = ![409, 413].includes(e.status) && e.worklogDiagnostic?.retryable !== false
         const retry = attempts < 3 && retryable
         const diagnostic = { ...(e.worklogDiagnostic || { code: this.controller.signal.aborted ? 'timeout' : 'request_error' }), retryable, elapsedMs: Date.now() - started, attempt: attempts, httpStatus: Number.isInteger(e.status) ? e.status : null }
-        const message = e.worklogDiagnostic || [409, 413].includes(e.status) ? e.message : diagnostic.code === 'timeout' ? '整理超过 180 秒，已中止' : '模型请求或流式读取失败'
+        const message = e.worklogDiagnostic || [409, 413].includes(e.status) ? e.message : diagnostic.code === 'timeout' ? '模型长时间没有输出，已中止' : '模型请求或流式读取失败'
         const progress = retryable ? `第 ${attempts}/3 次` : `第 ${attempts} 次，已停止自动重试`
         const failure = e.worklogFailure ? { ...e.worklogFailure, phase: payload.batch ? (payload.batch.level ? '合并摘要' : '分批整理') : '整理日报', batch: payload.batch ? payload.batch.index + 1 : null, sourceIds: step?.payload.records.map(record => record.id) || [] } : undefined
         this.store.status(job.id, retry ? 'queued' : 'failed', { ...payload, diagnostic, failure, failedAt: Date.now(), error: `${message}（${progress}，${diagnostic.code}）` }, attempts, Date.now() + attempts * 10000)
         this.onError({ jobId: job.id, day: job.day, ...diagnostic })
       }
-    } finally { clearTimeout(timeout); this.active = null; this.controller = null }
+    } finally { clearInterval(timeout); this.active = null; this.controller = null }
   }
   cancel(id) {
     const job = this.store.job(id)

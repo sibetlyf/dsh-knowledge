@@ -259,7 +259,6 @@ export function apply(ctx: Context, config: KnowledgeConfig): void {
       validateConnectionSettings(next, publicApiEnabled, resolved.databasePath !== undefined && resolved.databasePath.trim().length > 0)
       if (sameConnection(next, activeConnection)) return activeConnection
       if (writebackQueue?.isRunning) throw connectionError(409, '回写正在执行，请完成后再切换知识库连接')
-      if (journalRuntime?.isRunning()) throw connectionError(409, '日报正在整理，请完成或取消后再切换知识库连接')
       if (resolved.connectionPath === undefined) throw connectionError(409, '当前插件没有配置持久化路径，无法保存连接。')
       const candidate = connectionProvider(next)
       connectionChanging = true

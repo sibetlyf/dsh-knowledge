@@ -182,6 +182,7 @@ export class CloudSyncManager implements CloudSyncControl {
 
   scheduleSoon(): void {
     if (!this.config.autoSync || this.running) return
+    if (this.config.url === '' || this.config.token === '') return
     if (this.debounce !== undefined) clearTimeout(this.debounce)
     this.debounce = setTimeout(() => {
       this.debounce = undefined
@@ -195,7 +196,9 @@ export class CloudSyncManager implements CloudSyncControl {
     this.timer = undefined
     if (!this.config.autoSync) return
     this.timer = setInterval(() => {
-      if (!this.running) void this.run('sync')
+      if (!this.running && this.config.url !== '' && this.config.token !== '') {
+        void this.run('sync').catch(error => this.logger.warn(`云端自动同步失败：${error instanceof Error ? error.message : String(error)}`))
+      }
     }, this.config.intervalMinutes * 60_000)
     this.timer.unref()
   }
