@@ -3,8 +3,11 @@ const state = {
   kbs: [],
   baseId: null,
   groups: [],
+  groupFilter: '',
   documents: [],
   selected: null,
+  selectedFile: null,
+  view: 'documents',
   editing: false,
   draftTitle: '',
   draftBody: '',
@@ -12,7 +15,6 @@ const state = {
   searchFocus: false,
   searchTimer: null,
   loading: false,
-  filesOpen: false,
   files: [],
   error: '',
   admin: null,
@@ -74,10 +76,12 @@ function render() {
   root.innerHTML = ''
   if (state.me === null) return
   const sidebar = renderSidebar()
-  const main = renderMain()
-  root.append(sidebar, main)
+  const hasBase = state.kbs.some(base => base.id === state.baseId)
+  root.dataset.hasBase = String(hasBase)
+  root.append(sidebar)
+  if (hasBase) root.append(renderResourceList())
+  root.append(renderMain())
   if (state.admin !== null) root.append(renderAdmin())
-  if (state.filesOpen === true) root.append(renderFiles())
   document.getElementById('boot')?.classList.add('hidden')
   root.classList.remove('hidden')
 }
@@ -106,14 +110,19 @@ function renderSidebar() {
           clearTimeout(state.searchTimer)
           state.searchTimer = setTimeout(() => {
             state.searchFocus = true
-            if (state.baseId !== null) void loadDocuments()
+            if (state.baseId !== null && state.view === 'documents') void loadDocuments()
+            else render()
           }, 280)
         },
       })),
+    h('div', { class: 'workspace-nav', role: 'tablist', 'aria-label': '工作区' },
+      h('button', { type: 'button', class: `workspace-tab${state.view === 'documents' ? ' active' : ''}`, onClick: () => { state.view = 'documents'; state.selectedFile = null; render(); void loadDocuments() } }, '文档'),
+      h('button', { type: 'button', class: `workspace-tab${state.view === 'files' ? ' active' : ''}`, onClick: () => { state.view = 'files'; state.selected = null; render(); void loadFiles() } }, '文件'),
+    ),
     h('nav', { class: 'kb-list', 'aria-label': '知识库' },
       baseList.length === 0 ? h('p', { class: 'note', text: '还没有可访问的知识库。' }) : baseList),
     h('div', { class: 'sidebar-foot' },
-      state.me.canEdit ? h('button', { type: 'button', class: 'side-btn accent', onClick: openCreate, text: state.baseId === null ? '+ 新建文档' : '+ 在这个库中新建' }) : null,
+      state.me.canEdit && state.view === 'documents' ? h('button', { type: 'button', class: 'side-btn accent', onClick: openCreate, text: state.baseId === null ? '+ 新建文档' : '+ 在这个库中新建' }) : null,
       state.me.isAdmin ? h('button', { type: 'button', class: 'side-btn', onClick: () => void openAdmin(), text: '成员与邀请' }) : null,
       h('button', { type: 'button', class: 'side-btn ghost', onClick: () => void refreshAll(), text: '刷新' })),
   )
@@ -122,44 +131,123 @@ function renderSidebar() {
 function renderMain() {
   const main = h('main', { class: 'main' })
   const base = state.kbs.find(item => item.id === state.baseId)
+  const currentTitle = state.view === 'files' ? state.selectedFile?.name : state.selected?.title
   main.append(h('header', { class: 'topbar' },
-    h('div', { class: 'breadcrumb' }, h('strong', { text: base?.name ?? '全部知识库' }), h('span', { text: state.selected ? ` / ${state.selected.title}` : '' })),
+    h('div', { class: 'breadcrumb' },
+      h('span', { text: '工作区' }), h('span', { class: 'crumb-separator', text: '/' }),
+      h('strong', { text: base?.name ?? '全部知识库' }),
+      h('span', { class: 'crumb-separator', text: '/' }),
+      h('span', { text: state.view === 'files' ? '文件' : '文档' }),
+      currentTitle ? h('span', { class: 'crumb-current', text: ` / ${currentTitle}` }) : null),
     h('div', { class: 'doc-actions' },
-      state.baseId !== null ? h('button', { type: 'button', class: 'btn', onClick: () => void openFiles(), text: '文件库' }) : null,
+      state.view === 'documents' && state.baseId !== null && state.me.canEdit ? h('button', { type: 'button', class: 'btn primary', onClick: openCreate, text: '+ 新建文档' }) : null,
+      state.me.isAdmin ? h('button', { type: 'button', class: 'btn', onClick: () => void openAdmin(), text: '成员与设置' }) : null,
       h('span', { class: 'pill', text: state.me.canEdit ? '可编辑' : '只读' }))))
-  if (base !== undefined) main.append(renderDocumentList())
   const content = h('section', { class: 'content' })
-  if (state.loading) content.append(h('div', { class: 'welcome' }, h('p', { text: '正在加载…' })))
+  if (state.baseId === null) content.append(renderWelcome())
+  else if (state.loading) content.append(h('div', { class: 'welcome' }, h('p', { text: '正在加载…' })))
   else if (state.error !== '') content.append(h('div', { class: 'welcome' }, h('p', { text: state.error })))
+  else if (state.view === 'files') content.append(state.selectedFile === null ? renderEmptyDetail('选择一个文件查看详情') : renderFileDetail())
   else if (state.selected === null) content.append(renderWelcome())
   else content.append(state.editing ? renderEditor() : renderReader())
   main.append(content)
   return main
 }
 
+function renderEmptyDetail(message) {
+  return h('div', { class: 'welcome' }, h('div', { class: 'empty-mark', text: state.view === 'files' ? '▧' : '▤' }), h('h2', { text: message }), h('p', { text: state.view === 'files' ? '选择左侧文件列表中的条目，查看元数据或打开预览。' : '从列表选择一篇文档开始阅读。' }))
+}
+
+function renderFileDetail() {
+  const file = state.selectedFile
+  const type = String(file.mime || '').toLowerCase()
+  const safeImage = /^image\/(?:png|jpeg|gif|webp)(?:;|$)/u.test(type)
+  const safeText = /^text\/(?:plain|markdown|csv)(?:;|$)/u.test(type) || type === 'application/json'
+  const preview = safeImage
+    ? h('img', { class: 'file-preview-image', src: file.inlineUrl, alt: file.name })
+    : type === 'application/pdf'
+      ? h('iframe', { class: 'file-preview-frame', src: file.inlineUrl, title: `${file.name} 预览` })
+      : safeText
+        ? h('iframe', { class: 'file-preview-frame text-preview', src: file.inlineUrl, title: `${file.name} 预览` })
+        : h('div', { class: 'file-preview-unavailable' }, h('div', { class: 'empty-mark', text: '↓' }), h('p', { text: '此格式可下载后在本地打开。' }), h('a', { class: 'btn primary', href: file.downloadUrl, text: '下载文件' }))
+  return h('article', { class: 'file-detail' },
+    h('header', { class: 'file-detail-head' },
+      h('div', {}, h('p', { class: 'eyebrow', text: `${file.userName || '未署名'} · 文件` }), h('h1', { class: 'doc-title', text: file.name })),
+      h('div', { class: 'doc-actions' }, h('a', { class: 'btn', href: file.downloadUrl, text: '下载' }),
+        state.me.canEdit ? h('button', { type: 'button', class: 'btn danger', onClick: () => void deleteFile(file), text: '删除' }) : null)),
+    h('div', { class: 'file-metadata' },
+      h('span', {}, h('small', { text: '类型' }), h('strong', { text: file.mime || '未知' })),
+      h('span', {}, h('small', { text: '大小' }), h('strong', { text: formatFileSize(file.size) })),
+      h('span', {}, h('small', { text: '上传者' }), h('strong', { text: file.userName || '未署名' })),
+      h('span', {}, h('small', { text: '更新时间' }), h('strong', { text: new Date(file.updatedAt).toLocaleString() }))),
+    h('div', { class: 'file-source-path', text: file.sourceKey || file.name }),
+    h('div', { class: 'file-preview' }, preview))
+}
+
+async function deleteFile(file) {
+  if (!confirm(`删除文件「${file.name}」？`)) return
+  try {
+    await api(`/api/files/${encodeURIComponent(file.id)}`, { method: 'DELETE' })
+    state.files = state.files.filter(row => row.id !== file.id)
+    state.selectedFile = null
+    render()
+    toast('文件已删除')
+  } catch (error) { toast(error.message, 'error') }
+}
+
 function renderWelcome() {
   return h('div', { class: 'welcome' },
-    h('h2', { text: state.baseId === null ? '从左侧选择知识库' : '选择一篇文档' }),
-    h('p', { text: '团队成员共用同一份知识：浏览、搜索、上传和编辑都在这里完成。所有修改都会保留版本记录。' }))
+    h('div', { class: 'empty-mark', text: '▤' }),
+    h('h2', { text: state.baseId === null ? '从左侧选择知识库' : state.view === 'files' ? '文件工作区' : '选择一篇文档' }),
+    h('p', { text: state.baseId === null ? '选择知识库开始浏览文档和文件。' : '文档、附件、用户分区和文件详情都在同一个工作区中浏览。' }))
+}
+
+function renderResourceList() {
+  return state.view === 'files' ? renderFileList() : renderDocumentList()
 }
 
 function renderDocumentList() {
-  const rows = state.documents.map(document => h('button', {
+  const groups = ['全部分组', ...state.groups]
+  const filter = h('select', { class: 'list-filter', value: state.groupFilter, 'aria-label': '按分组筛选', onChange: event => { state.groupFilter = event.currentTarget.value; render() } },
+    ...groups.map(group => h('option', { value: group === '全部分组' ? '' : group, selected: (group === '全部分组' ? '' : group) === state.groupFilter, text: group })))
+  const documents = state.groupFilter === '' ? state.documents : state.documents.filter(row => (row.group || '未分组') === state.groupFilter)
+  const rows = documents.map(document => h('button', {
     type: 'button', class: `doc-row${state.selected?.id === document.id ? ' active' : ''}`,
     onClick: () => void openDocument(document.id),
-  },
-  h('strong', { text: document.title }),
-  h('small', { text: document.group || '未分组' })))
-  return h('div', { class: 'doc-list-wrap' },
-    rows.length === 0
-      ? h('div', { class: 'doc-empty', text: state.query === '' ? '这个知识库还没有文档。' : '没有匹配的文档。' })
-      : h('div', { class: 'doc-list' }, ...rows))
+  }, h('span', { class: 'resource-icon', text: '▤' }), h('span', { class: 'resource-label' },
+    h('strong', { text: document.title }), h('small', { text: document.group || '未分组' }))))
+  return h('section', { class: 'resource-list' },
+    h('header', { class: 'resource-list-head' }, h('div', {}, h('p', { class: 'eyebrow', text: '文档' }), h('strong', { text: `${documents.length} 篇` })), filter),
+    rows.length === 0 ? h('div', { class: 'doc-empty', text: state.query === '' ? '这个知识库还没有文档。' : '没有匹配的文档。' }) : h('div', { class: 'doc-list' }, ...rows))
+}
+
+function renderFileList() {
+  const fileInput = h('input', { type: 'file', multiple: true, hidden: true, onChange: event => { const files = event.currentTarget.files; if (files) void uploadFiles([...files]); event.currentTarget.value = '' } })
+  const folderInput = h('input', { type: 'file', multiple: true, webkitdirectory: true, hidden: true, onChange: event => { const files = event.currentTarget.files; if (files) void uploadFiles([...files]); event.currentTarget.value = '' } })
+  const query = state.query.trim().toLowerCase()
+  const files = state.files.filter(file => query === '' || `${file.name} ${file.sourceKey || ''} ${file.userName || ''} ${file.mime || ''}`.toLowerCase().includes(query))
+  const users = [...new Set(files.map(file => file.userName || '未署名'))].sort((a, b) => a.localeCompare(b))
+  const rows = users.flatMap(user => [
+    h('div', { class: 'file-user-heading', text: user }),
+    ...files.filter(file => (file.userName || '未署名') === user).map(file => h('button', {
+      type: 'button', class: `doc-row file-entry${state.selectedFile?.id === file.id ? ' active' : ''}`,
+      onClick: () => { state.selectedFile = file; render() },
+    }, h('span', { class: 'resource-icon', text: '▧' }), h('span', { class: 'resource-label' },
+      h('strong', { text: file.name }), h('small', { text: `${file.sourceKey || file.name} · ${formatFileSize(file.size)}` }))))
+  ])
+  return h('section', { class: 'resource-list' },
+    h('header', { class: 'resource-list-head' },
+      h('div', {}, h('p', { class: 'eyebrow', text: '文件' }), h('strong', { text: `${files.length} 个文件` })),
+      state.me.canEdit ? h('div', { class: 'upload-actions' },
+        h('button', { type: 'button', class: 'btn primary', onClick: () => fileInput.click(), text: '上传' }),
+        h('button', { type: 'button', class: 'btn', onClick: () => folderInput.click(), text: '上传文件夹' }), fileInput, folderInput) : null),
+    rows.length === 0 ? h('div', { class: 'doc-empty', text: query ? '没有匹配的文件。' : '这个知识库还没有文件。' }) : h('div', { class: 'doc-list file-list-panel' }, ...rows))
 }
 
 function renderReader() {
   const document = state.selected
   const tags = (document.tags ?? []).map(tag => h('span', { class: 'tag', text: tag }))
-  return h('div', {},
+  return h('div', { class: 'document-detail' },
     h('div', { class: 'doc-head' },
       h('div', {},
         h('h1', { class: 'doc-title', text: document.title }),
@@ -281,9 +369,13 @@ async function openDocument(id) {
 async function selectBase(id) {
   state.baseId = id
   state.selected = null
+  state.selectedFile = null
+  state.groupFilter = ''
   state.editing = false
   state.query = ''
-  await Promise.all([loadGroups(), loadDocuments()])
+  await loadGroups()
+  if (state.view === 'files') await loadFiles()
+  else await loadDocuments()
 }
 
 async function loadGroups() {
@@ -330,7 +422,8 @@ async function refreshAll() {
     state.me = me
     await refreshKbs()
     await loadGroups()
-    await loadDocuments()
+    if (state.view === 'files') await loadFiles()
+    else await loadDocuments()
     render()
   } catch (error) {
     state.error = error.message
@@ -345,22 +438,20 @@ async function logout() {
   location.assign('/login')
 }
 
-async function openFiles() {
-  if (state.baseId === null) { toast('请先选择知识库', 'error'); return }
-  state.filesOpen = true
-  await loadFiles()
-}
-
 async function loadFiles() {
   if (state.baseId === null) return
+  setLoading(true)
   try {
     const result = await api(`/api/files?baseId=${encodeURIComponent(state.baseId)}`)
     state.files = result.files
     state.error = ''
+    if (state.selectedFile && !state.files.some(file => file.id === state.selectedFile.id)) state.selectedFile = null
   } catch (error) {
     state.error = error.message
+  } finally {
+    setLoading(false)
+    render()
   }
-  render()
 }
 
 async function uploadFiles(files) {
@@ -398,54 +489,6 @@ function formatFileSize(bytes) {
   if (bytes < 1024) return `${bytes} B`
   if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`
   return `${(bytes / 1024 / 1024).toFixed(1)} MB`
-}
-
-function renderFiles() {
-  const close = () => { state.filesOpen = false; render() }
-  const input = h('input', {
-    type: 'file', multiple: true, hidden: true,
-    onChange: event => {
-      const files = event.currentTarget.files
-      if (files !== null) void uploadFiles([...files])
-      event.currentTarget.value = ''
-    },
-  })
-  const fileRow = file => h('div', { class: 'file-row' },
-    h('div', { class: 'file-main' },
-      h('strong', { text: file.name }),
-      h('small', { text: `${file.sourceKey || file.name} · ${formatFileSize(file.size)} · ${file.mime || '未知类型'} · ${new Date(file.updatedAt).toLocaleString()}` })),
-    h('div', { class: 'file-actions' },
-      h('a', { class: 'btn', href: file.inlineUrl, target: '_blank', rel: 'noopener', text: '打开' }),
-      h('a', { class: 'btn', href: file.downloadUrl, text: '下载' }),
-      state.me.canEdit ? h('button', {
-        type: 'button', class: 'btn danger', text: '删除',
-        onClick: async () => {
-          if (!confirm(`删除文件「${file.name}」？`)) return
-          try {
-            await api(`/api/files/${encodeURIComponent(file.id)}`, { method: 'DELETE' })
-            state.files = state.files.filter(row => row.id !== file.id)
-            render()
-            toast('文件已删除')
-          } catch (error) { toast(error.message, 'error') }
-        },
-      }) : null))
-  const groups = new Map()
-  for (const file of state.files) {
-    const user = file.userName || '未署名'
-    if (!groups.has(user)) groups.set(user, [])
-    groups.get(user).push(file)
-  }
-  const rows = [...groups.entries()].map(([user, files]) => h('section', {},
-    h('h3', { class: 'file-group', text: `${user}/` }),
-    ...files.map(fileRow)))
-  return h('div', { class: 'modal-backdrop', onClick: event => { if (event.target === event.currentTarget) close() } },
-    h('div', { class: 'modal', role: 'dialog', 'aria-modal': 'true', 'aria-label': '文件库' },
-      h('div', { class: 'modal-head' }, h('h2', { text: '文件库' }), h('button', { type: 'button', class: 'icon-btn', onClick: close, text: '关闭' })),
-      h('p', { class: 'note', text: '支持任意文件类型：PDF、Word、Excel、PPT、图片、压缩包、音视频等。文件按所属知识库授权，登录成员可下载。' }),
-      state.me.canEdit ? h('div', { class: 'doc-actions' },
-        h('button', { type: 'button', class: 'btn primary', onClick: () => input.click(), text: '+ 上传文件' }),
-        input) : null,
-      rows.length === 0 ? h('div', { class: 'doc-empty', text: '这个知识库还没有文件。' }) : h('div', { class: 'file-list' }, ...rows)))
 }
 
 async function openAdmin() {
