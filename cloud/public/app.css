@@ -133,6 +133,9 @@ button, input, textarea, select { font: inherit; color: inherit; }
 .worklog-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; }
 .worklog-head h1 { margin: 3px 0 6px; font-size: clamp(24px, 3vw, 34px); line-height: 1.15; letter-spacing: -.025em; }
 .worklog-summary { padding: 18px 20px; border: 1px solid var(--line); border-radius: 10px; background: var(--panel); overflow: auto; }
+.worklog-keywords { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; padding: 9px 0; }
+.worklog-keywords small { margin-right: 3px; color: var(--muted); font-size: 10.5px; }
+.worklog-keywords .tag { padding: 3px 8px; border: 1px solid var(--line); border-radius: 999px; color: var(--muted); font-size: 10.5px; }
 .worklog-summary pre { margin: 0; white-space: pre-wrap; word-break: break-word; font: 12.5px/1.75 var(--font-ui); color: var(--text); }
 
 .sidebar-head { padding: 18px 18px 12px; border-bottom: 1px solid var(--line); }

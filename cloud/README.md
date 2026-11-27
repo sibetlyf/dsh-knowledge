@@ -151,23 +151,26 @@ TEAM_ADMIN_NAME=管理员
 服务启动后默认每 30 分钟运行一次后台任务：
 
 - **自动 Wiki**：知识库文档有变化时，生成/更新一篇草稿 `自动 Wiki · 团队知识概览`（固定 slug `auto-team-wiki`）。只生成草稿，不自动发布；没有文档变化则跳过。
-- **团队日报汇总**：本地 DSH 工作日报通过云端同步写入后，每天配置时间后生成当日团队汇总，汇总成员进展、阻塞和下一步；无模型时退化为抽取式汇总。汇总不会改写成员日报。
+- **团队日报汇总**：本地 DSH 工作日报通过云端同步写入后，每天配置时间后生成当日团队汇总；同一轮大模型调用还会输出可检索关键词和一篇团队 Wiki 草稿。模型不可用或输出无效时退化为抽取式汇总、本地关键词和同内容 Wiki 草稿。汇总不会改写成员日报。
 
 环境变量：
 
 ```text
 TEAM_AUTO_WIKI=1
 TEAM_AUTO_WORKLOG=1
+TEAM_WORKLOG_BASE=default
 TEAM_WORKLOG_SUMMARY_HOUR=19
 TEAM_AUTO_INTERVAL_MINUTES=30
 ```
+
+后台任务遵守上述开关；管理员的 `POST /api/automation/run` 是显式手动执行，可在请求体传 `{"wiki":false,"worklog":true}` 只跑其中一项。
 
 接口：
 
 ```text
 POST /knowledge-api/v1/worklogs        DSH Token 写入日报
 GET  /api/worklogs                   当前日报和汇总
-POST /api/worklogs/summarize         手动生成汇总
+POST /api/worklogs/summarize         手动生成汇总、关键词和 Wiki 草稿
 PATCH /api/worklogs/summaries/:id    标记汇总发布
 GET  /api/automation/status
 POST /api/automation/run             管理员立即执行一次
@@ -180,7 +183,7 @@ POST /api/automation/run             管理员立即执行一次
 --worklog-base <云端知识库 ID，默认 default>
 ```
 
-上传日报时只上传日报正文，不包含成员本机路径或其他本地数据。
+同步只上传日报正文、日期和修订号，不包含成员本机路径等附加元数据；正文本身仍可能含敏感信息，开启团队共享前应由成员确认。
 
 
 

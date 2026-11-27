@@ -429,14 +429,18 @@ function renderWorklogDetail() {
       state.me.canEdit ? h('button', { type: 'button', class: 'btn primary', onClick: () => void summarizeWorklogs(), text: '汇总今日日报' }) : null)
   }
   const memberNames = [...new Set(state.worklogs.filter(row => row.day >= summary.from_day && row.day <= summary.to_day).map(row => row.user_name))]
+  let keywords = []
+  try { keywords = JSON.parse(summary.keywords ?? '[]') } catch {}
   return h('article', { class: 'worklog-detail' },
     h('header', { class: 'worklog-head' },
       h('div', {}, h('p', { class: 'eyebrow', text: `团队日报 · ${summary.engine === 'model' ? '模型汇总' : '抽取式汇总'}` }), h('h1', { text: `${summary.from_day}${summary.to_day === summary.from_day ? '' : ` ~ ${summary.to_day}`}` }), h('p', { class: 'source-repo', text: `${memberNames.join('、') || '暂无成员'} · ${summary.status === 'published' ? '已发布' : '待审核'}` })),
       h('div', { class: 'doc-actions' },
+        summary.wiki_page_id ? h('button', { type: 'button', class: 'btn', onClick: async () => { state.view = 'wiki'; await openWiki(summary.wiki_page_id) }, text: '打开 Wiki 草稿' }) : null,
         state.me.canEdit ? h('button', { type: 'button', class: 'btn primary', onClick: () => void summarizeWorklogs(), text: '重新汇总今日' }) : null,
         state.me.canEdit ? h('button', { type: 'button', class: 'btn', onClick: async () => {
           try { const updated = await api(`/api/worklogs/summaries/${encodeURIComponent(summary.id)}`, { method: 'PATCH', body: JSON.stringify({ status: 'published' }) }); state.worklogSummary = updated.summary; toast('汇总已标记发布'); render() } catch (error) { toast(error.message, 'error') }
         }, text: '标记发布' }) : null)),
+    keywords.length ? h('div', { class: 'worklog-keywords' }, h('small', { text: '模型关键词' }), ...keywords.map(keyword => h('span', { class: 'tag', text: keyword }))) : null,
     h('section', { class: 'worklog-summary' }, h('pre', { text: summary.markdown })))
 }
 

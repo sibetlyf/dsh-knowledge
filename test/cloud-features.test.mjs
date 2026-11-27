@@ -50,9 +50,11 @@ test('team worklogs and automation state persist', () => {
     const second = store.upsertWorklog({ baseId: 'default', userName: 'alice', day: '2026-11-26', revision: 2, markdown: '# 日报\n\n完成多格式解析。\n\n补充日报。' })
     assert.equal(second.revision, 2)
     assert.equal(store.listWorklogs('default', '2026-11-26', '2026-11-26').length, 1)
-    const summary = store.createWorklogSummary({ baseId: 'default', fromDay: '2026-11-26', toDay: '2026-11-26', markdown: '# 团队汇总', engine: 'extractive' })
+    const summary = store.createWorklogSummary({ baseId: 'default', fromDay: '2026-11-26', toDay: '2026-11-26', markdown: '# 团队汇总', engine: 'extractive', keywords: ['发布', '审批'], wikiPageId: 'wiki-1' })
     assert.equal(store.listWorklogSummaries('default').length, 1)
-    assert.equal(store.updateWorklogSummary(summary.id, { status: 'published' }).status, 'published')
+    assert.match(summary.keywords, /发布/u)
+    assert.equal(summary.wiki_page_id, 'wiki-1')
+    assert.equal(store.updateWorklogSummary(summary.id, { status: 'published', keywords: ['发布'] }).status, 'published')
     store.setAutomationState('auto-wiki:default', '2026-11-26T00:00:00Z')
     assert.equal(store.getAutomationState('auto-wiki:default'), '2026-11-26T00:00:00Z')
   } finally {

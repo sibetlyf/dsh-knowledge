@@ -634,6 +634,29 @@ function worklogEvidence(rows) {
   return rows.map(row => `## ${row.day} · ${row.user_name}\n\n${String(row.markdown ?? '').slice(0, 6_000)}`).join('\n\n')
 }
 
+function parseModelObject(text) {
+  if (typeof text !== 'string') return undefined
+  const candidate = text.trim().replace(/^```(?:json)?\s*/iu, '').replace(/\s*```$/u, '')
+  const start = candidate.indexOf('{')
+  const end = candidate.lastIndexOf('}')
+  if (start < 0 || end <= start) return undefined
+  try { return JSON.parse(candidate.slice(start, end + 1)) } catch { return undefined }
+}
+
+function cleanKeywords(value) {
+  if (!Array.isArray(value)) return []
+  return [...new Set(value.map(item => String(item ?? '').trim()).filter(item => item.length >= 2 && item.length <= 40))].slice(0, 20)
+}
+
+function fallbackKeywords(rows) {
+  const text = rows.map(row => String(row.markdown ?? '')).join('\n')
+  const words = text.match(/[\p{Script=Han}]{2,8}|[A-Za-z][A-Za-z0-9_-]{2,}/gu) ?? []
+  const stop = new Set(['工作', '日报', '今日', '完成', '进度', '项目', '团队', '进行', '已经', '以及', '其他', '相关'])
+  const counts = new Map()
+  for (const word of words) if (!stop.has(word.toLowerCase())) counts.set(word, (counts.get(word) ?? 0) + 1)
+  return [...counts.entries()].sort((a, b) => b[1] - a[1] || b[0].length - a[0].length).map(([word]) => word).slice(0, 12)
+}
+
 async function summarizeTeamWorklogs({ baseId, fromDay, toDay, actor, force = false }) {
   const base = await provider.getKnowledgeBase(baseId)
   if (base === undefined || base.status !== 'active') throw new HttpError(404, '知识库不存在')
@@ -644,20 +667,27 @@ async function summarizeTeamWorklogs({ baseId, fromDay, toDay, actor, force = fa
   const evidence = worklogEvidence(logs)
   const fallback = `# 团队工作日报总结 · ${from} 至 ${to}\n\n> 自动汇总草稿，请人工审核。\n\n## 已汇总成员\n\n${[...new Set(logs.map(row => row.user_name))].map(name => `- ${name}`).join('\n')}\n\n## 日报摘录\n\n${logs.map(row => `### ${row.day} · ${row.user_name}\n\n${String(row.markdown ?? '').slice(0, 1_200)}`).join('\n\n')}`
   const generated = await chatCompletion([
-    { role: 'system', content: '你是企业团队日报编辑。只根据给定成员日报总结团队进展、阻塞和下一步；按成员和日期保留可核验事实，不编造，不忽略未完成事项。输出 Markdown，结论后附 [成员/日期]。' },
+    { role: 'system', content: '你是企业团队知识编辑。只根据给定日报，输出严格 JSON，不要 Markdown 代码围栏或额外解释：{"summary":"团队日报总结 Markdown，含进展、阻塞、下一步，按成员和日期","keywords":["3-20个可检索关键词或实体"],"wiki":{"title":"Wiki 标题","markdown":"团队 Wiki 草稿 Markdown，含主题、关键结论、待确认事项和来源"}}。不编造，不忽略未完成事项。' },
     { role: 'user', content: `日期范围：${from} 至 ${to}\n\n团队日报：\n${evidence}` },
-  ], { maxTokens: 1800 }).catch(() => undefined)
-  const summary = team.findWorklogSummary(baseId, from, to) === undefined
-    ? team.createWorklogSummary({
-      baseId,
-      fromDay: from,
-      toDay: to,
-      markdown: generated ?? fallback,
-      engine: generated === undefined ? 'extractive' : 'model',
-    })
-    : team.updateWorklogSummary(team.findWorklogSummary(baseId, from, to).id, { markdown: generated ?? fallback, status: 'draft' })
+  ], { maxTokens: 2200 }).catch(() => undefined)
+  const parsed = parseModelObject(generated)
+  const summaryMarkdown = typeof parsed?.summary === 'string' && parsed.summary.trim() !== '' ? parsed.summary.trim() : fallback
+  const keywords = cleanKeywords(parsed?.keywords).length > 0 ? cleanKeywords(parsed?.keywords) : fallbackKeywords(logs)
+  const wikiMarkdown = typeof parsed?.wiki?.markdown === 'string' && parsed.wiki.markdown.trim() !== '' ? parsed.wiki.markdown.trim() : summaryMarkdown
+  const wikiTitle = typeof parsed?.wiki?.title === 'string' && parsed.wiki.title.trim() !== '' ? parsed.wiki.title.trim().slice(0, 240) : `团队日报 Wiki · ${from}${from === to ? '' : ` ~ ${to}`}`
+  const existing = team.findWorklogSummary(baseId, from, to)
+  const summary = existing === undefined
+    ? team.createWorklogSummary({ baseId, fromDay: from, toDay: to, markdown: summaryMarkdown, engine: parsed === undefined ? 'extractive' : 'model', keywords })
+    : team.updateWorklogSummary(existing.id, { markdown: summaryMarkdown, status: 'draft', keywords })
+  const slug = `worklog-wiki-${from}${from === to ? '' : `-${to}`}`
+  const sources = logs.map(row => ({ kind: 'worklog', sourceId: `${row.user_name}/${row.day}`, title: `${row.user_name} · ${row.day}`, excerpt: String(row.markdown ?? '').slice(0, 500), lineStart: null, lineEnd: null }))
+  const wikiExisting = team.findWikiPage(baseId, slug)
+  const wikiPage = wikiExisting === undefined || wikiExisting.status === 'published'
+    ? team.createWikiPage({ baseId, slug: wikiExisting === undefined ? slug : `${slug}-${Date.now().toString(36)}`, title: wikiTitle, content: wikiMarkdown, createdBy: actor ?? null, status: 'draft', sources })
+    : team.updateWikiPage(wikiExisting.id, { title: wikiTitle, content: wikiMarkdown, status: 'draft', updatedBy: actor ?? null, sources })
+  team.updateWorklogSummary(summary.id, { wikiPageId: wikiPage.id })
   team.audit(actor ?? null, 'worklog.summarize', summary.id, `${from}..${to} ${logs.length} 天`)
-  return { summary, members: [...new Set(logs.map(row => row.user_name))], days: logs.length, citations: logs.map(row => `${row.user_name}/${row.day}`) }
+  return { summary: team.getWorklogSummary(summary.id), members: [...new Set(logs.map(row => row.user_name))], days: logs.length, keywords, wiki: wikiPage, citations: logs.map(row => `${row.user_name}/${row.day}`) }
 }
 
 async function upsertAutoWiki(baseId) {
@@ -684,30 +714,39 @@ async function upsertAutoWiki(baseId) {
   return page
 }
 
-async function runAutomation({ force = false } = {}) {
-  const result = { wiki: [], worklog: [], skipped: 0 }
-  const bases = (await provider.listKnowledgeBases()).filter(base => base.status === 'active')
-  for (const base of bases) {
-    try {
-      const page = await upsertAutoWiki(base.id)
-      if (page !== undefined) result.wiki.push({ baseId: base.id, pageId: page.id })
-      else result.skipped += 1
-    } catch (error) {
-      result.wiki.push({ baseId: base.id, error: error.message })
+async function runAutomation({ force = false, tasks = {} } = {}) {
+  const auto = {
+    wiki: process.env.TEAM_AUTO_WIKI !== '0',
+    worklog: process.env.TEAM_AUTO_WORKLOG !== '0',
+  }
+  const runWiki = typeof tasks.wiki === 'boolean' ? tasks.wiki : (force ? true : auto.wiki)
+  const runWorklog = typeof tasks.worklog === 'boolean' ? tasks.worklog : (force ? true : auto.worklog)
+  const result = { wiki: [], worklog: [], skipped: 0, tasks: { wiki: runWiki, worklog: runWorklog } }
+  if (runWiki) {
+    const bases = (await provider.listKnowledgeBases()).filter(base => base.status === 'active')
+    for (const base of bases) {
+      try {
+        const page = await upsertAutoWiki(base.id)
+        if (page !== undefined) result.wiki.push({ baseId: base.id, pageId: page.id })
+        else result.skipped += 1
+      } catch (error) {
+        result.wiki.push({ baseId: base.id, error: error.message })
+      }
     }
   }
   const today = new Date().toISOString().slice(0, 10)
   const autoHour = Math.max(0, Math.min(23, Number(process.env.TEAM_WORKLOG_SUMMARY_HOUR ?? 19)))
-  if (force || new Date().getHours() >= autoHour) {
+  if (runWorklog && (force || new Date().getHours() >= autoHour)) {
     const stateKey = `worklog-summary:${today}`
     if (force || team.getAutomationState(stateKey) === undefined) {
+      const bases = (await provider.listKnowledgeBases()).filter(base => base.status === 'active')
       let generated = false
       for (const base of bases) {
         const logs = team.listWorklogs(base.id, today, today)
         if (logs.length === 0) continue
         try {
           const summary = await summarizeTeamWorklogs({ baseId: base.id, fromDay: today, toDay: today, actor: null, force })
-          result.worklog.push({ baseId: base.id, summaryId: summary.summary.id })
+          result.worklog.push({ baseId: base.id, summaryId: summary.summary.id, wikiPageId: summary.wiki?.id })
           generated = true
         } catch (error) {
           result.worklog.push({ baseId: base.id, error: error.message })
@@ -752,7 +791,7 @@ async function handle(req, res) {
       }
       if (!canWrite) throw new HttpError(403, 'Token 没有 write 权限')
       const body = await readJson(req)
-      const baseId = String(body.baseId ?? 'default')
+      const baseId = process.env.TEAM_WORKLOG_BASE ?? String(body.baseId ?? 'default')
       const day = validDay(body.day)
       if (day === '') throw new HttpError(400, 'day 必须是 YYYY-MM-DD')
       const markdown = String(body.markdown ?? '').trim()
@@ -910,7 +949,14 @@ async function handle(req, res) {
 
   if (path === '/api/automation/run' && method === 'POST') {
     requireRole(session, ['admin'])
-    return sendJson(res, 200, await runAutomation({ force: true }))
+    const body = await readJson(req).catch(() => ({}))
+    return sendJson(res, 200, await runAutomation({
+      force: true,
+      tasks: {
+        ...(typeof body.wiki === 'boolean' ? { wiki: body.wiki } : {}),
+        ...(typeof body.worklog === 'boolean' ? { worklog: body.worklog } : {}),
+      },
+    }))
   }
 
   if (path === '/api/files' || path.startsWith('/api/files/')) {
