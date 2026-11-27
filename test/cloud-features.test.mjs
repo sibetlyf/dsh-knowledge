@@ -5,6 +5,8 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import test from 'node:test'
 import { TeamStore } from '../cloud/team-store.mjs'
+import { applyStoredModelSettings, modelSettingsStatus, saveModelSettings } from '../cloud/model-settings.mjs'
+import { chatCompletion } from '../cloud/llm.mjs'
 import { extractText } from '../cloud/ingest.mjs'
 import { zipSync, strToU8 } from 'fflate'
 
@@ -59,6 +61,100 @@ test('team worklogs and automation state persist', () => {
     assert.equal(store.getAutomationState('auto-wiki:default'), '2026-11-26T00:00:00Z')
   } finally {
     store.close()
+  }
+})
+
+test('cloud model settings persist limits and never expose the API key', () => {
+  const store = new TeamStore(':memory:')
+  const previous = {
+    base: process.env.TEAM_LLM_API_BASE,
+    model: process.env.TEAM_LLM_MODEL,
+    key: process.env.TEAM_LLM_API_KEY,
+    maxInput: process.env.TEAM_LLM_MAX_INPUT_TOKENS,
+    maxOutput: process.env.TEAM_LLM_MAX_OUTPUT_TOKENS,
+    format: process.env.TEAM_LLM_OUTPUT_FORMAT,
+    instructions: process.env.TEAM_LLM_OUTPUT_INSTRUCTIONS,
+  }
+  try {
+    const saved = saveModelSettings(store, {
+      baseUrl: 'https://api.example.com/v1',
+      model: 'deepseek-chat',
+      apiKey: 'secret-value',
+      maxInputTokens: 4096,
+      maxOutputTokens: 512,
+      outputFormat: 'custom',
+      outputInstructions: '先结论，再列风险和待办。',
+    })
+    assert.equal(saved.enabled, true)
+    assert.equal(saved.maxInputTokens, 4096)
+    assert.equal(saved.maxOutputTokens, 512)
+    assert.equal(saved.outputFormat, 'custom')
+    assert.equal(saved.hasApiKey, true)
+    assert.equal(JSON.stringify(saved).includes('secret-value'), false)
+    applyStoredModelSettings(store)
+    assert.equal(process.env.TEAM_LLM_MAX_INPUT_TOKENS, '4096')
+    assert.equal(process.env.TEAM_LLM_MAX_OUTPUT_TOKENS, '512')
+    assert.equal(process.env.TEAM_LLM_OUTPUT_FORMAT, 'custom')
+    assert.equal(modelSettingsStatus(store).outputInstructions, '先结论，再列风险和待办。')
+    assert.throws(() => saveModelSettings(store, { baseUrl: 'file:///tmp/x', model: 'm' }), /http/u)
+    assert.throws(() => saveModelSettings(store, { baseUrl: 'https://api.example.com/v1', model: 'm', maxOutputTokens: 1 }), /最大输出 token/u)
+  } finally {
+    store.close()
+    for (const [key, value] of Object.entries({
+      TEAM_LLM_API_BASE: previous.base,
+      TEAM_LLM_MODEL: previous.model,
+      TEAM_LLM_API_KEY: previous.key,
+      TEAM_LLM_MAX_INPUT_TOKENS: previous.maxInput,
+      TEAM_LLM_MAX_OUTPUT_TOKENS: previous.maxOutput,
+      TEAM_LLM_OUTPUT_FORMAT: previous.format,
+      TEAM_LLM_OUTPUT_INSTRUCTIONS: previous.instructions,
+    })) {
+      if (value === undefined) delete process.env[key]
+      else process.env[key] = value
+    }
+  }
+})
+
+test('cloud model call applies input/output budgets and custom format', async () => {
+  const keys = {
+    base: 'TEAM_LLM_API_BASE',
+    model: 'TEAM_LLM_MODEL',
+    key: 'TEAM_LLM_API_KEY',
+    maxInput: 'TEAM_LLM_MAX_INPUT_TOKENS',
+    maxOutput: 'TEAM_LLM_MAX_OUTPUT_TOKENS',
+    format: 'TEAM_LLM_OUTPUT_FORMAT',
+    instructions: 'TEAM_LLM_OUTPUT_INSTRUCTIONS',
+  }
+  const previous = Object.fromEntries(Object.values(keys).map(key => [key, process.env[key]]))
+  const originalFetch = globalThis.fetch
+  let request
+  try {
+    process.env[keys.base] = 'https://api.example.com/v1'
+    process.env[keys.model] = 'test-model'
+    process.env[keys.key] = 'test-key'
+    process.env[keys.maxInput] = '600'
+    process.env[keys.maxOutput] = '333'
+    process.env[keys.format] = 'custom'
+    process.env[keys.instructions] = '只输出一句话'
+    globalThis.fetch = async (url, init) => {
+      request = { url, body: JSON.parse(init.body) }
+      return new Response(JSON.stringify({ choices: [{ message: { content: 'ok' } }] }), { status: 200, headers: { 'content-type': 'application/json' } })
+    }
+    const answer = await chatCompletion([
+      { role: 'system', content: '系统提示' },
+      { role: 'user', content: '证据'.repeat(5000) },
+    ])
+    assert.equal(answer, 'ok')
+    assert.equal(request.body.max_tokens, 333)
+    assert.match(request.body.messages[0].content, /只输出一句话/u)
+    const chars = request.body.messages.reduce((sum, message) => sum + message.content.length, 0)
+    assert.ok(chars < 3000, `request should be bounded, got ${chars} chars`)
+  } finally {
+    globalThis.fetch = originalFetch
+    for (const [key, value] of Object.entries(previous)) {
+      if (value === undefined) delete process.env[key]
+      else process.env[key] = value
+    }
   }
 })
 

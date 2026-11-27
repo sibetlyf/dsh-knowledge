@@ -147,7 +147,7 @@ function renderSidebar() {
       ...(baseList.length === 0 ? [h('p', { class: 'note', text: '还没有可访问的知识库。' })] : baseList)),
     h('div', { class: 'sidebar-foot' },
       state.me.canEdit && state.view === 'documents' ? h('button', { type: 'button', class: 'side-btn accent', onClick: openCreate, text: state.baseId === null ? '+ 新建文档' : '+ 在这个库中新建' }) : null,
-      state.me.isAdmin ? h('button', { type: 'button', class: 'side-btn', onClick: () => void openAdmin(), text: '成员与邀请' }) : null,
+      state.me.isAdmin ? h('button', { type: 'button', class: 'side-btn', onClick: () => void openAdmin(), text: '成员与设置' }) : null,
       h('button', { type: 'button', class: 'side-btn ghost', onClick: () => void refreshAll(), text: '刷新' }),
       h('div', { class: 'build-stamp', title: '服务端 build ID', text: state.meta ? `build ${state.meta.buildId}` : 'build …' })),
   )
@@ -928,11 +928,12 @@ function sourceStatusLabel(status) {
 
 async function openAdmin() {
   try {
-    const [userResult, tokenResult] = await Promise.all([
+    const [userResult, tokenResult, modelResult] = await Promise.all([
       api('/api/admin/users'),
       api('/api/admin/tokens'),
+      api('/api/admin/model'),
     ])
-    state.admin = { open: true, users: userResult.users, tokens: tokenResult.tokens, error: '' }
+    state.admin = { open: true, users: userResult.users, tokens: tokenResult.tokens, model: modelResult.model, error: '' }
     render()
   } catch (error) { toast(error.message, 'error') }
 }
@@ -978,6 +979,37 @@ function renderAdmin() {
   }
   const tokenName = h('input', { placeholder: '例如：我的 DSH', maxlength: '100' })
   const tokenBox = h('div', { class: 'invite-box' })
+  const model = state.admin.model ?? {}
+  const modelBase = h('input', { type: 'url', value: model.baseUrl ?? '', placeholder: 'https://api.example.com/v1' })
+  const modelName = h('input', { value: model.model ?? '', placeholder: '例如 deepseek-chat', maxlength: '200' })
+  const modelKey = h('input', { type: 'password', value: '', placeholder: model.hasApiKey ? '已保存 API Key；留空保持不变' : 'API Key（可选）', autocomplete: 'new-password' })
+  const clearModelKey = h('input', { type: 'checkbox' })
+  const modelMaxInput = h('input', { type: 'number', min: '256', max: '128000', step: '1', value: String(model.maxInputTokens ?? 16000) })
+  const modelMaxOutput = h('input', { type: 'number', min: '64', max: '32000', step: '1', value: String(model.maxOutputTokens ?? 2400) })
+  const modelFormat = h('select', {},
+    h('option', { value: 'auto', selected: model.outputFormat === 'auto', text: '自动（问答/Wiki Markdown；日报 JSON）' }),
+    h('option', { value: 'markdown', selected: model.outputFormat === 'markdown', text: 'Markdown' }),
+    h('option', { value: 'text', selected: model.outputFormat === 'text', text: '纯文本' }),
+    h('option', { value: 'json', selected: model.outputFormat === 'json', text: 'JSON' }),
+    h('option', { value: 'custom', selected: model.outputFormat === 'custom', text: '自定义' }))
+  const modelInstructions = h('textarea', { class: 'model-instructions', rows: '3', maxlength: '4000', placeholder: '例如：先给结论，再列风险和待办；不要使用表格' }, model.outputInstructions ?? '')
+  const saveModel = async () => {
+    try {
+      const result = await api('/api/admin/model', { method: 'PUT', body: JSON.stringify({
+        baseUrl: modelBase.value,
+        model: modelName.value,
+        apiKey: modelKey.value,
+        clearApiKey: clearModelKey.checked,
+        maxInputTokens: Number(modelMaxInput.value),
+        maxOutputTokens: Number(modelMaxOutput.value),
+        outputFormat: modelFormat.value,
+        outputInstructions: modelInstructions.value,
+      }) })
+      state.admin.model = result.model
+      render()
+      toast(result.model.enabled ? '模型设置已保存并生效' : '模型设置已保存；当前仍未启用')
+    } catch (error) { toast(error.message, 'error') }
+  }
   const tokenRows = (state.admin.tokens ?? []).map(token => h('div', { class: 'savebar' },
     h('span', { class: 'grow', text: `${token.name} · ${new Date(token.createdAt).toLocaleDateString()}${token.revokedAt ? ' · 已撤销' : ''}` }),
     token.revokedAt ? null : h('button', {
@@ -1010,8 +1042,8 @@ function renderAdmin() {
     } catch (error) { toast(error.message, 'error') }
   }
   return h('div', { class: 'modal-backdrop', onClick: event => { if (event.target === event.currentTarget) close() } },
-    h('div', { class: 'modal', role: 'dialog', 'aria-modal': 'true', 'aria-label': '成员与邀请' },
-      h('div', { class: 'modal-head' }, h('h2', { text: '成员与邀请' }), h('button', { type: 'button', class: 'icon-btn', onClick: close, text: '关闭' })),
+    h('div', { class: 'modal', role: 'dialog', 'aria-modal': 'true', 'aria-label': '成员与设置' },
+      h('div', { class: 'modal-head' }, h('h2', { text: '成员与设置' }), h('button', { type: 'button', class: 'icon-btn', onClick: close, text: '关闭' })),
       h('p', { class: 'note', text: '邀请是一次性链接；成员领取后用自己的账号登录。阅读者不能创建或保存。' }),
       h('table', { class: 'users' }, h('thead', {}, h('tr', {}, h('th', { text: '成员' }), h('th', { text: '邮箱' }), h('th', { text: '角色' }), h('th', { text: '状态' }), h('th', { text: '' }))), h('tbody', {}, ...users)),
       h('div', { class: 'form-grid' },
@@ -1024,7 +1056,22 @@ function renderAdmin() {
         h('label', {}, 'Token 名称', tokenName),
         h('button', { type: 'button', class: 'btn', onClick: () => void createToken(), text: '生成 DSH Token' })),
       tokenBox,
-      tokenRows.length > 0 ? h('div', { style: 'margin-top:12px' }, h('p', { class: 'note', text: '已签发的 Token' }), ...tokenRows) : null))
+      tokenRows.length > 0 ? h('div', { style: 'margin-top:12px' }, h('p', { class: 'note', text: '已签发的 Token' }), ...tokenRows) : null,
+      h('div', { class: 'modal-head', style: 'margin-top:18px' }, h('h2', { text: '模型设置（可选）' })),
+      h('p', { class: 'note', text: '用于云端问答、Wiki 和团队日报汇总。保存后立即生效并持久化；API Key 不会从接口返回。未配置时使用抽取式证据。' }),
+      h('div', { class: 'form-grid' },
+        h('label', {}, 'OpenAI 兼容接口', modelBase),
+        h('label', {}, '模型名', modelName),
+        h('label', {}, 'API Key', modelKey),
+        h('label', { class: 'note' }, clearModelKey, ' 清除已保存的 API Key'),
+        h('label', {}, '最大输入 token（估算）', modelMaxInput),
+        h('label', {}, '最大输出 token', modelMaxOutput),
+        h('label', {}, '输出格式', modelFormat),
+        h('label', {}, '自定义输出说明', modelInstructions)),
+      h('p', { class: 'note', text: '输入预算会按估算截断检索证据，避免超限；输出 token 对所有云端模型调用生效。日报汇总依赖 JSON 字段，选择非 JSON 格式时会退化为抽取式汇总。' }),
+      h('div', { class: 'savebar' },
+        h('span', { class: 'grow note', text: `${model.enabled ? '当前已启用' : '当前未启用'} · ${model.source === 'database' ? '页面配置' : model.source === 'environment' ? '环境变量' : '无配置'} · 输入 ${model.maxInputTokens ?? 16000} / 输出 ${model.maxOutputTokens ?? 2400} · ${model.outputFormat ?? 'auto'}${model.hasApiKey ? ' · Key 已保存' : ' · 无 Key'}` }),
+        h('button', { type: 'button', class: 'btn primary', onClick: () => void saveModel(), text: '保存模型设置' }))))
 }
 
 window.addEventListener('keydown', event => {

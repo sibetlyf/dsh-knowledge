@@ -582,7 +582,18 @@ TEAM_AUTO_INTERVAL_MINUTES=30
 TEAM_LLM_API_BASE=
 TEAM_LLM_API_KEY=
 TEAM_LLM_MODEL=
+TEAM_LLM_MAX_INPUT_TOKENS=16000
+TEAM_LLM_MAX_OUTPUT_TOKENS=2400
+TEAM_LLM_OUTPUT_FORMAT=auto
+TEAM_LLM_OUTPUT_INSTRUCTIONS=
 ```
+
+管理员也可以在云端「成员与设置 → 模型设置」中填写 OpenAI 兼容接口、模型名、API Key、最大输入/输出 token 和输出格式。页面配置会持久化到 `team.sqlite`，保存后立即生效；API Key 不会从接口返回。
+
+- 最大输入 token 会按字符估算并截断检索证据，避免超上下文。
+- 最大输出 token 对所有云端模型调用生效。
+- 输出格式为 `auto` 时，问答/Wiki 使用 Markdown，团队日报结构化任务使用 JSON。
+- 自定义格式适合问答和 Wiki；如果给团队日报选择非 JSON 格式，会退化为抽取式汇总。
 
 ### 8.3 备份
 

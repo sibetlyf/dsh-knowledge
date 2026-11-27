@@ -10,6 +10,7 @@ import { registerKnowledgeApi } from '../lib/api.js'
 import { renderSharedMarkdown } from '../lib/notes/share-markdown.js'
 import { extractText } from './ingest.mjs'
 import { chatCompletion, llmConfig } from './llm.mjs'
+import { applyStoredModelSettings, modelSettingsStatus, saveModelSettings } from './model-settings.mjs'
 import { syncRepositorySource } from './sources.mjs'
 import { TeamError, TeamStore } from './team-store.mjs'
 import { renderAppPage, renderErrorPage, renderInvitePage, renderLoginPage, renderSetupPage, roleLabel } from './views.mjs'
@@ -34,6 +35,7 @@ const teamDbPath = resolve(process.env.TEAM_TEAM_DB?.trim() || join(dataDir, 'te
 mkdirSync(dataDir, { recursive: true, mode: 0o700 })
 mkdirSync(filesDir, { recursive: true, mode: 0o700 })
 const team = new TeamStore(teamDbPath)
+applyStoredModelSettings(team)
 const provider = new LocalKnowledgeProvider(kbDbPath)
 let closing = false
 
@@ -64,7 +66,7 @@ function readBuildInfo() {
     buildId: `${version}-${hash}`,
     buildHash: hash,
     commit: process.env.TEAM_BUILD_COMMIT?.trim() || '',
-    features: ['files', 'sync-v1', 'search-v1', 'qa-citations-v1', 'wiki-review-v1', 'worklogs-v1', 'automation-v1'],
+    features: ['files', 'sync-v1', 'search-v1', 'qa-citations-v1', 'wiki-review-v1', 'worklogs-v1', 'automation-v1', 'sources-v1', 'model-settings-v1'],
   }
 }
 
@@ -669,7 +671,7 @@ async function summarizeTeamWorklogs({ baseId, fromDay, toDay, actor, force = fa
   const generated = await chatCompletion([
     { role: 'system', content: '你是企业团队知识编辑。只根据给定日报，输出严格 JSON，不要 Markdown 代码围栏或额外解释：{"summary":"团队日报总结 Markdown，含进展、阻塞、下一步，按成员和日期","keywords":["3-20个可检索关键词或实体"],"wiki":{"title":"Wiki 标题","markdown":"团队 Wiki 草稿 Markdown，含主题、关键结论、待确认事项和来源"}}。不编造，不忽略未完成事项。' },
     { role: 'user', content: `日期范围：${from} 至 ${to}\n\n团队日报：\n${evidence}` },
-  ], { maxTokens: 2200 }).catch(() => undefined)
+  ], { maxTokens: 2200, format: 'json' }).catch(() => undefined)
   const parsed = parseModelObject(generated)
   const summaryMarkdown = typeof parsed?.summary === 'string' && parsed.summary.trim() !== '' ? parsed.summary.trim() : fallback
   const keywords = cleanKeywords(parsed?.keywords).length > 0 ? cleanKeywords(parsed?.keywords) : fallbackKeywords(logs)
@@ -1290,6 +1292,23 @@ async function handle(req, res) {
     provider.revokeApiToken(tokenMatch[1])
     team.audit(session.user.id, 'token.revoke', tokenMatch[1])
     return sendJson(res, 200, { ok: true })
+  }
+
+  if (path === '/api/admin/model' && method === 'GET') {
+    requireRole(session, ['admin'])
+    return sendJson(res, 200, { model: modelSettingsStatus(team) })
+  }
+
+  if (path === '/api/admin/model' && method === 'PUT') {
+    requireRole(session, ['admin'])
+    const body = await readJson(req)
+    try {
+      const status = saveModelSettings(team, body)
+      team.audit(session.user.id, 'model.update', null, JSON.stringify({ enabled: status.enabled, source: status.source, hasApiKey: status.hasApiKey }))
+      return sendJson(res, 200, { model: status })
+    } catch (error) {
+      throw new HttpError(400, error instanceof Error ? error.message : '模型设置无效')
+    }
   }
 
   if (path === '/api/admin/users' && method === 'GET') {

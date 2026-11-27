@@ -134,6 +134,12 @@ TEAM_ADMIN_NAME=管理员
 | `TEAM_LLM_API_BASE` | 可选，OpenAI 兼容接口，例如 `https://api.example.com/v1`；未配置时问答/Wiki 使用抽取式证据 |
 | `TEAM_LLM_API_KEY` | 可选模型 API Key |
 | `TEAM_LLM_MODEL` | 可选模型名；配置后才能生成模型回答 |
+| `TEAM_LLM_MAX_INPUT_TOKENS` | 输入预算，默认 16000；按字符估算并截断证据 |
+| `TEAM_LLM_MAX_OUTPUT_TOKENS` | 输出预算，默认 2400；对所有云端模型调用生效 |
+| `TEAM_LLM_OUTPUT_FORMAT` | `auto` / `markdown` / `text` / `json` / `custom`，默认 `auto` |
+| `TEAM_LLM_OUTPUT_INSTRUCTIONS` | 自定义输出说明，最长 4000 字符 |
+
+登录管理员后，打开「成员与设置 → 模型设置」可在页面直接配置接口、模型名、API Key、输入/输出预算和输出格式。页面配置持久化到 `team.sqlite`，保存后立即生效；API Key 不会从接口返回。`auto` 时问答/Wiki 使用 Markdown，团队日报结构化任务使用 JSON；手动选择非 JSON 时，日报汇总会退化为抽取式结果。
 
 ### GitHub / Gitee 数据源
 

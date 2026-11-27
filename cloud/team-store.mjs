@@ -202,6 +202,11 @@ export class TeamStore {
         value TEXT NOT NULL,
         updated_at TEXT NOT NULL
       );
+      CREATE TABLE IF NOT EXISTS app_settings (
+        key TEXT PRIMARY KEY,
+        value TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      );
     `)
     const fileColumns = this.db.prepare('PRAGMA table_info(files)').all().map(column => column.name)
     if (!fileColumns.includes('user_name')) this.db.exec('ALTER TABLE files ADD COLUMN user_name TEXT')
@@ -513,6 +518,20 @@ export class TeamStore {
   getAutomationState(key) {
     const row = this.db.prepare('SELECT * FROM automation_state WHERE key=?').get(key)
     return row === undefined ? undefined : row.value
+  }
+
+  getSetting(key) {
+    const row = this.db.prepare('SELECT value FROM app_settings WHERE key=?').get(key)
+    return row === undefined ? undefined : row.value
+  }
+
+  setSetting(key, value) {
+    this.db.prepare(`INSERT INTO app_settings (key,value,updated_at) VALUES (?,?,?)
+      ON CONFLICT(key) DO UPDATE SET value=excluded.value, updated_at=excluded.updated_at`).run(key, String(value), new Date().toISOString())
+  }
+
+  deleteSetting(key) {
+    this.db.prepare('DELETE FROM app_settings WHERE key=?').run(key)
   }
 
   setAutomationState(key, value) {
