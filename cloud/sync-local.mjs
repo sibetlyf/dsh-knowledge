@@ -559,7 +559,7 @@ async function main() {
     try {
       const team = await syncTeamWorklogDocs(local, remote, map)
       await saveMap(map)
-      console.log(`\n团队日报镜像：成员 ${team.members}，汇总 ${team.summaries}`)
+      console.log(`\n团队日报镜像：新增/更新成员 ${team.members}，汇总 ${team.summaries}`)
     } catch (error) {
       console.warn(`团队日报镜像跳过：${error.message}`)
     }

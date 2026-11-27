@@ -569,6 +569,16 @@ dsh plugin --profile web list
 - 可选：Caddy/Nginx HTTPS 反向代理
 - 可选：systemd 或 Docker
 
+Linux 一键安装：
+
+```bash
+curl -fsSL \
+  https://raw.githubusercontent.com/sibetlyf/dsh-knowledge/main/cloud/deploy/install.sh \
+  | sudo bash -s -- --domain kb.example.com
+```
+
+脚本自动检测 apt/dnf/yum/apk/pacman、安装 Node.js 24、创建 `teamkb` 用户、安装应用和 systemd 服务、生成管理员密码并执行健康检查；失败会回滚旧应用。无 systemd 的环境使用 Docker 或 `--no-start`。
+
 环境变量示例：
 
 ```text

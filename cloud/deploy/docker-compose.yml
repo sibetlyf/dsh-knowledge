@@ -1,0 +1,21 @@
+# 从仓库根目录运行：
+#   TEAM_APP_DIR="$PWD" docker compose -f cloud/deploy/docker-compose.yml up -d --build
+# 或安装包解压目录：
+#   TEAM_APP_DIR=/opt/team-kb/app docker compose -f /opt/team-kb/app/cloud/deploy/docker-compose.yml up -d --build
+services:
+  team-kb:
+    build:
+      context: ${TEAM_APP_DIR:-../..}
+      dockerfile: cloud/Dockerfile
+    env_file:
+      - ${TEAM_ENV_FILE:-/etc/team-kb.env}
+    environment:
+      TEAM_HOST: 0.0.0.0
+      TEAM_DATA_DIR: /data
+    ports:
+      - "127.0.0.1:${TEAM_PORT:-8787}:8787"
+    user: "1000:1000"
+    volumes:
+      - ${TEAM_DATA_DIR:-/opt/team-kb/data}:/data
+    restart: unless-stopped
+    init: true

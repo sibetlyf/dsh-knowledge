@@ -20,9 +20,54 @@
 - 文档支持 Markdown 阅读、搜索、编辑、下载；保留原有知识库版本记录。
 - 文档级分享、整库公开分享属于 DSH 侧功能；这个独立服务默认只对登录成员开放，不暴露匿名分享。
 
-第一版没有逐字实时协同、没有在线附件上传、没有 SSO。适合 3–10 人的团队知识整理；并发很高或需要附件库时再扩展。
+当前支持文件库上传、文档/文件解析、问答、Wiki、数据源和团队日报；没有逐字实时协同、SSO。
 
-## 快速开始
+## 一键部署
+
+Linux 原生安装（Debian/Ubuntu、RHEL/CentOS/Rocky/Alma/Fedora、Alpine、Arch 等，自动安装 Node.js 24 并注册 systemd）：
+
+```bash
+curl -fsSL \
+  https://raw.githubusercontent.com/sibetlyf/dsh-knowledge/main/cloud/deploy/install.sh \
+  | sudo bash
+```
+
+带域名安装：
+
+```bash
+curl -fsSL \
+  https://raw.githubusercontent.com/sibetlyf/dsh-knowledge/main/cloud/deploy/install.sh \
+  | sudo bash -s -- --domain kb.example.com
+```
+
+脚本会：
+
+- 检测包管理器并安装 curl/tar/xz；
+- Node.js 低于 24 时安装官方 Node 24 二进制；
+- 创建 `teamkb` 系统用户；
+- 应用安装到 `/opt/team-kb/app`；
+- 数据放到 `/opt/team-kb/data`；
+- 环境文件 `/etc/team-kb.env`；
+- 首次安装生成随机管理员密码，写入 `/root/team-kb-admin.txt`；
+- 安装生产依赖并注册 `team-kb.service`；
+- 健康检查失败时回滚旧应用。
+
+安装后：
+
+```bash
+systemctl status team-kb
+journalctl -u team-kb -n 100 --no-pager
+```
+
+没有 systemd 的环境可使用上面的 Docker 路径，或：
+
+```bash
+sudo bash install.sh --no-start
+```
+
+默认数据目录是 `/opt/team-kb/data`，不要改成应用目录内部；升级脚本会拒绝覆盖放在应用目录内的数据。
+
+## 手动安装
 
 ### 1. 构建安装包
 
@@ -52,10 +97,12 @@ node -v   # 应为 v24.x
 ### 3. 安装应用
 
 ```bash
-sudo mkdir -p /opt/team-kb/data
+sudo mkdir -p /opt/team-kb/data /opt/team-kb/app
 sudo useradd --system --home /opt/team-kb --shell /usr/sbin/nologin teamkb || true
+sudo tar -xzf /tmp/lemoncat7-dsh-knowledge-2.22.10-custom.1.tgz \
+  --strip-components=1 -C /opt/team-kb/app
 sudo chown -R teamkb:teamkb /opt/team-kb
-sudo -u teamkb npm install --prefix /opt/team-kb --omit=dev --ignore-scripts /tmp/lemoncat7-dsh-knowledge-2.22.10-custom.1.tgz
+sudo -u teamkb npm install --prefix /opt/team-kb/app --omit=dev --ignore-scripts --no-audit --no-fund
 ```
 
 应用入口（按实际 systemd 配置）：
@@ -102,7 +149,7 @@ TEAM_DATA_DIR=/opt/team-kb/data
 复制示例：
 
 ```bash
-sudo cp /opt/team-kb/node_modules/@lemoncat7/dsh-knowledge/cloud/deploy/team-kb.env.example /etc/team-kb.env
+sudo cp /opt/team-kb/app/cloud/deploy/team-kb.env.example /etc/team-kb.env
 sudo chmod 600 /etc/team-kb.env
 ```
 
@@ -240,7 +287,7 @@ sudo chown teamkb:teamkb /opt/team-kb/data/knowledge.sqlite
 ### 6. 启动
 
 ```bash
-sudo -u teamkb env $(cat /etc/team-kb.env | xargs) node /opt/team-kb/node_modules/@lemoncat7/dsh-knowledge/cloud/server.mjs
+sudo -u teamkb env $(cat /etc/team-kb.env | xargs) node /opt/team-kb/app/cloud/server.mjs
 ```
 
 浏览器打开：
@@ -278,6 +325,17 @@ TEAM_TRUST_PROXY=1
 
 ## Docker（可选）
 
+Compose 一键启动（先在 `/etc/team-kb.env` 配置环境）：
+
+```bash
+sudo mkdir -p /opt/team-kb/data
+sudo chown -R 1000:1000 /opt/team-kb/data
+sudo TEAM_APP_DIR=/path/to/package \
+     TEAM_ENV_FILE=/etc/team-kb.env \
+     TEAM_DATA_DIR=/opt/team-kb/data \
+     docker compose -f cloud/deploy/docker-compose.yml up -d --build
+```
+
 在仓库根目录构建（需要先生成 `lib/`）：
 
 ```bash
@@ -312,7 +370,7 @@ cloud/deploy/team-kb.service
 安装：
 
 ```bash
-sudo cp /opt/team-kb/node_modules/@lemoncat7/dsh-knowledge/cloud/deploy/team-kb.service /etc/systemd/system/
+sudo cp /opt/team-kb/app/cloud/deploy/team-kb.service /etc/systemd/system/
 sudo systemctl daemon-reload
 sudo systemctl enable --now team-kb
 sudo systemctl status team-kb
@@ -556,7 +614,7 @@ http://127.0.0.1:8787/knowledge-api/v1
 ## 备份与恢复
 
 ```bash
-sudo /opt/team-kb/node_modules/@lemoncat7/dsh-knowledge/cloud/deploy/backup.sh /opt/team-kb/data /var/backups/team-kb
+sudo /opt/team-kb/app/cloud/deploy/backup.sh /opt/team-kb/data /var/backups/team-kb
 ```
 
 备份包含：
