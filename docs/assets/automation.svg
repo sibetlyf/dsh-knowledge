@@ -1,0 +1,149 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 680" width="1200" height="680" role="img" aria-label="团队日报自动化：本地日报、云端同步、大模型结构化输出、Wiki 与可检索文档">
+  <defs>
+    <linearGradient id="bg3" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#fffdf8"/>
+      <stop offset="0.55" stop-color="#f8fbff"/>
+      <stop offset="1" stop-color="#f5f3ff"/>
+    </linearGradient>
+    <linearGradient id="flow" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#d97706"/>
+      <stop offset="0.55" stop-color="#2563eb"/>
+      <stop offset="1" stop-color="#7c3aed"/>
+    </linearGradient>
+    <filter id="s3" x="-20%" y="-20%" width="140%" height="140%">
+      <feDropShadow dx="0" dy="7" stdDeviation="10" flood-color="#0f172a" flood-opacity="0.07"/>
+    </filter>
+    <marker id="a3" markerWidth="10" markerHeight="10" refX="9" refY="5" orient="auto">
+      <path d="M0,0 L10,5 L0,10 Z" fill="#94a3b8"/>
+    </marker>
+    <style>
+      .t3 { font: 700 28px 'Segoe UI', 'Microsoft YaHei', sans-serif; fill: #0f172a; letter-spacing: -0.4px; }
+      .s3 { font: 400 13.5px 'Segoe UI', 'Microsoft YaHei', sans-serif; fill: #64748b; }
+      .n3 { font: 600 13px 'Segoe UI', 'Microsoft YaHei', sans-serif; fill: #0f172a; }
+      .b3 { font: 400 11.5px 'Segoe UI', 'Microsoft YaHei', sans-serif; fill: #64748b; }
+      .step { font: 700 10px 'Segoe UI', 'Microsoft YaHei', sans-serif; fill: #ffffff; }
+      .out { font: 400 12px 'Segoe UI', 'Microsoft YaHei', sans-serif; fill: #475569; }
+    </style>
+  </defs>
+
+  <rect width="1200" height="680" fill="url(#bg3)"/>
+  <text x="64" y="68" class="t3">团队日报自动化</text>
+  <text x="64" y="94" class="s3">不接 embedding，不接 OCR：本地日报进入云端后，由一次大模型调用同时完成总结、关键词与 Wiki。</text>
+  <rect x="64" y="116" width="100" height="4" rx="2" fill="url(#flow)"/>
+
+  <!-- Flow rail -->
+  <line x1="104" y1="212" x2="1096" y2="212" stroke="#e2e8f0" stroke-width="2"/>
+
+  <!-- Step 1 -->
+  <g filter="url(#s3)">
+    <rect x="64" y="160" width="196" height="104" rx="14" fill="#ffffff" stroke="#e2e8f0"/>
+    <circle cx="86" cy="184" r="12" fill="#d97706"/><text x="81" y="188" class="step">1</text>
+    <text x="106" y="188" class="n3">本地工作日报</text>
+    <text x="82" y="214" class="b3">已整理日报 + 修订号</text>
+    <text x="82" y="234" class="b3">knowledge.sqlite</text>
+    <text x="82" y="252" class="b3">.worklog.sqlite</text>
+  </g>
+
+  <!-- Step 2 -->
+  <g filter="url(#s3)">
+    <rect x="300" y="160" width="196" height="104" rx="14" fill="#ffffff" stroke="#e2e8f0"/>
+    <circle cx="322" cy="184" r="12" fill="#d97706"/><text x="317" y="188" class="step">2</text>
+    <text x="342" y="188" class="n3">自动云端同步</text>
+    <text x="318" y="214" class="b3">随插件云端同步执行</text>
+    <text x="318" y="234" class="b3">按修订号幂等</text>
+    <text x="318" y="252" class="b3">只上传正文与元数据</text>
+  </g>
+
+  <!-- Step 3 -->
+  <g filter="url(#s3)">
+    <rect x="536" y="160" width="196" height="104" rx="14" fill="#ffffff" stroke="#e2e8f0"/>
+    <circle cx="558" cy="184" r="12" fill="#2563eb"/><text x="553" y="188" class="step">3</text>
+    <text x="578" y="188" class="n3">云端日报库</text>
+    <text x="554" y="214" class="b3">成员 / 日期 / 修订 / 正文</text>
+    <text x="554" y="234" class="b3">TEAM_WORKLOG_BASE</text>
+    <text x="554" y="252" class="b3">登录成员与角色权限</text>
+  </g>
+
+  <!-- Step 4 -->
+  <g filter="url(#s3)">
+    <rect x="772" y="160" width="196" height="104" rx="14" fill="#ffffff" stroke="#e2e8f0"/>
+    <circle cx="794" cy="184" r="12" fill="#7c3aed"/><text x="789" y="188" class="step">4</text>
+    <text x="814" y="188" class="n3">定时大模型调用</text>
+    <text x="790" y="214" class="b3">严格 JSON 输出</text>
+    <text x="790" y="234" class="b3">summary · keywords · wiki</text>
+    <text x="790" y="252" class="b3">无模型时抽取式回退</text>
+  </g>
+
+  <!-- Step 5 -->
+  <g filter="url(#s3)">
+    <rect x="1008" y="160" width="128" height="104" rx="14" fill="#ffffff" stroke="#e2e8f0"/>
+    <circle cx="1030" cy="184" r="12" fill="#059669"/><text x="1025" y="188" class="step">5</text>
+    <text x="1050" y="188" class="n3">草稿产出</text>
+    <text x="1026" y="214" class="b3">汇总待审核</text>
+    <text x="1026" y="234" class="b3">Wiki 草稿</text>
+    <text x="1026" y="252" class="b3">关键词与文档</text>
+  </g>
+
+  <!-- arrows -->
+  <path d="M260 212 H300" stroke="#94a3b8" stroke-width="1.5" marker-end="url(#a3)"/>
+  <path d="M496 212 H536" stroke="#94a3b8" stroke-width="1.5" marker-end="url(#a3)"/>
+  <path d="M732 212 H772" stroke="#94a3b8" stroke-width="1.5" marker-end="url(#a3)"/>
+  <path d="M968 212 H1008" stroke="#94a3b8" stroke-width="1.5" marker-end="url(#a3)"/>
+
+  <!-- Outputs -->
+  <text x="64" y="330" font-family="'Segoe UI', 'Microsoft YaHei', sans-serif" font-size="12" font-weight="700" fill="#0f172a">一次调用，四类可核验产出</text>
+
+  <g filter="url(#s3)">
+    <rect x="64" y="352" width="252" height="146" rx="16" fill="#ffffff" stroke="#e2e8f0"/>
+    <rect x="82" y="372" width="34" height="34" rx="9" fill="#eff6ff"/>
+    <path d="M92 382h14M92 388h14M92 394h9M92 400h6" stroke="#2563eb" stroke-width="1.6" stroke-linecap="round"/>
+    <text x="130" y="390" class="n3">团队日报汇总</text>
+    <text x="82" y="418" class="b3">进展 · 阻塞 · 下一步</text>
+    <text x="82" y="439" class="b3">按成员和日期保留事实</text>
+    <text x="82" y="460" class="b3">草稿状态，人工发布</text>
+    <text x="82" y="481" class="b3">同范围重生成会更新</text>
+  </g>
+
+  <g filter="url(#s3)">
+    <rect x="340" y="352" width="252" height="146" rx="16" fill="#ffffff" stroke="#e2e8f0"/>
+    <rect x="358" y="372" width="34" height="34" rx="9" fill="#ecfdf5"/>
+    <path d="M369 383l-5 3 5 3m7-6 5 3-5 3" fill="none" stroke="#059669" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/>
+    <text x="406" y="390" class="n3">可检索关键词</text>
+    <text x="358" y="418" class="b3">模型输出 3–20 个实体</text>
+    <text x="358" y="439" class="b3">写入日报汇总与文档标签</text>
+    <text x="358" y="460" class="b3">参与知识库全文搜索</text>
+    <text x="358" y="481" class="b3">无模型时本地关键词回退</text>
+  </g>
+
+  <g filter="url(#s3)">
+    <rect x="616" y="352" width="252" height="146" rx="16" fill="#ffffff" stroke="#e2e8f0"/>
+    <rect x="634" y="372" width="34" height="34" rx="9" fill="#f5f3ff"/>
+    <path d="M644 382h12v13h-12zM644 382v-2h7l2 2M647 388h6M647 392h6" fill="none" stroke="#7c3aed" stroke-width="1.5" stroke-linecap="round"/>
+    <text x="682" y="390" class="n3">团队 Wiki 草稿</text>
+    <text x="634" y="418" class="b3">主题 · 结论 · 待确认事项</text>
+    <text x="634" y="439" class="b3">附日报成员与日期来源</text>
+    <text x="634" y="460" class="b3">已发布旧版不覆盖</text>
+    <text x="634" y="481" class="b3">版本历史与恢复</text>
+  </g>
+
+  <g filter="url(#s3)">
+    <rect x="892" y="352" width="244" height="146" rx="16" fill="#ffffff" stroke="#e2e8f0"/>
+    <rect x="910" y="372" width="34" height="34" rx="9" fill="#fff7ed"/>
+    <path d="M921 381h12l3 3v13h-15zM933 381v4h4M925 393h6M925 398h4" fill="none" stroke="#d97706" stroke-width="1.5" stroke-linecap="round"/>
+    <text x="958" y="390" class="n3">可搜索知识文档</text>
+    <text x="910" y="418" class="b3">团队日报 · 日期</text>
+    <text x="910" y="439" class="b3">分组：工作日报/团队汇总</text>
+    <text x="910" y="460" class="b3">标签：团队日报 + 关键词</text>
+    <text x="910" y="481" class="b3">问答引用和搜索命中</text>
+  </g>
+
+  <!-- Bottom guarantee -->
+  <g filter="url(#s3)">
+    <rect x="64" y="536" width="1072" height="86" rx="16" fill="#0f172a"/>
+    <text x="88" y="568" font-family="'Segoe UI', 'Microsoft YaHei', sans-serif" font-size="12" font-weight="700" fill="#f8fafc">默认安全策略</text>
+    <text x="88" y="592" font-family="'Segoe UI', 'Microsoft YaHei', sans-serif" font-size="11.5" fill="#cbd5e1">自动生成草稿，不自动发布 · 已发布内容不覆盖 · 汇总不修改成员日报 · 无日报不调用 · 模型输出无效时回退抽取式</text>
+    <text x="88" y="612" font-family="'Segoe UI', 'Microsoft YaHei', sans-serif" font-size="11.5" fill="#94a3b8">后台开关 TEAM_AUTO_WIKI / TEAM_AUTO_WORKLOG 真正控制执行；管理员手动运行可明确选择任务。</text>
+  </g>
+
+  <text x="64" y="660" font-family="'Segoe UI', 'Microsoft YaHei', sans-serif" font-size="10.5" fill="#94a3b8">自动任务默认每 30 分钟巡检；团队日报汇总默认每天 19:00 后生成当天草稿。</text>
+</svg>

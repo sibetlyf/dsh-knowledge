@@ -5,6 +5,8 @@
 [![GitHub](https://img.shields.io/badge/GitHub-sibetlyf%2Fdsh--knowledge-blue)](https://github.com/sibetlyf/dsh-knowledge)
 [![Release](https://img.shields.io/github/v/release/sibetlyf/dsh-knowledge?display_name=tag)](https://github.com/sibetlyf/dsh-knowledge/releases)
 
+**[产品手册](docs/product-manual.md)** · [系统架构](docs/architecture.md) · [使用与配置](docs/usage.md) · [团队云端部署](cloud/README.md)
+
 ## 独立团队知识库
 
 `cloud/` 提供一个不需要安装 DSH 的独立团队知识库服务：浏览器登录、成员邀请、角色权限、共同编辑与版本冲突保护，另有任意类型文件库和 `cloud/sync-local.mjs` 本地知识库同步工具。插件设置页还提供「云端同步」卡片，连接后自动建立本地镜像并双向同步。部署方式见 [cloud/README.md](cloud/README.md)。这是独立服务，不会改变 DSH 插件本身的本地/远程模式。
@@ -13,7 +15,7 @@
 
 - 文件库与知识文档支持 PDF、DOCX、XLSX、PPTX、EPUB、RTF、Markdown 和文本解析；旧版 `.xls` 需要另存为 `.xlsx`，图片与扫描件在未配置 OCR 时明确标记为仅存储，不伪造索引。
 - 知识库与文档分组、全文检索、项目和会话挂载，按权限召回与回写。
-- 会话只暴露一个 `knowledge` 工具入口，按需发现、查看参数和执行 19 项知识库／笔记操作；不改变挂载和确认权限。见[统一工具入口](docs/tool-entry.md)。
+- 会话只暴露一个 `knowledge` 工具入口，按需发现、查看参数和执行 22 项知识库／笔记／工作记录操作；不改变挂载和确认权限。见[统一工具入口](docs/tool-entry.md)。
 - 回答完成后在后台独立提取知识，提供审核、版本历史、冲突保护、任务重试与文档封存。
 - 独立笔记文档与目录：编辑、预览、分享、历史恢复；输入框 `@` 可搜索并引用笔记文档及上传的可编辑文本文件（Markdown、纯文本、代码和配置文件）。
 - 内置工作日报：按本机工作目录选择采集范围，可显式包含子目录；支持补记、整理与导出，默认开启每天 23:30 的保底整理，可独立关闭，补充当天新增素材（按日报时区）。

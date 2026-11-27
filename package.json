@@ -49,6 +49,7 @@
     "cordis.patch.yml",
     "web",
     "docs/**/*.md",
+    "docs/assets/**/*.svg",
     "README.md",
     "LICENSE",
     "docs/releases/2.11.2.md",
