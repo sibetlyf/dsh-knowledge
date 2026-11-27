@@ -685,9 +685,23 @@ async function summarizeTeamWorklogs({ baseId, fromDay, toDay, actor, force = fa
   const wikiPage = wikiExisting === undefined || wikiExisting.status === 'published'
     ? team.createWikiPage({ baseId, slug: wikiExisting === undefined ? slug : `${slug}-${Date.now().toString(36)}`, title: wikiTitle, content: wikiMarkdown, createdBy: actor ?? null, status: 'draft', sources })
     : team.updateWikiPage(wikiExisting.id, { title: wikiTitle, content: wikiMarkdown, status: 'draft', updatedBy: actor ?? null, sources })
-  team.updateWorklogSummary(summary.id, { wikiPageId: wikiPage.id })
+  const documentBody = `${summaryMarkdown}\n\n## 关键词\n\n${keywords.map(keyword => `- ${keyword}`).join('\n') || '- 暂无'}`
+  const documentDraft = {
+    knowledgeBaseId: baseId,
+    title: `团队日报 · ${from}${from === to ? '' : ` ~ ${to}`}`,
+    body: documentBody,
+    group: '工作日报/团队汇总',
+    type: 'fact',
+    tags: ['团队日报', ...keywords],
+    scope: { kind: 'global' },
+    confidence: 0.85,
+  }
+  let document = summary.document_id === null || summary.document_id === undefined ? undefined : await provider.get(summary.document_id)
+  if (document !== undefined && document.status === 'active') document = await provider.update(document.id, documentDraft, undefined, document.version)
+  else document = await provider.create(documentDraft)
+  team.updateWorklogSummary(summary.id, { wikiPageId: wikiPage.id, documentId: document.id })
   team.audit(actor ?? null, 'worklog.summarize', summary.id, `${from}..${to} ${logs.length} 天`)
-  return { summary: team.getWorklogSummary(summary.id), members: [...new Set(logs.map(row => row.user_name))], days: logs.length, keywords, wiki: wikiPage, citations: logs.map(row => `${row.user_name}/${row.day}`) }
+  return { summary: team.getWorklogSummary(summary.id), members: [...new Set(logs.map(row => row.user_name))], days: logs.length, keywords, wiki: wikiPage, document, citations: logs.map(row => `${row.user_name}/${row.day}`) }
 }
 
 async function upsertAutoWiki(baseId) {

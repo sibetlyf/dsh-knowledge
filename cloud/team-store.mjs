@@ -192,6 +192,7 @@ export class TeamStore {
         engine TEXT NOT NULL DEFAULT 'extractive',
         keywords TEXT NOT NULL DEFAULT '[]',
         wiki_page_id TEXT,
+        document_id TEXT,
         created_at TEXT NOT NULL,
         updated_at TEXT NOT NULL
       );
@@ -207,6 +208,7 @@ export class TeamStore {
     const summaryColumns = this.db.prepare('PRAGMA table_info(worklog_summaries)').all().map(column => column.name)
     if (!summaryColumns.includes('keywords')) this.db.exec("ALTER TABLE worklog_summaries ADD COLUMN keywords TEXT NOT NULL DEFAULT '[]'")
     if (!summaryColumns.includes('wiki_page_id')) this.db.exec('ALTER TABLE worklog_summaries ADD COLUMN wiki_page_id TEXT')
+    if (!summaryColumns.includes('document_id')) this.db.exec('ALTER TABLE worklog_summaries ADD COLUMN document_id TEXT')
   }
 
   close() {
@@ -494,17 +496,17 @@ export class TeamStore {
     return this.db.prepare('SELECT * FROM worklog_summaries WHERE id=?').get(id)
   }
 
-  createWorklogSummary({ baseId, fromDay, toDay, markdown, status = 'draft', engine = 'extractive', keywords = [], wikiPageId = null }) {
+  createWorklogSummary({ baseId, fromDay, toDay, markdown, status = 'draft', engine = 'extractive', keywords = [], wikiPageId = null, documentId = null }) {
     const id = randomUUID()
     const now = new Date().toISOString()
-    this.db.prepare(`INSERT INTO worklog_summaries (id,base_id,from_day,to_day,markdown,status,engine,keywords,wiki_page_id,created_at,updated_at)
-      VALUES (?,?,?,?,?,?,?,?,?,?,?)`).run(id, baseId, fromDay, toDay, markdown, status, engine, JSON.stringify(keywords), wikiPageId, now, now)
+    this.db.prepare(`INSERT INTO worklog_summaries (id,base_id,from_day,to_day,markdown,status,engine,keywords,wiki_page_id,document_id,created_at,updated_at)
+      VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`).run(id, baseId, fromDay, toDay, markdown, status, engine, JSON.stringify(keywords), wikiPageId, documentId, now, now)
     return this.getWorklogSummary(id)
   }
 
-  updateWorklogSummary(id, { markdown, status, keywords, wikiPageId }) {
-    this.db.prepare('UPDATE worklog_summaries SET markdown=COALESCE(?,markdown), status=COALESCE(?,status), keywords=COALESCE(?,keywords), wiki_page_id=COALESCE(?,wiki_page_id), updated_at=? WHERE id=?')
-      .run(markdown ?? null, status ?? null, keywords === undefined ? null : JSON.stringify(keywords), wikiPageId ?? null, new Date().toISOString(), id)
+  updateWorklogSummary(id, { markdown, status, keywords, wikiPageId, documentId }) {
+    this.db.prepare('UPDATE worklog_summaries SET markdown=COALESCE(?,markdown), status=COALESCE(?,status), keywords=COALESCE(?,keywords), wiki_page_id=COALESCE(?,wiki_page_id), document_id=COALESCE(?,document_id), updated_at=? WHERE id=?')
+      .run(markdown ?? null, status ?? null, keywords === undefined ? null : JSON.stringify(keywords), wikiPageId ?? null, documentId ?? null, new Date().toISOString(), id)
     return this.getWorklogSummary(id)
   }
 

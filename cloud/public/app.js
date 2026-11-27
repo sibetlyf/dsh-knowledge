@@ -436,6 +436,7 @@ function renderWorklogDetail() {
       h('div', {}, h('p', { class: 'eyebrow', text: `团队日报 · ${summary.engine === 'model' ? '模型汇总' : '抽取式汇总'}` }), h('h1', { text: `${summary.from_day}${summary.to_day === summary.from_day ? '' : ` ~ ${summary.to_day}`}` }), h('p', { class: 'source-repo', text: `${memberNames.join('、') || '暂无成员'} · ${summary.status === 'published' ? '已发布' : '待审核'}` })),
       h('div', { class: 'doc-actions' },
         summary.wiki_page_id ? h('button', { type: 'button', class: 'btn', onClick: async () => { state.view = 'wiki'; await openWiki(summary.wiki_page_id) }, text: '打开 Wiki 草稿' }) : null,
+        summary.document_id ? h('button', { type: 'button', class: 'btn', onClick: async () => { state.view = 'documents'; await openDocument(summary.document_id) }, text: '打开知识文档' }) : null,
         state.me.canEdit ? h('button', { type: 'button', class: 'btn primary', onClick: () => void summarizeWorklogs(), text: '重新汇总今日' }) : null,
         state.me.canEdit ? h('button', { type: 'button', class: 'btn', onClick: async () => {
           try { const updated = await api(`/api/worklogs/summaries/${encodeURIComponent(summary.id)}`, { method: 'PATCH', body: JSON.stringify({ status: 'published' }) }); state.worklogSummary = updated.summary; toast('汇总已标记发布'); render() } catch (error) { toast(error.message, 'error') }
