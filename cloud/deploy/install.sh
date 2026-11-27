@@ -14,6 +14,7 @@ DATA_DIR="${TEAM_DATA_DIR:-$BASE_DIR/data}"
 ENV_FILE="${TEAM_ENV_FILE:-/etc/team-kb.env}"
 SERVICE="${TEAM_SERVICE:-team-kb}"
 OWNER="${TEAM_SERVICE_USER:-teamkb}"
+SERVICE_GROUP="$OWNER"
 PORT="${TEAM_PORT:-8787}"
 HOST="${TEAM_HOST:-127.0.0.1}"
 DOMAIN="${TEAM_DOMAIN:-}"
@@ -190,6 +191,7 @@ prepare_owner() {
       die "无法创建用户 $OWNER；请手动创建或使用 --user"
     fi
   fi
+  SERVICE_GROUP="$(id -gn "$OWNER" 2>/dev/null || echo "$OWNER")"
 }
 
 stop_existing() {
@@ -245,13 +247,13 @@ TEAM_WORKLOG_BASE=default
 TEAM_WORKLOG_SUMMARY_HOUR=19
 TEAM_AUTO_INTERVAL_MINUTES=30
 EOF
-  chown root:"$OWNER" "$ENV_FILE" 2>/dev/null || chown root:root "$ENV_FILE"
+  chown root:"$SERVICE_GROUP" "$ENV_FILE" 2>/dev/null || chown root:root "$ENV_FILE"
   chmod 640 "$ENV_FILE"
 }
 
 install_app() {
   mkdir -p "$BASE_DIR" "$DATA_DIR" "$(dirname "$APP_DIR")"
-  chown "$OWNER":"$OWNER" "$BASE_DIR" "$DATA_DIR"
+  chown "$OWNER":"$SERVICE_GROUP" "$BASE_DIR" "$DATA_DIR"
   chmod 700 "$DATA_DIR"
   if [ -d "$APP_DIR/cloud-data" ]; then
     die "数据目录位于应用目录内：$APP_DIR/cloud-data；请先迁移到 $DATA_DIR，避免升级丢失"
@@ -263,17 +265,17 @@ install_app() {
   fi
   rm -rf "$APP_DIR"
   cp -a "$TMP/package" "$APP_DIR"
-  chown -R "$OWNER":"$OWNER" "$APP_DIR"
+  chown -R "$OWNER":"$SERVICE_GROUP" "$APP_DIR"
   chmod -R u+rwX,go+rX "$APP_DIR"
   log "安装 Node 生产依赖（PDF/Office 解析）"
   if ! (cd "$APP_DIR" && npm install --omit=dev --ignore-scripts --no-audit --no-fund); then
     if [ -n "$BACKUP" ] && [ -d "$BACKUP" ]; then
       rm -rf "$APP_DIR"; cp -a "$BACKUP" "$APP_DIR"
-      chown -R "$OWNER":"$OWNER" "$APP_DIR"
+      chown -R "$OWNER":"$SERVICE_GROUP" "$APP_DIR"
     fi
     die "依赖安装失败；已回滚（如存在备份）"
   fi
-  chown -R "$OWNER":"$OWNER" "$APP_DIR"
+  chown -R "$OWNER":"$SERVICE_GROUP" "$APP_DIR"
 }
 
 write_service() {
@@ -289,7 +291,7 @@ After=network.target
 [Service]
 Type=simple
 User=$OWNER
-Group=$OWNER
+Group=$SERVICE_GROUP
 WorkingDirectory=$APP_DIR
 EnvironmentFile=$ENV_FILE
 ExecStart=$node_bin $APP_DIR/cloud/server.mjs
@@ -333,7 +335,7 @@ rollback_and_fail() {
   systemctl stop "$SERVICE" 2>/dev/null || true
   if [ -n "$BACKUP" ] && [ -d "$BACKUP" ]; then
     rm -rf "$APP_DIR"; cp -a "$BACKUP" "$APP_DIR"
-    chown -R "$OWNER":"$OWNER" "$APP_DIR"
+    chown -R "$OWNER":"$SERVICE_GROUP" "$APP_DIR"
     systemctl start "$SERVICE" 2>/dev/null || true
     warn "已回滚到 $BACKUP；查看 journalctl -u $SERVICE -n 100 --no-pager"
   fi
