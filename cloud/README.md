@@ -403,6 +403,9 @@ node cloud/sync-local.mjs \
 | `--mirror` | 拉取到独立本地镜像库 `云端·<库名>`，原本地库保持不变 |
 | `--mirror-prefix` | 镜像库名前缀，默认 `云端·` |
 | `--user` | 文件归属的用户名，默认本机用户名；云端按它建立子目录 |
+| `--team-worklogs` | 默认开启团队日报只读镜像；传 `0` 关闭 |
+| `--worklog-db` | 本地日报数据库；默认 `<db>.worklog.sqlite` |
+| `--worklog-base` | 云端日报目标库，默认 `default` |
 
 也可以用环境变量：
 
@@ -424,8 +427,21 @@ CLOUD_TOKEN=dshk_... \
 CLOUD_SYNC_PULL=1 \
 CLOUD_SYNC_MIRROR=1 \
 CLOUD_SYNC_FILES_OUT=/data/cloud-files \
+CLOUD_SYNC_TEAM_WORKLOGS=1 \
 node cloud/sync-local.mjs
 ```
+
+拉取流程会额外把云端所有成员日报和小组汇总写入本地独立知识库「团队日报」：
+
+```text
+团队日报/
+├── 成员日报/<成员>/团队日报 · 成员 · 日期
+└── 团队汇总/团队日报汇总 · 起止日期
+```
+
+这是**只读镜像**，不会写入个人日报数据库 `knowledge.sqlite.worklog.sqlite`。团队日报的整理仍以云端汇总为权威；每个终端自动同步同一份汇总，避免各终端模型生成不同版本。已在本地人工修改的镜像文档会保留，不静默覆盖。
+
+CloudSync 插件自动同步默认开启这一镜像；需要关闭时设置 `CLOUD_SYNC_TEAM_WORKLOGS=0`。
 
 云端数据丢失、但本地还保留 `云端·` 镜像库时，可以把镜像回灌到云端同名知识库：
 

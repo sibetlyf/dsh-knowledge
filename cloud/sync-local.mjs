@@ -18,11 +18,13 @@ function usage() {
   --restore-mirror  云端数据丢失时，把本地“云端·”镜像库回灌到云端同名知识库
   --user <名字>  文件按这个名字建立云端子目录，默认本机用户名
   --files-out <目录>  同时下载云端文件
+  --team-worklogs 0  关闭团队日报只读镜像（默认开启）
 
 环境变量也可以:
   LOCAL_KB_DB, CLOUD_URL, CLOUD_TOKEN, CLOUD_SYNC_FILES, CLOUD_SYNC_BASE, CLOUD_SYNC_MAP
   CLOUD_SYNC_PULL=1, CLOUD_SYNC_FILES_OUT
-  CLOUD_SYNC_WORKLOG_DB（默认 <db>.worklog.sqlite）, CLOUD_SYNC_WORKLOG_BASE（默认 default）`)
+  CLOUD_SYNC_WORKLOG_DB（默认 <db>.worklog.sqlite）, CLOUD_SYNC_WORKLOG_BASE（默认 default）
+  CLOUD_SYNC_TEAM_WORKLOGS=0 可关闭团队日报只读镜像`)
 }
 
 function args() {
@@ -53,6 +55,7 @@ const userName = String(options.user ?? process.env.CLOUD_SYNC_USER ?? userInfo(
 const baseFilter = options.base ?? process.env.CLOUD_SYNC_BASE
 const worklogDb = options['worklog-db'] ?? process.env.CLOUD_SYNC_WORKLOG_DB ?? (existsSync(`${db}.worklog.sqlite`) ? `${db}.worklog.sqlite` : '')
 const worklogBase = options['worklog-base'] ?? process.env.CLOUD_SYNC_WORKLOG_BASE ?? 'default'
+const teamWorklogDocs = options['team-worklogs'] !== '0' && process.env.CLOUD_SYNC_TEAM_WORKLOGS !== '0'
 const mapPath = resolve(options.map ?? process.env.CLOUD_SYNC_MAP ?? `${db}.cloud-sync.json`)
 if (db === '' || url === '' || token === '') {
   usage()
@@ -436,6 +439,95 @@ async function syncWorklogs(map) {
   return { pushed, skipped }
 }
 
+function hashText(text) {
+  return createHash('sha256').update(String(text)).digest('hex')
+}
+
+async function ensureTeamBase(local) {
+  const bases = await local.listKnowledgeBases()
+  const base = bases.find(base => base.status === 'active' && base.name === '团队日报')
+    ?? await local.createKnowledgeBase({
+      name: '团队日报',
+      description: '云端团队日报只读镜像：成员日报与小组汇总',
+      defaultTags: ['团队日报'],
+      extractionInstructions: '只读镜像；不要把团队日报自动改写进个人日报',
+      writebackPolicy: 'conservative',
+    })
+  return base
+}
+
+async function upsertTeamDoc(local, map, key, baseId, doc) {
+  map.teamDocs ??= {}
+  const bodyHash = hashText(doc.body)
+  const known = map.teamDocs[key]
+  let existing = known?.localId ? await local.get(known.localId).catch(() => undefined) : undefined
+  if (existing !== undefined && existing.status === 'active') {
+    if (hashText(existing.body) === bodyHash) return 'skipped'
+    if (known.hash !== undefined && hashText(existing.body) !== known.hash) {
+      console.warn(`  团队日报本地文档已人工修改，保留本地：${doc.title}`)
+      return 'conflict'
+    }
+    await local.update(existing.id, { ...doc, knowledgeBaseId: baseId }, undefined, existing.version)
+  } else {
+    existing = await local.create({ ...doc, knowledgeBaseId: baseId })
+  }
+  map.teamDocs[key] = { localId: existing.id, hash: bodyHash }
+  return 'updated'
+}
+
+async function syncTeamWorklogDocs(local, remote, map) {
+  if (!teamWorklogDocs) return { members: 0, summaries: 0 }
+  const data = await remote.request(`worklogs?${new URLSearchParams({ baseId: worklogBase })}`)
+  const logs = Array.isArray(data?.logs) ? data.logs : []
+  const summaries = Array.isArray(data?.summaries) ? data.summaries : []
+  if (logs.length === 0 && summaries.length === 0) return { members: 0, summaries: 0 }
+  const base = await ensureTeamBase(local)
+  map.teamBaseId = base.id
+  let memberCount = 0
+  let summaryCount = 0
+  for (const log of logs) {
+    const day = String(log.day ?? '')
+    const userName = String(log.user_name ?? '未署名')
+    if (day === '') continue
+    try {
+      const outcome = await upsertTeamDoc(local, map, `member:${userName}:${day}`, base.id, {
+        title: `团队日报 · ${userName} · ${day}`,
+        body: `> 来源：云端团队日报 · ${userName} · ${day}\n\n${String(log.markdown ?? '')}`,
+        group: `成员日报/${userName}`,
+        type: 'fact',
+        tags: ['团队日报', userName, day],
+        scope: { kind: 'global' },
+        confidence: 0.9,
+      })
+      if (outcome === 'updated') memberCount += 1
+    } catch (error) {
+      console.error(`  团队日报同步失败: ${userName}/${day} — ${error.message}`)
+    }
+  }
+  for (const summary of summaries) {
+    const from = String(summary.from_day ?? '')
+    const to = String(summary.to_day ?? from)
+    if (from === '') continue
+    let keywords = []
+    try { keywords = JSON.parse(String(summary.keywords ?? '[]')) } catch {}
+    try {
+      const outcome = await upsertTeamDoc(local, map, `summary:${summary.id}`, base.id, {
+        title: `团队日报汇总 · ${from}${from === to ? '' : ` ~ ${to}`}`,
+        body: `> 来源：云端团队汇总 · ${summary.engine === 'model' ? '模型' : '抽取式'}\n\n${String(summary.markdown ?? '')}\n\n## 关键词\n\n${keywords.map(keyword => `- ${keyword}`).join('\n') || '- 暂无'}`,
+        group: '团队汇总',
+        type: 'fact',
+        tags: ['团队日报', '团队汇总', ...keywords],
+        scope: { kind: 'global' },
+        confidence: 0.9,
+      })
+      if (outcome === 'updated') summaryCount += 1
+    } catch (error) {
+      console.error(`  团队汇总同步失败: ${from} — ${error.message}`)
+    }
+  }
+  return { members: memberCount, summaries: summaryCount }
+}
+
 async function main() {
   const local = new LocalKnowledgeProvider(db)
   const remote = new RemoteKnowledgeProvider({ url: apiBase, token, timeoutMs: 30_000 })
@@ -448,8 +540,8 @@ async function main() {
   map.sync ??= {}
   const localBases = (await local.listKnowledgeBases()).filter(base => base.status === 'active')
   const selectedBases = baseFilter === undefined
-    ? localBases.filter(base => !new Set(Object.values(map.mirrorBases)).has(base.id))
-    : localBases.filter(base => base.id === baseFilter || base.name === baseFilter)
+    ? localBases.filter(base => !new Set(Object.values(map.mirrorBases)).has(base.id) && base.id !== map.teamBaseId)
+    : localBases.filter(base => base.id !== map.teamBaseId && (base.id === baseFilter || base.name === baseFilter))
   if (mirror && !pull) throw new Error('--mirror 只能和 --pull 一起使用')
   if (!pull && selectedBases.length === 0) throw new Error('没有匹配的本地知识库')
   if (!pull && filesDir !== undefined && selectedBases.length > 1 && baseFilter === undefined) {
@@ -464,6 +556,13 @@ async function main() {
   }
   if (pull) {
     await pullCloud(local, remote, map, remoteBases, localBases)
+    try {
+      const team = await syncTeamWorklogDocs(local, remote, map)
+      await saveMap(map)
+      console.log(`\n团队日报镜像：成员 ${team.members}，汇总 ${team.summaries}`)
+    } catch (error) {
+      console.warn(`团队日报镜像跳过：${error.message}`)
+    }
     await local.close().catch(() => {})
     return
   }

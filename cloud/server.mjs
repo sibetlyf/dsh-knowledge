@@ -803,7 +803,10 @@ async function handle(req, res) {
       const canWrite = Array.isArray(actor.permissions) && actor.permissions.includes('write')
       if (method === 'GET') {
         const baseId = url.searchParams.get('baseId') ?? 'default'
-        return sendJson(res, 200, { logs: team.listWorklogs(baseId, url.searchParams.get('from') ?? '', url.searchParams.get('to') ?? '') })
+        return sendJson(res, 200, {
+          logs: team.listWorklogs(baseId, url.searchParams.get('from') ?? '', url.searchParams.get('to') ?? ''),
+          summaries: team.listWorklogSummaries(baseId, 100),
+        })
       }
       if (!canWrite) throw new HttpError(403, 'Token 没有 write 权限')
       const body = await readJson(req)
